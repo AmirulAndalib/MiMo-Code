@@ -342,6 +342,32 @@ Max Mode（并行 best-of-N 推理 + 裁判选优）可通过配置中的 `exper
 
 </details>
 
+<details>
+<summary><strong>跳过权限确认（<code>--dangerously-skip-permissions</code>）</strong></summary>
+
+在可信、可丢弃的环境（容器、沙箱、CI）中，你可以让智能体自动放行所有操作，而不必逐个确认：
+
+```bash
+# TUI —— 启动时会弹出一次红色警告，需你明确接受风险
+mimo --dangerously-skip-permissions
+
+# 无头模式
+mimo run --dangerously-skip-permissions "你的提示词"
+
+# 或通过环境变量（任意入口）
+MIMOCODE_DANGEROUSLY_SKIP_PERMISSIONS=1 mimo
+```
+
+它会在你的配置**下方**注入一条“全部放行”的基础规则，因此没有任何规则的工具会自动放行——但你写下的
+任何显式规则仍然优先（最后匹配的规则生效，你的规则排在注入的 `*` 之后）。`deny` 依然拦截；注意残留的
+`ask` 规则同样仍会弹出询问，而顶层 `"*": "ask"` 会让该参数失效。在 TUI 中会显示红色警告并要求你确认后
+才生效（无 TTY 时会跳过该提示，因此在 CI 中会在无确认的情况下启用）。
+
+**这非常危险。** 一旦跳过权限确认，恶意的提示词、文件或插件就能在无任何确认的情况下执行任意 Shell
+命令，并读取、修改或窃取你的数据。请仅在你完全信任的工作区中使用。
+
+</details>
+
 ---
 
 ## 开发

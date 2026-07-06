@@ -927,6 +927,13 @@ export const layer = Layer.effect(
           })
         }
 
+        if (Flag.MIMOCODE_DANGEROUSLY_SKIP_PERMISSIONS) {
+          // Allow-all base, merged UNDER user config so an explicit deny still
+          // wins. Matches `mimo run --dangerously-skip-permissions`: auto-approve
+          // everything not explicitly denied.
+          result.permission = mergeDeep({ "*": "allow" } as ConfigPermission.Info, result.permission ?? {})
+        }
+
         if (Flag.MIMOCODE_PERMISSION) {
           result.permission = mergeDeep(result.permission ?? {}, JSON.parse(Flag.MIMOCODE_PERMISSION))
         }
