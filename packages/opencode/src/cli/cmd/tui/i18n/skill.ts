@@ -4,7 +4,7 @@ const BUILTIN = new Set([
   "pdf-official",
   "pptx-official",
   "mimocode",
-  "self-extend",
+  "evolve",
   "frontend-design",
   "loop",
   "html-to-video-pipeline",

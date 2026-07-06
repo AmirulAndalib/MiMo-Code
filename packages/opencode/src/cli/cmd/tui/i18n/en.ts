@@ -202,7 +202,7 @@ export const dict: Record<string, string> = {
   "tui.skill.pdf-official.description": "Create, edit, transform, and read PDF files",
   "tui.skill.pptx-official.description": "Create, edit, and read Microsoft PowerPoint (.pptx) decks",
   "tui.skill.mimocode.description": "Self-documentation for MiMoCode features, config, and commands",
-  "tui.skill.self-extend.description": "Extend your own capabilities with new skills, tools, and hooks",
+  "tui.skill.evolve.description": "Rewrite any layer of yourself — tools, behavior hooks, knowledge, workflows, even the UI",
   "tui.skill.frontend-design.description": "Guidance for distinctive, intentional visual UI design",
   "tui.skill.loop.description": "Schedule a prompt to run on a recurring interval",
   "tui.skill.html-to-video-pipeline.description": "Short-video magic — make short videos with HTML",

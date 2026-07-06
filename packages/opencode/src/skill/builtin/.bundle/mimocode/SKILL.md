@@ -27,7 +27,7 @@ MiMoCode (CLI binary `mimo`) is an agentic coding tool with a terminal UI, built
 | **Distill** | Packages repeated manual workflows into skills/subagents/commands | `/distill` |
 | **Scheduled prompts** | Cron/loop: inject a prompt on a schedule or repeating loop (UTC, 5-field) | `cron` tool · `/loop` · `/loops` |
 | **Dynamic workflows** | JS scripts that orchestrate many subagents deterministically (fan-out, pipelines, nesting); built-ins `compose`, `deep-research` & `fact-check` | `.mimocode/workflows/*.js` + `workflow` tool |
-| **Skills / self-extension** | Add tools, hooks, skills under `.mimocode/` | see the `self-extend` skill |
+| **Skills / self-extension** | Add tools, hooks, skills under `.mimocode/` | see the `evolve` skill |
 | **MCP** | Local & remote Model Context Protocol servers | `mcp` config + `mimo mcp` |
 
 ## Configuration Basics
@@ -73,11 +73,11 @@ When asked to change a behavior:
 3. Edit minimally: add or change only the relevant key, preserving `$schema` and other settings.
 4. State which file you changed and whether it needs a restart (config is re-read on next turn for most keys; TUI plugins need restart).
 
-Don't invent config keys. If a requested behavior has no key, say so and suggest the closest supported option or the `self-extend` route (a hook/tool).
+Don't invent config keys. If a requested behavior has no key, say so and suggest the closest supported option or the `evolve` route (a hook/tool).
 
 ## Answering Feature Questions
 
 - Confirm the feature exists in the map above before describing it.
 - Give the trigger (command / key / config), then a one-line how.
-- For extending capabilities (new tools/hooks/skills), defer to the `self-extend` skill rather than duplicating it.
+- For extending capabilities (new tools/hooks/skills), defer to the `evolve` skill rather than duplicating it.
 - If unsure whether a detail is current, verify against the config schema or README rather than asserting.

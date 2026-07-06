@@ -46,6 +46,12 @@ type ToolContext = {
     title?: string
     metadata?: Record<string, any>
   }): void
+  ask(input: {             // Request user permission before a sensitive action
+    permission: string     // Permission name (e.g. "network", "external_directory")
+    patterns: string[]     // What's being accessed (shown to user)
+    always: string[]       // Patterns the user can choose to "always allow"
+    metadata: Record<string, any>
+  }): Effect.Effect<void>  // Effect-typed — in plain async code: await Effect.runPromise(ctx.ask({...}))
 }
 ```
 

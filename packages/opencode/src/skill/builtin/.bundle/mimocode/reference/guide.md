@@ -141,4 +141,4 @@ The `cron` tool has six verbs:
 
 ## Extending MiMoCode
 
-To add tools, hooks, or skills, use the `self-extend` skill — it covers writing `.mimocode/tools/*.ts`, `.mimocode/hooks/*.ts`, and `.mimocode/skills/*/SKILL.md`, all hot-reloaded on the next turn.
+To add tools, hooks, or skills, use the `evolve` skill — it covers writing `.mimocode/tools/*.ts`, `.mimocode/hooks/*.ts`, and `.mimocode/skills/*/SKILL.md`, all hot-reloaded on the next turn.

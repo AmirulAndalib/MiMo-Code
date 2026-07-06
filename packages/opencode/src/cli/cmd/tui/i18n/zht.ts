@@ -191,7 +191,7 @@ export const dict = {
   "tui.skill.pdf-official.description": "建立、編輯、轉換、讀取 PDF 檔案",
   "tui.skill.pptx-official.description": "建立、編輯、讀取 Microsoft PowerPoint (.pptx) 簡報",
   "tui.skill.mimocode.description": "MiMoCode 功能、設定與命令的自文件參考",
-  "tui.skill.self-extend.description": "透過新技能、工具與掛鉤擴充自身能力",
+  "tui.skill.evolve.description": "改寫自身的一切——工具、行為掛鉤、知識、工作流，乃至介面本身",
   "tui.skill.frontend-design.description": "具備鮮明主張的前端視覺設計指引",
   "tui.skill.loop.description": "依固定週期循環執行提示詞",
   "tui.skill.html-to-video-pipeline.description": "短影片神器 - 利用 HTML 製作短影片",

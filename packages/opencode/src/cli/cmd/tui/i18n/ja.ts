@@ -215,7 +215,7 @@ export const dict = {
   "tui.skill.pdf-official.description": "PDF ファイルの作成・編集・変換・読み取り",
   "tui.skill.pptx-official.description": "Microsoft PowerPoint (.pptx) スライドの作成・編集・読み取り",
   "tui.skill.mimocode.description": "MiMoCode の機能・設定・コマンドに関するセルフドキュメント",
-  "tui.skill.self-extend.description": "新しいスキル・ツール・フックで自身の能力を拡張",
+  "tui.skill.evolve.description": "自身のあらゆる層を書き換える——ツール、フック、知識、ワークフロー、UIまで",
   "tui.skill.frontend-design.description": "個性的で意図的な UI ビジュアルデザインのガイド",
   "tui.skill.loop.description": "プロンプトを一定間隔で繰り返し実行するようスケジュール",
   "tui.skill.html-to-video-pipeline.description": "ショート動画の神ツール - HTML でショート動画を制作",
