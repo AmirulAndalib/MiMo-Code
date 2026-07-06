@@ -1393,10 +1393,13 @@ const layer: Layer.Layer<
           }
 
           const configProvider = cfg.provider?.[providerID]
-          // A non-empty `models` config acts as an implicit whitelist: only the
-          // configured model IDs are shown, hiding the rest of the models.dev catalog.
+          // Opt-in implicit whitelist: only when the provider sets
+          // `only_configured_models: true` does a non-empty `models` map hide the
+          // rest of the catalog. Default (false) preserves the augment-only
+          // behavior — `models` overrides/adds without filtering.
           const configModelKeys = Object.keys(configProvider?.models ?? {})
-          const implicitWhitelist = configModelKeys.length > 0 ? configModelKeys : undefined
+          const implicitWhitelist =
+            configProvider?.only_configured_models && configModelKeys.length > 0 ? configModelKeys : undefined
 
           for (const [modelID, model] of Object.entries(provider.models)) {
             model.api.id = model.api.id ?? model.id ?? modelID

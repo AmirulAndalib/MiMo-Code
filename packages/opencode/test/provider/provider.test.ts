@@ -257,7 +257,7 @@ test("custom model alias via config", async () => {
   })
 })
 
-test("non-empty models config acts as implicit whitelist", async () => {
+test("non-empty models config acts as implicit whitelist when only_configured_models is true", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       await Bun.write(
@@ -266,6 +266,7 @@ test("non-empty models config acts as implicit whitelist", async () => {
           $schema: "https://opencode.ai/config.json",
           provider: {
             anthropic: {
+              only_configured_models: true,
               models: {
                 "claude-sonnet-4-20250514": {
                   name: "Only Sonnet",
@@ -287,6 +288,75 @@ test("non-empty models config acts as implicit whitelist", async () => {
       expect(providers[ProviderID.anthropic]).toBeDefined()
       const models = Object.keys(providers[ProviderID.anthropic].models)
       expect(models).toEqual(["claude-sonnet-4-20250514"])
+    },
+  })
+})
+
+test("models config only augments the catalog by default (no only_configured_models)", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        path.join(dir, "mimocode.json"),
+        JSON.stringify({
+          $schema: "https://opencode.ai/config.json",
+          provider: {
+            anthropic: {
+              models: {
+                "claude-sonnet-4-20250514": {
+                  name: "Renamed Sonnet",
+                },
+              },
+            },
+          },
+        }),
+      )
+    },
+  })
+  await Instance.provide({
+    directory: tmp.path,
+    init: async () => {
+      set("ANTHROPIC_API_KEY", "test-api-key")
+    },
+    fn: async () => {
+      const providers = await list()
+      expect(providers[ProviderID.anthropic]).toBeDefined()
+      const models = Object.keys(providers[ProviderID.anthropic].models)
+      // Old (non-breaking) behavior: the configured model is still present AND
+      // other catalog models are NOT hidden.
+      expect(models).toContain("claude-sonnet-4-20250514")
+      expect(models.length).toBeGreaterThan(1)
+    },
+  })
+})
+
+test("only_configured_models with no models map is a no-op (catalog stays intact)", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        path.join(dir, "mimocode.json"),
+        JSON.stringify({
+          $schema: "https://opencode.ai/config.json",
+          provider: {
+            anthropic: {
+              only_configured_models: true,
+            },
+          },
+        }),
+      )
+    },
+  })
+  await Instance.provide({
+    directory: tmp.path,
+    init: async () => {
+      set("ANTHROPIC_API_KEY", "test-api-key")
+    },
+    fn: async () => {
+      const providers = await list()
+      expect(providers[ProviderID.anthropic]).toBeDefined()
+      const models = Object.keys(providers[ProviderID.anthropic].models)
+      // Empty/absent `models` ⇒ no implicit whitelist ⇒ full catalog remains.
+      expect(models).toContain("claude-sonnet-4-20250514")
+      expect(models.length).toBeGreaterThan(1)
     },
   })
 })
