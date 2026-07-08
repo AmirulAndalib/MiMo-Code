@@ -78,14 +78,40 @@ bun add react react-dom sharp      # rasterization (icons + formulas)
 bun add react-icons                # icon library (FA, MD, etc.)
 bun add mathjax-full               # LaTeX formula rendering
 
-# Type definitions
-bun add -d @types/react @types/react-dom
+# Type definitions (including Bun runtime types)
+bun add -d @types/bun @types/react @types/react-dom
+```
+
+Create a `tsconfig.json` if one doesn't exist:
+```json
+{
+  "compilerOptions": {
+    "lib": ["ESNext"],
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "skipLibCheck": true,
+    "types": ["bun"]
+  }
+}
 ```
 
 Run scripts directly as TypeScript — no transpilation needed:
 ```bash
 bun run create-ppt.ts
 ```
+
+**Always run type checking after writing or modifying TS code:**
+```bash
+bun tsc --noEmit
+```
+Models may inadvertently use outdated PptxGenJS API signatures or
+deprecated syntax without realizing it. A type check catches these
+mismatches before runtime.
 
 ### System dependencies (PDF/PNG rendering)
 
@@ -137,6 +163,47 @@ uv run scripts/diagnose.py output.pptx
 
 Every script is a small, self-contained Python file. Read the top of the file
 for its full CLI options.
+
+## Live preview
+
+A live preview server is available for real-time slide feedback.
+**Not started by default.** When multi-slide work begins, ask the user
+if they want live preview enabled. If yes:
+
+```bash
+# Start (spawns background server, prints URL, exits immediately)
+bun run scripts/preview.ts output.pptx
+bun run scripts/preview.ts output.pptx --port 5000
+
+# Stop
+bun run scripts/preview.ts --stop output.pptx
+```
+
+If the server is already running, `preview.ts` detects this via PID file
+and prints the existing URL instead of spawning a duplicate.
+
+The background server watches the `.pptx` file, debounces (800ms),
+converts to PDF via LibreOffice, and pushes a WebSocket reload to the
+browser. The browser's native PDF viewer provides scroll, thumbnails,
+zoom, and search. Preview output goes to `.pptx-preview/` (separate
+from `qa/`, no conflict with other scripts).
+
+Give the user the printed URL to open in their browser.
+
+**Live preview is for humans only — it does NOT replace visual QA.**
+The preview server lets the user watch progress. You must still run
+the visual QA subagent (render PNGs to `qa/`, spawn a vision model to
+inspect them) as described in the "Visual QA execution model" section.
+These are independent workflows:
+- Preview server → user sees live updates in browser
+- Visual QA subagent → automated inspection, catches issues you can't
+
+**When to regenerate the .pptx during multi-slide work:** If the user
+has the preview server running, regenerate the `.pptx` (re-run the
+creation script) after completing each logical module — e.g. after
+finishing a section's slides, not after every single shape placement.
+This gives the user meaningful visual checkpoints without excessive
+intermediate renders.
 
 ## Authoring principles
 
@@ -235,6 +302,50 @@ that survived template fill. Verify explicitly.
 
 If any of these fail, fix and re-run — don't paper over.
 
+## Visual QA execution model
+
+**Slide images are expensive.** A single rendered PNG at 150 DPI consumes
+thousands of context tokens. Loading multiple slides into the main
+conversation for inspection will quickly exhaust your context budget and
+crowd out useful working memory.
+
+**Default: always use a subagent for visual inspection.** Spawn a
+`general` subagent with the rendered PNG paths and the
+inspection criteria from step 3 above. The subagent reports findings as
+text (slide number + issue description); the images never enter the main
+conversation context. This is mandatory unless the exception below applies.
+
+```
+actor({
+  operation: {
+    action: "run",
+    subagent_type: "general",
+    model: "xiaomi/mimo-v2.5",   // recommended: vision-capable model
+    description: "Visual QA slides",
+    prompt: "Inspect the rendered slide images in qa/ for: text overflow, overlapping shapes, cut-off labels, wrong-scale icons, off-brand colors. Report each issue as 'slide N: <problem>'. Images: qa/slide-1.png through qa/slide-<N>.png."
+  }
+})
+```
+
+**Model selection (recommended, not enforced):**
+
+| Your current model | Recommended vision subagent model | Notes |
+|--------------------|-----------------------------------|-------|
+| `xiaomi/mimo-v2.5-pro` | `xiaomi/mimo-v2.5` | mimo-v2.5-pro is text-only; mimo-v2.5 is multimodal |
+| Any non-vision model | A vision-capable model | Query available vision models to pick one |
+| Already a vision model | Same model or any vision model | No change needed |
+
+Pick a vision-capable model for the subagent. If unsure what's available,
+query available vision models via
+`actor({ operation: { action: "models", vision: true } })`.
+
+**Exception — direct inspection in the main context:** Only load slide
+images directly (without a subagent) when the user explicitly requests
+that the current model inspect a specific slide for fine-grained,
+interactive editing (e.g. "look at slide 5 and adjust the title
+position"). This requires the current model to be multimodal. If it
+isn't, inform the user and offer to spawn a vision subagent instead.
+
 ## Common visual pitfalls
 
 - **Titles wrap onto two lines** — either shorten the title or widen the
@@ -283,3 +394,7 @@ If any of these fail, fix and re-run — don't paper over.
   (including speaker notes), structural walk, metadata, thumbnails, image
   extraction, conversion to PDF / PNG for QA.
 - **Scripts**: [`scripts/`](scripts/) — self-contained CLI utilities.
+- **Live preview**: [`scripts/preview.ts`](scripts/preview.ts) — launcher
+  (start/stop); [`scripts/preview_server.ts`](scripts/preview_server.ts) —
+  background server that watches .pptx, converts to PDF, serves with
+  WebSocket hot-reload in the browser's native PDF viewer.
