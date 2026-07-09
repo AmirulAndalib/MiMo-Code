@@ -121,6 +121,28 @@ async function ensureCheckpointTemplate(checkpointFile: string): Promise<void> {
   }
 }
 
+/**
+ * True when a checkpoint.md has distilled content, vs. the bare template the
+ * writer bootstraps before it runs. Structural (version-agnostic) so it doesn't
+ * break if CHECKPOINT_TEMPLATE is reformatted: strips section headers (`## …`),
+ * italic instruction lines (`_…_`), blank lines, and placeholder bodies
+ * (`(none)` / `(none yet)`); any substantive line left means a section was
+ * filled in. Exported for unit testing.
+ */
+export function checkpointHasRealContent(text: string): boolean {
+  if (!text.trim()) return false
+  for (const raw of text.split("\n")) {
+    const line = raw.trim()
+    if (line === "") continue
+    if (line.startsWith("#")) continue // "# title" / "## §N …" headers
+    if (line.startsWith("_") && line.endsWith("_")) continue // _italic instruction_
+    const placeholder = line.replace(/[()]/g, "").trim().toLowerCase() // "( none )" → "none"
+    if (placeholder === "none" || placeholder === "none yet") continue
+    return true // a real, non-placeholder body line
+  }
+  return false
+}
+
 async function ensureMemoryTemplate(memoryFile: string): Promise<void> {
   if (!(await Bun.file(memoryFile).exists())) {
     await fs.mkdir(path.dirname(memoryFile), { recursive: true })
@@ -1095,7 +1117,15 @@ export const layer: Layer.Layer<
         const onDiskText = yield* Effect.promise(() =>
           Bun.file(checkpointPath(sessionID)).text().catch(() => ""),
         )
-        const hasRealContent = onDiskText.trim().length > 0 && onDiskText.trim() !== CHECKPOINT_TEMPLATE.trim()
+        // "Real content" = the writer has distilled something, vs. the bare
+        // template it bootstraps before running. We deliberately do NOT compare
+        // byte-for-byte against CHECKPOINT_TEMPLATE: that breaks silently if the
+        // template constant is ever reformatted (old on-disk files stop matching
+        // and get misclassified as real). Instead check structurally — strip
+        // headers (`## …`), italic instruction lines (`_…_`), blank lines, and
+        // placeholder bodies (`(none)` / `(none yet)`); if anything substantive
+        // remains, a section has been filled in. Version-agnostic by design.
+        const hasRealContent = checkpointHasRealContent(onDiskText)
         if (hasRealContent) {
           log.info("rebuild using on-disk checkpoint; writer still running in background", { sessionID })
         } else {
