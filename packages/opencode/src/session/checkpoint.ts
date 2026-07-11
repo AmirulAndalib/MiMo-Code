@@ -121,28 +121,6 @@ async function ensureCheckpointTemplate(checkpointFile: string): Promise<void> {
   }
 }
 
-/**
- * True when a checkpoint.md has distilled content, vs. the bare template the
- * writer bootstraps before it runs. Structural (version-agnostic) so it doesn't
- * break if CHECKPOINT_TEMPLATE is reformatted: strips section headers (`## …`),
- * italic instruction lines (`_…_`), blank lines, and placeholder bodies
- * (`(none)` / `(none yet)`); any substantive line left means a section was
- * filled in. Exported for unit testing.
- */
-export function checkpointHasRealContent(text: string): boolean {
-  if (!text.trim()) return false
-  for (const raw of text.split("\n")) {
-    const line = raw.trim()
-    if (line === "") continue
-    if (line.startsWith("#")) continue // "# title" / "## §N …" headers
-    if (line.startsWith("_") && line.endsWith("_")) continue // _italic instruction_
-    const placeholder = line.replace(/[()]/g, "").trim().toLowerCase() // "( none )" → "none"
-    if (placeholder === "none" || placeholder === "none yet") continue
-    return true // a real, non-placeholder body line
-  }
-  return false
-}
-
 async function ensureMemoryTemplate(memoryFile: string): Promise<void> {
   if (!(await Bun.file(memoryFile).exists())) {
     await fs.mkdir(path.dirname(memoryFile), { recursive: true })
@@ -180,6 +158,15 @@ const TAIL_MIN_TEXT_BLOCK_MESSAGES = 5
 // teardown that killed the writer. Paired with a visible "Preparing
 // conversation context…" busy status during the wait.
 const REBUILD_WAIT_MS = "30 seconds"
+
+// Safety bound for awaiting the FIRST checkpoint writer when no usable
+// checkpoint exists yet (no watermark). Unlike REBUILD_WAIT_MS this is not a
+// "prefer-fresh" nicety — there is nothing else to rebuild from, so we wait for
+// the writer proper. The bound only guards the pathological case where the
+// writer's Deferred never resolves (e.g. its process died); on timeout we
+// defer to compaction. A normal writer settles well inside this.
+const FIRST_CHECKPOINT_WAIT_MS = "5 minutes"
+
 
 // Rebuild-time microcompact (see
 // docs/superpowers/specs/2026-06-03-rebuild-tail-microcompact-design.md).
@@ -1099,51 +1086,53 @@ export const layer: Layer.Layer<
       // would skip rebuild → fall through to F39 compaction → context loss.
       if (opts?.agentID && opts.agentID !== "main") return ""
 
+      // Decide whether a usable checkpoint exists using the WATERMARK
+      // (last_checkpoint_message_id), not the on-disk file's text. The writer's
+      // final step advances the watermark, and — per the transactional fix — it
+      // advances ONLY on success. So the watermark is the authoritative "there
+      // is a usable checkpoint" signal, and it's immune to the bootstrap
+      // template (which exists on disk before any writer succeeds).
+      //
+      //   - watermark set  → a prior writer succeeded → a usable checkpoint
+      //                       exists. If a writer is in-flight, await it
+      //                       (bounded) to prefer the fresher version, then
+      //                       rebuild; on timeout use the existing one.
+      //   - watermark unset → no usable checkpoint ever produced (first
+      //                       checkpoint). If a writer is in-flight, AWAIT it
+      //                       (bounded by a large safety timeout so a writer
+      //                       whose Deferred never resolves can't hang forever)
+      //                       rather than rebuilding off the bootstrap template
+      //                       mid-write. Then fall through to normal rendering:
+      //                       if the writer succeeded, the fresh checkpoint is
+      //                       now on disk; if it failed, rendering falls back to
+      //                       whatever else exists (ledger / notes / memory) and,
+      //                       when there is genuinely nothing, returns "" so the
+      //                       caller compacts. We do NOT force "" on failure here
+      //                       — that would suppress valid non-checkpoint context.
       const inFlight = writers.get(sessionID)
       if (inFlight) {
-        // Policy: when a checkpoint writer is in-flight, PREFER the freshest
-        // checkpoint — wait (bounded) for the writer to finish rather than
-        // rebuilding off a possibly-stale on-disk file. A writer can take
-        // minutes on a large range, so this is capped at REBUILD_WAIT_MS; on
-        // timeout we fall through and rebuild from whatever is currently on disk
-        // while the writer keeps running in the background.
-        //
-        // The bounded timeout + a VISIBLE busy status are what keep this from
-        // reintroducing the original wedge (blocking → user thinks it hung →
-        // aborts → worker teardown kills the writer → token count never falls).
-        // Surface the wait so the user sees progress rather than a silent hang.
+        const watermarkBefore = yield* lastBoundary(sessionID).pipe(Effect.catch(() => Effect.succeed(undefined)))
+        // Visible busy status so the wait shows progress, never a silent hang
+        // (the historical trigger for a manual abort → worker teardown wedge).
         yield* bus
           .publish(SessionStatus.Event.Status, {
             sessionID,
             status: { type: "busy", message: "Preparing conversation context…" },
           })
           .pipe(Effect.ignore)
+
+        // Prefer the fresher checkpoint: wait for the in-flight writer. When a
+        // usable checkpoint already exists (watermark set) the wait is short
+        // (REBUILD_WAIT_MS) — we can proceed with the existing one on timeout.
+        // When none exists yet (first checkpoint) we wait longer
+        // (FIRST_CHECKPOINT_WAIT_MS) since there's nothing else to rebuild from,
+        // bounded only to survive a writer whose Deferred never resolves.
+        const bound = watermarkBefore ? REBUILD_WAIT_MS : FIRST_CHECKPOINT_WAIT_MS
         const waited = yield* Effect.race(
-          Deferred.await(inFlight.writing).pipe(Effect.as("done" as const)),
-          Effect.sleep(REBUILD_WAIT_MS).pipe(Effect.as("timeout" as const)),
-        ).pipe(Effect.catch(() => Effect.succeed("error" as const)))
-        if (waited === "timeout") {
-          log.warn("rebuild writer wait timed out — proceeding with current on-disk checkpoint", {
-            sessionID,
-            waitMs: REBUILD_WAIT_MS,
-          })
-          // Guard the timeout edge: if the writer didn't finish in time AND the
-          // on-disk file is still only the bootstrap template (first-ever
-          // checkpoint, nothing distilled yet), do NOT rebuild off placeholders
-          // — that would drop the session's real context. Return empty so the
-          // caller falls back to compaction (which actually summarizes) instead.
-          // A version-agnostic structural check, not a byte-compare against the
-          // template constant (which would break if the template is reformatted).
-          const onDiskText = yield* Effect.promise(() =>
-            Bun.file(checkpointPath(sessionID)).text().catch(() => ""),
-          )
-          if (!checkpointHasRealContent(onDiskText)) {
-            log.warn("rebuild aborted — on-disk checkpoint is template-only after wait; deferring to compaction", {
-              sessionID,
-            })
-            return ""
-          }
-        } else log.info("rebuild proceeding after writer settled", { sessionID, outcome: waited })
+          Deferred.await(inFlight.writing).pipe(Effect.as("settled" as const)),
+          Effect.sleep(bound).pipe(Effect.as("timeout" as const)),
+        ).pipe(Effect.catch(() => Effect.succeed("settled" as const)))
+        log.info("rebuild proceeding after writer wait", { sessionID, waited, hadCheckpoint: !!watermarkBefore })
       }
 
       const cfg = yield* config.get()
