@@ -11,6 +11,14 @@
 //            belongs to, PLUS a resolver bound to the child's own Deferred (in
 //            the child's Instance) so `session approve` can resolve it from the
 //            orchestrator's Instance and the orchestrator can drop its copy.
+// - parentGrants: parentSessionID -> the parent session's current approved
+//            ruleset snapshot. Lets an ordinary background subagent (in a
+//            different Instance/directory than its parent) reuse the exact
+//            directories/permissions the parent already holds a grant for,
+//            WITHOUT a human round-trip and WITHOUT blocking. An ungranted path
+//            simply isn't in the snapshot → the child fails closed. Snapshot is
+//            refreshed by the parent's Permission instance on load and on every
+//            persisted approval.
 
 type Decision = "allow" | "deny"
 type PendingRec = {
@@ -19,12 +27,16 @@ type PendingRec = {
   resolve: (decision: Decision) => void
 }
 
+type Rule = { permission: string; pattern: string; action: "allow" | "ask" | "deny" }
+
 const grants = new Map<string, Set<string>>()
 const pending = new Map<string, PendingRec>()
+const parentGrants = new Map<string, Rule[]>()
 
 export const forwardRef = {
   grants,
   pending,
+  parentGrants,
   setGrant(parentSessionID: string, target: string) {
     const set = grants.get(parentSessionID) ?? new Set<string>()
     set.add(target)
@@ -41,6 +53,18 @@ export const forwardRef = {
   clearGrantsForChild(childSessionID: string) {
     for (const set of grants.values()) set.delete(childSessionID)
     for (const [id, rec] of pending) if (rec.childSessionID === childSessionID) pending.delete(id)
+  },
+  // Publish/refresh the parent session's approved ruleset so background children
+  // in another Instance can consult it. Snapshot is a shallow copy so later
+  // mutation of the parent's live array can't retroactively widen a child grant.
+  setParentGrants(parentSessionID: string, ruleset: Rule[]) {
+    parentGrants.set(parentSessionID, [...ruleset])
+  },
+  getParentGrants(parentSessionID: string): Rule[] | undefined {
+    return parentGrants.get(parentSessionID)
+  },
+  clearParentGrants(parentSessionID: string) {
+    parentGrants.delete(parentSessionID)
   },
   addPending(requestID: string, rec: PendingRec) {
     pending.set(requestID, rec)
