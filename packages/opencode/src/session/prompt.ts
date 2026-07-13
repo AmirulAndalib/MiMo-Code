@@ -903,6 +903,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       })
       const askInteractive = askRouting.interactive
       const askForward = askRouting.forward
+      const askInherit = askRouting.inherit
       const rejectionFor = (toolID: string) => ({
         title: "Tool not permitted",
         output: `The "${toolID}" tool is not in this actor's whitelist. Allowed tools: ${
@@ -944,9 +945,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 tool: { messageID: input.processor.message.id, callID: options.toolCallId },
                 ruleset: Agent.runtimePermission(input.agent, input.session.permission),
                 // System-spawned + non-peer background agents have no human to answer
-                // → fail clean, don't hang. Orchestrator peers FORWARD for approval.
+                // → fail clean, don't hang. Orchestrator peers FORWARD for approval;
+                // ordinary background subagents INHERIT the parent's held grants.
                 interactive: askInteractive,
                 ...(askForward ? { forward: askForward } : {}),
+                ...(askInherit ? { inherit: askInherit } : {}),
               },
               options.abortSignal,
             )
