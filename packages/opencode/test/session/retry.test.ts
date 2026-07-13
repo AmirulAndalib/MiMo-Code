@@ -262,6 +262,33 @@ describe("session.retry.retryable", () => {
     expect(SessionRetry.retryable(error)).toBe("Too Many Requests")
   })
 
+  // PR #1680 regression: FreeUsageLimitError arrives as an HTTP 429 whose body
+  // also reads "Rate limit exceeded". It MUST surface the Go upsell prompt, not
+  // be swallowed by the generic 429-retry branch into "Too Many Requests".
+  test("FreeUsageLimitError over 429 returns the Go upsell, not Too Many Requests", () => {
+    const error = new MessageV2.APIError({
+      message: "429: Rate limit exceeded",
+      isRetryable: false,
+      statusCode: 429,
+      responseBody: '{"type":"FreeUsageLimitError","message":"Rate limit exceeded"}',
+    }).toObject() as MessageV2.APIError
+
+    expect(SessionRetry.retryable(error)).toBe(SessionRetry.GO_UPSELL_MESSAGE)
+  })
+
+  // PR #1680 follow-up: SubscriptionUsageLimitError is also a terminal 429 —
+  // retrying just hangs the session, so it must not become retryable.
+  test("SubscriptionUsageLimitError over 429 is terminal (not retryable)", () => {
+    const error = new MessageV2.APIError({
+      message: "429: Rate limit exceeded",
+      isRetryable: false,
+      statusCode: 429,
+      responseBody: '{"type":"SubscriptionUsageLimitError","message":"Rate limit exceeded"}',
+    }).toObject() as MessageV2.APIError
+
+    expect(SessionRetry.retryable(error)).toBeUndefined()
+  })
+
   test("isRateLimitMessage matches underscore rate_limit variants", () => {
     expect(SessionRetry.isRateLimitMessage("rate_limit_error")).toBe(true)
     expect(SessionRetry.isRateLimitMessage("too_many_requests")).toBe(true)

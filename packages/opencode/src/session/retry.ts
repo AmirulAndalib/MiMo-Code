@@ -120,6 +120,17 @@ export function retryable(error: Err) {
     // Upstream processing failures (e.g. multimodal data corruption) return 400
     // but are transient — retry them.
     if (status === 400 && error.data.responseBody?.includes("upstream_error")) return error.data.message
+    // Free-usage exhaustion is delivered as an HTTP 429 with a
+    // `type:FreeUsageLimitError` body that also reads "Rate limit exceeded".
+    // It is a TERMINAL, non-retryable condition — the user must subscribe to
+    // Go. This MUST be checked before the generic 429-retry branch below,
+    // otherwise the 429 branch swallows it into "Too Many Requests" + a
+    // day-long retry-after and the upsell prompt is never shown. See PR #1680.
+    if (error.data.responseBody?.includes("FreeUsageLimitError")) return GO_UPSELL_MESSAGE
+    // Subscription (Go) usage exhaustion is also an HTTP 429 but is likewise
+    // terminal — the plan's quota is spent, retrying just hangs the session.
+    // Exclude it from the generic 429-retry path the same way.
+    if (error.data.responseBody?.includes("SubscriptionUsageLimitError")) return undefined
     // 429 rate-limits are transient and retryable EVEN when the provider SDK
     // marked the APIError isRetryable:false (many do, expecting the caller to
     // honor retry-after). Prior fix (T7) only normalized 429s in the retry-status
@@ -139,7 +150,6 @@ export function retryable(error: Err) {
     // 5xx errors are transient server failures and should always be retried,
     // even when the provider SDK doesn't explicitly mark them as retryable.
     if (!error.data.isRetryable && !(status !== undefined && status >= 500)) return undefined
-    if (error.data.responseBody?.includes("FreeUsageLimitError")) return GO_UPSELL_MESSAGE
     return error.data.message.includes("Overloaded") ? "Provider is overloaded" : error.data.message
   }
 
