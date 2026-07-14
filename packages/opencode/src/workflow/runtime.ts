@@ -498,9 +498,9 @@ export const layer = Layer.effect(
     const cancelEntry = (entry: RunEntry): Effect.Effect<void> =>
       Effect.gen(function* () {
         if (entry.status !== "running") return
-        yield* reclaim(entry)
-        yield* flushNow(entry)
-        yield* WorkflowPersistence.recordTerminal({ runID: entry.runID, status: "cancelled" }).pipe(Effect.ignore)
+        // Interrupt the fiber FIRST so that downstream reclaim (which disposes
+        // worktrees and triggers scope-close finalizers) doesn't deadlock waiting
+        // for a still-running agent fiber to finish.
         if (entry.fiber)
           yield* Fiber.interrupt(entry.fiber).pipe(
             Effect.timeout(FIBER_INTERRUPT_TIMEOUT_MS),
@@ -508,6 +508,9 @@ export const layer = Layer.effect(
               Effect.sync(() => log.warn("fiber interrupt timed out during cancel", { runID: entry.runID })),
             ),
           )
+        yield* reclaim(entry)
+        yield* flushNow(entry)
+        yield* WorkflowPersistence.recordTerminal({ runID: entry.runID, status: "cancelled" }).pipe(Effect.ignore)
         entry.status = "cancelled"
         yield* Deferred.succeed(entry.deferred, { status: "cancelled" })
         yield* bus.publish(WorkflowFinished, { sessionID: entry.sessionID, runID: entry.runID, status: "cancelled" })
