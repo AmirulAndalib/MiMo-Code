@@ -293,6 +293,8 @@ export const dict = {
   "tui.skill.skill-creator.description": "Создание, проверка и улучшение skills агента",
   "tui.skill.drive-mimo.description": "Программное управление другим процессом MiMoCode — headless JSON-события или интерактивный TUI через tmux",
   "tui.skill.research-paper-writing.description": "Написание, полировка и рецензирование научных статей",
+  "tui.skill.codex.description": "Автономный запуск Codex CLI в скриптах, CI, Docker и Kubernetes",
+  "tui.skill.claude-code.description": "Делегирование задач программирования Claude Code CLI",
   "tui.skill.design-blueprint.description":
     "Создать проектную спецификацию (DESIGN.md + Decision Trace) до макетов",
   "tui.skill.super-research.description":

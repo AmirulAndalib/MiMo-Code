@@ -214,6 +214,8 @@ export const dict: Record<string, string> = {
   "tui.skill.skill-creator.description": "Create, review, and improve agent skills",
   "tui.skill.drive-mimo.description": "Programmatically drive another MiMoCode process — headless JSON events or interactive TUI via tmux",
   "tui.skill.research-paper-writing.description": "Draft, polish, and reviewer-style critique for academic papers",
+  "tui.skill.codex.description": "Run Codex CLI autonomously in scripts, CI, Docker, and Kubernetes",
+  "tui.skill.claude-code.description": "Delegate coding tasks to Claude Code CLI",
   "tui.skill.design-blueprint.description":
     "Produce a design blueprint (DESIGN.md + Decision Trace) before mocking up any visual",
   "tui.skill.super-research.description":

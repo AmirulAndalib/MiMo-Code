@@ -203,6 +203,8 @@ export const dict = {
   "tui.skill.skill-creator.description": "建立、審查與改進 Agent 技能",
   "tui.skill.drive-mimo.description": "以程式化方式驅動另一個 MiMoCode 程序——無頭 JSON 事件或透過 tmux 互動",
   "tui.skill.research-paper-writing.description": "撰寫、潤色學術論文，並以審稿人視角提前把關",
+  "tui.skill.codex.description": "在腳本、CI、Docker 和 Kubernetes 中自主執行 Codex CLI",
+  "tui.skill.claude-code.description": "將程式設計任務委派給 Claude Code CLI",
   "tui.skill.design-blueprint.description": "先出設計藍圖（DESIGN.md + 決策軌跡）再動手做視覺",
   "tui.skill.super-research.description": "自主研究——實驗迴圈、主題調研、量化分析、對比評測、根因排查、消融實驗、複現論文、寫論文",
   "tui.skill.deep-research.description": "深度多源調研，交叉驗證並生成引用報告",
