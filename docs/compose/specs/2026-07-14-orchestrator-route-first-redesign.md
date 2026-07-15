@@ -113,29 +113,82 @@ Target:   user task → AI reads <active-sessions> → route (send) or create
 
 Orchestrator 的 system prompt 需要注入 **活会话上下文**, 像人看聊天列表一样:
 
-**注入内容** (每次 Orchestrator turn 开始时):
+**注入内容** (每次 Orchestrator turn 开始时, 极简摘要格式):
 
 ```xml
 <active-sessions>
-  <session id="ses_abc123" title="Fix login bug" mode="build" status="progressing" dir="/repo1" last_turn="2min ago">
-    Working on: OAuth token refresh logic. 3 commits on mimocode/fix-login.
-  </session>
-  <session id="ses_def456" title="Design billing schema" mode="compose" status="idle" dir="/repo2">
-    Completed: schema设计完成, 等待用户确认后实施。
-  </session>
-  <session id="ses_ghi789" title="Triage repo issues" mode="build" status="stalled" dir="/repo3">
-    Last activity: 15min ago. May need nudge.
-  </session>
+  ses_abc123 | Fix login bug | build | progressing
+  ses_def456 | Design billing schema | compose | idle
+  ses_ghi789 | Triage repo issues | build | stalled
 </active-sessions>
 ```
+
+每个会话一行: `id | title | mode | status`。只有 4 个字段, 没有 dir 和最近任务详情。AI 需要详情时, 自己调用 `session ask` 或 `session status` 按需查询。详见 R1.1 注入策略。
 
 **注入位置**: `packages/opencode/src/session/llm.ts:240-306` (`buildSystemArray`)。在 agent prompt 组装完成后、plugin transform 前, 注入一个 `<active-sessions>` block。这个 block 由 `session list` 的数据自动生成, 不需要 Orchestrator 主动调用。
 
 **内容来源**:
 - `sessions.children(ctx.sessionID)` 获取子会话列表
-- `actorReg.get()` 获取 actor 状态 (mode, status, last turn time)
-- `deriveLiveness()` 计算进度状态
-- 每个会话的最近任务摘要 (从 session title + last message 提取)
+- `actorReg.get()` 获取 actor 状态 (mode, agent type)
+- `deriveLiveness()` 计算进度状态 (progressing/stalled/idle/terminal)
+- Terminal 状态 (success/failed/cancelled) 的会话不注入 — 只列活跃会话
+
+
+### R1.1: `<active-sessions>` Injection Strategy
+
+R1 描述了注入什么, 但没有回答 **怎么注入** — 特别是: 是每轮全量注入, 还是有更聪明的策略? 这个问题在会话数增长后变得关键。
+
+#### 问题: 全量详情注入的代价
+
+如果每轮 turn 都把完整的 `<active-sessions>` (含 dir、最近任务详情等) 注入 system prompt:
+- **Context 膨胀**: N 个会话 × 每个 ~100 tokens = N×100 tokens, 每轮重复。20 个会话就是 ~2000 tokens/轮。
+- **重复浪费**: 大部分 turn (正和某子会话对话、做非路由工作) 根本不需要全量清单。Orchestrator 和 child A 对话时, B/C/D/E 的详情是噪音。
+- **Cache 失效**: prompt cache 依赖 system prompt 前缀稳定; 清单每轮变 (状态/新会话) 导致 cache 频繁失效。
+
+#### 方案对比
+
+| 方案 | 描述 | 优点 | 缺点 |
+|------|------|------|------|
+| **A: 按需拉取** | 不注入, 提供轻量 `session list` 动作让 AI "要路由才查" | 零常驻开销 | 回到靠 LLM 自觉去查 — 用户已批评过依赖自觉; AI 可能忘记查就直接 create |
+| **B: 全量详情注入** | 每轮注入完整清单 (id/title/mode/status/dir/最近任务) | AI 始终有完整信息 | Context 膨胀; 大部分 turn 浪费; cache 失效 |
+| **C: 极简摘要注入** | 每轮注入极简清单 (id/title/mode/status, 一行一会话, 无 dir/详情) | 低成本 (N 行 ≈ N×30 tokens); AI 有足够信息做路由决策; 需要详情时自己 ask | 信息密度低于 B, 但路由决策通常不需要 dir/详情 |
+| **D: 条件注入** | 只在"新工作到达需路由决策"的 turn 注入, 非每轮 | 精准 | 需要判定"何时该注入" — 增加判定逻辑复杂度 |
+| **E: 增量注入** | 只注入变化 (新会话/状态变更), 非每轮全量 | 低带宽 | 需要 diff 逻辑; AI 可能丢失已消失会话的信息; 实现复杂 |
+
+#### 推荐: 极简摘要 + 按需详情 (C 为主, A 为辅)
+
+**默认注入极简摘要** (方案 C), AI 需要详情时 **按需查询** (方案 A 作为补充):
+
+```xml
+<active-sessions>
+  ses_abc123 | Fix login bug | build | progressing
+  ses_def456 | Design billing schema | compose | idle
+  ses_ghi789 | Triage repo issues | build | stalled
+</active-sessions>
+```
+
+**为什么这组最优**:
+
+1. **极简摘要足够做路由决策**: 路由只需要 "谁在线、在做什么、什么模式"。id + title + mode + status 四个字段覆盖了 90% 的路由判断。Dir 和最近任务详情是 "确认级" 信息, 不是 "决策级" 信息 — AI 先凭摘要选定目标, 需要确认时再 `session ask` 或 `session status` 查详情。
+
+2. **成本可控**: 一行 ~30 tokens。10 个会话 = ~300 tokens, 20 个会话 = ~600 tokens。相比全量详情 (10 个会话 ~1000 tokens) 小一个数量级。即使 50 个会话也只 ~1500 tokens, 可接受。
+
+3. **天然过滤已归档会话**: 只列非 terminal 状态 (progressing/stalled/idle) 的会话。已 success/failed/cancelled 的会话不注入 — 它们不需要路由, 且会无限膨胀清单。需要查询已归档会话时, AI 自己 `session list` 或 `session ask`。
+
+4. **不依赖 LLM 自觉**: 与方案 A 纯按需不同, 极简摘要是 **默认注入** — AI 每轮 turn 都能看到清单, 不需要记住去查。只是清单是精简版, 不是完整版。
+
+5. **Prompt cache 友好**: 极简摘要变化频率低于全量详情 (status 变化 < 详情变化)。且因为体量小, 即使 cache 失效, 重建成本也低。
+
+**AI 需要详情时的按需路径**:
+
+```
+AI 看极简摘要 → 选定目标会话 → 需要确认细节?
+  ├─ 不需要 → session send <id> <task>  (直接路由)
+  └─ 需要 → session status <id> 或 session ask <id>  (按需查详情)
+```
+
+**实现**: `buildActiveSessionsContext` 函数输出极简格式 (一行一会话, 只含 id/title/mode/status), 过滤 terminal 状态。注入位置不变 (`buildSystemArray`, orchestrator agent 类型)。
+
 
 ### R2: orchestrator.txt 决策指引重写
 
@@ -153,8 +206,8 @@ orchestrator.txt 的核心变化 — 让 AI 自己做路由决策:
 ```
 ## Routing: route to existing sessions first
 
-Your system prompt contains an <active-sessions> block listing ALL your live
-child sessions with their id, title, mode, status, directory, and recent activity.
+Your system prompt contains an <active-sessions> block listing your live
+child sessions in compact format: id | title | mode | status.
 This is your fleet — use it.
 
 When a new task arrives, your FIRST action is to decide: does an existing session
@@ -162,7 +215,10 @@ already own this work? Look at <active-sessions> and evaluate:
 - Which session's title/theme matches this task's domain?
 - Which session's mode (build/plan/compose) is appropriate?
 - Is the session idle (ready for new work) or progressing (can accept follow-up)?
-- Does the session's directory match where this work belongs?
+
+If you need more detail about a session (its directory, recent commits, etc.),
+use `session status <id>` or `session ask <id>` — the compact list gives you
+enough to route; details are on-demand.
 
 If you find a good match → `session send <id> <task>` (route to existing).
 If no session fits → `session create <task>` (create as fallback).
@@ -220,7 +276,7 @@ if (input.agent.name === "orchestrator") {
 }
 ```
 
-`buildActiveSessionsContext` 是一个新函数, 复用 `list` 操作的数据获取逻辑 (lines 820-826), 但输出为 XML 格式而非人类可读的列表。
+`buildActiveSessionsContext` 是一个新函数, 复用 `list` 操作的数据获取逻辑 (lines 820-826), 输出极简 XML 格式 (一行一会话, 只含 id/title/mode/status), 过滤 terminal 状态会话。详见 R1.1 注入策略。
 
 **注入时机**: 每次 Orchestrator 发起 LLM 请求时, system prompt 中包含最新的活会话快照。这意味着 Orchestrator 在做路由决策时, **不需要调用 `session list`** — 清单已经在上下文里了。
 
