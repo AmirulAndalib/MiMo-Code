@@ -4135,19 +4135,27 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         yield* goal.set(input.sessionID, condition)
       }
 
-      // /rebuild — manually rebuild the conversation context now, from the
-      // latest checkpoint. Reuses the SAME rebuildFromCheckpoint step as the
-      // automatic overflow path (identical logic + boundary conditions), so a
-      // user-triggered rebuild behaves exactly like an auto one: it inserts a
-      // checkpoint boundary at the watermark (recent messages after it are kept
-      // verbatim; earlier ones collapse to the checkpoint summary on the next
-      // turn). If no usable checkpoint exists yet, tell the user rather than
-      // silently doing nothing — the first checkpoint has to be produced by
-      // normal turns before there is anything to rebuild from.
+      // /rebuild — manually rebuild the conversation context ON THE SPOT,
+      // from the latest checkpoint. Implements the 3-case checkpoint-freshness
+      // semantics:
+      //   1. Usable checkpoint exists, no writer running → rebuild immediately.
+      //   2. No usable checkpoint → start a writer and wait for it, then rebuild.
+      //   3. Checkpoint exists + writer in-flight → wait (with timeout), rebuild
+      //      with the fresher checkpoint if it arrives, else fall back to existing.
+      // The busy status is set BEFORE any work so the TUI spinner lights up
+      // immediately; the Runner's onIdle callback clears it after the runLoop
+      // completes. For the no-checkpoint case (no work to do), we return a
+      // synthetic message without entering the runLoop, and clear idle in a
+      // finally block.
       if (input.command === Command.Default.REBUILD) {
         const msgs = yield* sessions.messages({ sessionID: input.sessionID, agentID: "main" })
         const lastUser = msgs.findLast((m) => m.info.role === "user")
         const model = yield* lastModel(input.sessionID)
+
+        // Set busy status so the TUI shows a spinner while we wait on the
+        // writer (cases 2/3) or assemble context (case 1).
+        yield* status.set(input.sessionID, { type: "busy" }).pipe(Effect.catch(() => Effect.void))
+
         const inserted = yield* rebuildFromCheckpoint({
           sessionID: input.sessionID,
           msgs,
@@ -4155,6 +4163,32 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           agent: agentName,
           model: { providerID: model.providerID, id: model.modelID },
         }).pipe(Effect.catch(() => Effect.succeed(false)))
+
+        if (!inserted) {
+          // No checkpoint available — tell the user rather than silently doing
+          // nothing. Return a synthetic message WITHOUT entering the runLoop
+          // (noReply: true) so no model response is generated. Clear idle
+          // status since the Runner won't handle it in this path.
+          const result = yield* prompt({
+            sessionID: input.sessionID,
+            messageID: input.messageID,
+            agent: agentName,
+            parts: [
+              {
+                type: "text",
+                text: "No checkpoint is available to rebuild from yet — continue the conversation and a checkpoint will be written automatically.",
+                synthetic: true,
+              },
+            ],
+            noReply: true,
+          })
+          yield* status.set(input.sessionID, { type: "idle" }).pipe(Effect.catch(() => Effect.void))
+          return result
+        }
+
+        // Checkpoint was inserted — enter the runLoop (no noReply) so the
+        // model sees the rebuilt context boundary and produces a response.
+        // The Runner's onIdle callback clears busy status automatically.
         return yield* prompt({
           sessionID: input.sessionID,
           messageID: input.messageID,
@@ -4162,13 +4196,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           parts: [
             {
               type: "text",
-              text: inserted
-                ? "Context rebuilt from the latest checkpoint. Recent messages are preserved; earlier context is now summarized."
-                : "No checkpoint is available to rebuild from yet — continue the conversation and a checkpoint will be written automatically.",
+              text: "Context rebuilt from the latest checkpoint. Recent messages are preserved; earlier context is now summarized.",
               synthetic: true,
             },
           ],
-          noReply: true,
         })
       }
 
