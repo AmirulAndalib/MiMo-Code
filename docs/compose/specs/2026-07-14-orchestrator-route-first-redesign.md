@@ -1,6 +1,9 @@
 ---
 date: 2026-07-14
 topic: orchestrator-route-first-redesign
+revisions:
+  - date: 2026-07-15
+    change: "AI-route revision: removed tool-level matching (findBestMatch/heuristic/embedding). Route decision is entirely AI-side — harness injects <active-sessions>, prompt guides AI to route-first, AI uses existing session send/create directly. No new route tool operation."
 ---
 
 # Orchestrator Route-First Redesign
@@ -42,6 +45,16 @@ In practice, the Orchestrator面对同一条主题的反复工作请求时, 每�
 
 **核心洞察**: 所有 topic 变体都错在同一个假设 — 把复用当成"给 create 找一个 key"。但真正的复用模式是 **人看聊天列表选一个发消息** — 你不会给每个聊天窗口打标签然后按标签匹配, 你看一眼列表就知道该发给谁。
 
+### Why Tool-Level Matching Also Cannot Work
+
+初版设计曾提出 `session route` 操作, 内置 `findBestMatch` (启发式/embedding/LLM-assisted) 做自动匹配。这也是错的:
+
+- **Orchestrator 本身就是 AI** — 它能理解语义、判断相关性、权衡上下文。让工具层用机械匹配替代 AI 的语义判断, 是倒退。
+- **匹配逻辑无法覆盖所有场景**: "这个任务该交给谁" 取决于任务内容、会话历史、用户意图、依赖关系 — 这些是 AI 的强项, 不是算法的强项。
+- **增加一层抽象但没有增加能力**: 工具层匹配只是把 AI 的路由决策权抢走, 然后用一个更差的决策替代。
+
+**正确分工**: 工具层提供 **信息** (活会话清单) 和 **执行** (send/create), AI 做 **决策** (路由到谁)。
+
 ## First-Principles Analysis
 
 ### Orchestrator 的本质: 传声筒/路由器
@@ -65,38 +78,38 @@ Orchestrator 不是 "decompose → dispatch (create)" 模型。它的本质是:
 Current:  user task → decompose → create (default) → (maybe topic reuse)
                                     ↑ create 是一等操作
 
-Target:   user task → route-to-existing (default) → create (fallback only)
-                                    ↑ route/send 是一等操作
+Target:   user task → AI reads <active-sessions> → route (send) or create
+                                    ↑ AI 做路由决策, 工具只提供清单+执行
 ```
 
 ### 类比: 人如何管理多会话
 
 一个人面对多个聊天窗口时:
-1. 看一眼所有活跃窗口 (session list)
-2. 根据消息内容判断该发给谁 (route decision)
+1. 看一眼所有活跃窗口 (自动注入的清单)
+2. 根据消息内容判断该发给谁 (AI 的语义判断)
 3. 如果没有合适的窗口, 新开一个 (create as fallback)
 
 人不会: 收到消息 → 新建窗口 → 给窗口打标签 → 期望下次能按标签找到。
+人也不会: 收到消息 → 让算法自动匹配 → 发给匹配结果。
+
+人会: 看一眼列表, 自己决定发给谁。
 
 ## Target Design
 
-### R1: 一等 route 原语
+### Core Principle: AI Routes, Tools Provide + Execute
 
-新增 `session route` 操作, 作为 Orchestrator 的 **默认第一动作**:
+整个设计的核心原则:
 
-```
-session route <task>
-```
+> **路由决策是 AI 的职责。工具层只负责两件事: (1) 提供活会话清单作为 AI 的决策输入; (2) 执行 AI 选定的 send/create 操作。**
 
-**行为**:
-1. 自动获取活会话清单 (内置于 route 实现, 不需要 Orchestrator 手动 list)
-2. 基于任务语义 + 会话清单, 由 harness 注入的上下文辅助决策
-3. 如果匹配到合适的已有会话 → `session send` 到该会话, 返回路由结果
-4. 如果没有合适的 → 返回 "no match, recommend create" + 建议的 mode/dir 参数
+没有独立的 `route` 工具操作。没有 `findBestMatch`。没有启发式匹配。没有 embedding 相似度。AI 看着清单, 自己决定 send 给谁。
 
-**关键区别**: route 是 **决策操作**, 不是创建操作。它的输出是 "我选了会话 X, 因为 Y" 或 "没有合适的, 建议新建"。
+这意味着:
+- **不需要新的 tool verb** — AI 直接用现有的 `session send` 和 `session create`
+- **不需要工具层的匹配逻辑** — 路由决策完全在 prompt + AI 层
+- **最小化代码变更** — 核心变更是 (1) context injection, (2) prompt rewrite
 
-### R2: Harness 注入活会话清单
+### R1: Harness 注入活会话清单
 
 Orchestrator 的 system prompt 需要注入 **活会话上下文**, 像人看聊天列表一样:
 
@@ -124,12 +137,46 @@ Orchestrator 的 system prompt 需要注入 **活会话上下文**, 像人看聊
 - `deriveLiveness()` 计算进度状态
 - 每个会话的最近任务摘要 (从 session title + last message 提取)
 
+### R2: orchestrator.txt 决策指引重写
+
+orchestrator.txt 的核心变化 — 让 AI 自己做路由决策:
+
+| Section | Before | After |
+|---------|--------|-------|
+| 核心循环 | decompose → dispatch (create) | understand → **route** (AI reads list, decides send or create) → yield → integrate → report |
+| session tool 参考 | create 是主要操作 | **send 是主要操作**, create 是 fallback |
+| 复用指引 | "reuse a standing session per theme" via topic | "see `<active-sessions>` in your context — pick the best match and `session send`" |
+| 新增 Route Decision | — | AI 如何从清单中选择: 看 title/mode/status/dir, 结合任务语义判断 |
+
+**orchestrator.txt 新增 Route Decision section 的内容指引**:
+
+```
+## Routing: route to existing sessions first
+
+Your system prompt contains an <active-sessions> block listing ALL your live
+child sessions with their id, title, mode, status, directory, and recent activity.
+This is your fleet — use it.
+
+When a new task arrives, your FIRST action is to decide: does an existing session
+already own this work? Look at <active-sessions> and evaluate:
+- Which session's title/theme matches this task's domain?
+- Which session's mode (build/plan/compose) is appropriate?
+- Is the session idle (ready for new work) or progressing (can accept follow-up)?
+- Does the session's directory match where this work belongs?
+
+If you find a good match → `session send <id> <task>` (route to existing).
+If no session fits → `session create <task>` (create as fallback).
+
+DO NOT create a new session when an existing one can handle the work.
+One session serving multiple related tasks is the norm, not the exception.
+```
+
 ### R3: create 降级为 fallback
 
 `session create` 保留但语义变化:
 
 - **之前**: create 是默认操作, Orchestrator 的第一反应
-- **之后**: create 是 "route 发现没有合适会话时的 fallback"
+- **之后**: create 是 "AI 判断没有合适会话时的 fallback"
 - `--topic` 机制保留但降级为可选的 hint, 不再是路由的核心
 
 Orchestrator 的决策流程变为:
@@ -137,26 +184,15 @@ Orchestrator 的决策流程变为:
 ```
 1. 收到用户任务
 2. 看 <active-sessions> (自动注入, 不需要 list 调用)
-3. 判断: 有没有一个现有会话适合处理这个任务?
-   ├─ Yes → session send <sessionID> <task>
-   └─ No  → session create <task> [新建后加入清单]
+3. AI 判断: 有没有一个现有会话适合处理这个任务?
+   ├─ Yes → session send <sessionID> <task>  (AI 自己选 ID)
+   └─ No  → session create <task>            (AI 自己决定参数)
 4. 返回结果给用户
 ```
 
-### R4: orchestrator.txt 决策指引重写
-
-orchestrator.txt 的核心变化:
-
-| Section | Before | After |
-|---------|--------|-------|
-| 核心循环 | decompose → dispatch (create) | route → (create only if none fits) |
-| session tool 参考 | create 是主要操作 | send 是主要操作, create 是 fallback |
-| 复用指引 | "reuse a standing session per theme" via topic | "route to existing sessions" — 看清单选一个 |
-| 新增 | — | "route decision" section: 如何从活会话清单中选择 |
-
 ## Code Impact Analysis
 
-### 1. session 工具原语重排
+### 1. session 工具: 无新 verb, 仅清理
 
 **File**: `packages/opencode/src/tool/session.ts`
 
@@ -167,42 +203,8 @@ orchestrator.txt 的核心变化:
 | `list` (line 813-883) | 保留, 新增 `summary` 返回格式供 context 注入使用 | 低 — 新增输出格式 |
 | `topicOf` (line 187) | 保留但标记 deprecated; 不再是路由核心 | 低 |
 | `tagTitle` (line 192) | 保留但标记 deprecated | 低 |
-| **新增** `route` | 新操作: 获取清单 → 匹配 → send 或 recommend create | 高 — 核心新逻辑 |
 
-`route` 操作的伪代码:
-
-```typescript
-if (op.action === "route") {
-  // 1. Get active sessions (same enrichment as list)
-  const children = yield* sessions.children(ctx.sessionID)
-  const enriched = yield* Effect.forEach(children, ...)
-  const peers = enriched.filter(/* real peers only */)
-
-  // 2. Build routing context
-  const sessions Summary = peers.map(({ child, actor }) => ({
-    id: child.id,
-    title: child.title,
-    mode: actor?.agent,
-    status: deriveLiveness(actor, now),
-    dir: child.directory,
-  }))
-
-  // 3. LLM-assisted matching (or heuristic)
-  const match = findBestMatch(op.task, sessionsSummary)
-
-  if (match) {
-    // 4a. Route to existing
-    yield* inboxSvc.send({ receiverSessionID: match.id, ... content: op.task })
-    return { output: `Routed to ${match.id} (${match.title})`, ... }
-  } else {
-    // 4b. No match — recommend create
-    return {
-      output: `No existing session matches. Recommend: session create with mode=${op.suggestedMode}, dir=${op.suggestedDir}`,
-      metadata: { recommendCreate: true, ... }
-    }
-  }
-}
-```
+**关键: 没有新的 tool verb**。AI 直接用 `session send` 执行路由, 用 `session create` 作为 fallback。工具层零新增 API。
 
 ### 2. Harness 向 Orchestrator 注入活会话清单
 
@@ -229,21 +231,21 @@ if (input.agent.name === "orchestrator") {
 核心重写部分:
 
 - **Line 1-5 (Identity)**: 强调 "route-first coordinator", 而非 "decompose-and-dispatch leader"
-- **Line 22-30 (The loop)**: 循环改为 "understand → route (to existing or create) → yield → integrate → report"
+- **Line 22-30 (The loop)**: 循环改为 "understand → route (AI reads list, decides send or create) → yield → integrate → report"
 - **Line 48-59 (session tool reference)**: `send` 提升为主要操作, `create` 标注为 fallback
-- **Line 82-88 (Reuse section)**: 从 "reuse per theme via topic" 改为 "route to existing — see active-sessions context"
-- **新增 Route Decision section**: 指导 Orchestrator 如何利用 `<active-sessions>` 上下文做路由决策
+- **Line 82-88 (Reuse section)**: 从 "reuse per theme via topic" 改为 "see `<active-sessions>` — pick the best match and send"
+- **新增 Route Decision section**: 指导 AI 如何利用 `<active-sessions>` 上下文做路由决策 (见 R2)
 
 ### 4. 涉及文件汇总
 
 | File | Change Type | Description |
 |------|-------------|-------------|
-| `packages/opencode/src/tool/session.ts` | **修改** | 新增 `route` 操作; `create` 中移除 topic find-or-reuse; `list` 新增 summary 格式 |
 | `packages/opencode/src/session/llm.ts` | **修改** | `buildSystemArray` 中注入 `<active-sessions>` context |
-| `packages/opencode/src/session/prompt/orchestrator.txt` | **修改** | 决策指引从 create-first 改为 route-first |
-| `packages/opencode/src/session/prompt.ts` | **小改** | `buildActiveSessionsContext` 新函数 (可放此处或 session.ts) |
-| `packages/opencode/src/tool/session.ts` (schemas) | **修改** | Zod schema 新增 `routeOperation` |
-| `packages/opencode/src/tool/session.ts` (KNOWN_VERBS) | **修改** | 加入 `"route"` |
+| `packages/opencode/src/session/prompt/orchestrator.txt` | **修改** | 决策指引从 create-first 改为 route-first; 新增 Route Decision section |
+| `packages/opencode/src/tool/session.ts` | **修改** | `create` 中移除 topic find-or-reuse; `list` 新增 summary 格式 |
+| `packages/opencode/src/session/prompt.ts` | **小改** | `buildActiveSessionsContext` 新函数 (可放此处或 llm.ts) |
+
+**注意**: 没有新增 Zod schema, 没有新增 KNOWN_VERBS, 没有新增 tool verb。核心变更是 context injection + prompt rewrite。
 
 ## Implementation Roadmap
 
@@ -260,27 +262,26 @@ if (input.agent.name === "orchestrator") {
 
 ### Phase 2: orchestrator.txt 重写 (prompt 层, 改变行为)
 
-**Goal**: 通过 prompt 引导, 让 Orchestrator 优先 route-to-existing 而非 create。
+**Goal**: 通过 prompt 引导, 让 AI 优先 route-to-existing 而非 create。这是 **主体工作**。
 
 1. 重写 orchestrator.txt 的核心循环和决策指引
-2. 新增 "Route Decision" section: 如何从 `<active-sessions>` 中选择目标
+2. 新增 "Route Decision" section: AI 如何从 `<active-sessions>` 中选择目标
 3. 将 `send` 提升为主要操作, `create` 标注为 fallback
-4. **验证**: Orchestrator 面对同主题的第二个任务时, 优先尝试 `session send` 到已有会话
+4. 移除旧的 topic-based reuse 指引
+5. **验证**: Orchestrator 面对同主题的第二个任务时, 优先 `session send` 到已有会话
 
-**风险**: prompt 引导是"软约束" — LLM 可能仍然偶尔 create。Phase 3 通过硬编码 route 原语来加强。
+**风险**: prompt 引导是"软约束" — LLM 可能仍然偶尔 create。但这是 AI 路由的正确模型: 不是强制, 而是引导。如果引导不够强, 迭代 prompt (加 more explicit examples/constraints) 而非引入工具层匹配。
 
-### Phase 3: route 原语 (工具层, 硬编码路由)
+### Phase 3: 可选加强 (如果 Phase 2 的 prompt 引导不够)
 
-**Goal**: 新增 `session route` 操作, 将路由逻辑从 prompt 引导提升为工具级实现。
+**Goal**: 如果纯 prompt 引导后 Orchestrator 仍然过度 create, 加强引导而非引入匹配。
 
-1. 在 `session.ts` 新增 `route` verb 和对应的 Zod schema
-2. 实现: 获取清单 → 匹配 (可先用启发式, 后续可用 LLM) → send 或 recommend-create
-3. route 操作内置于工具, 不依赖 LLM 做路由决策 (消除 LLM 传错 topic 的问题)
-4. **验证**: `session route "fix login bug"` 自动选择正确的已有会话
+可能的加强手段 (按优先级):
+1. **更强的 prompt 约束**: 在 orchestrator.txt 中加明确的 "MUST check active-sessions before create" + 反面示例
+2. **create 前拦截**: 在 `session create` 的工具实现中, 如果 `<active-sessions>` 中有高度相关的会话, 返回 warning 而非直接创建 (注意: 这仍然是 AI 看到 warning 后自己决定, 不是工具自动匹配)
+3. **指标监控**: 跟踪 create vs send 比率, 如果 create 率过高则迭代 prompt
 
-**可选增强**:
-- Phase 3a: 启发式匹配 (基于 title 关键词 + mode + dir)
-- Phase 3b: LLM-assisted matching (把任务 + 清单交给 LLM 做选择, 更准确但有延迟)
+**不做的事**: 启发式匹配、embedding 相似度、工具层自动路由。这些都违反 "AI routes" 原则。
 
 ### Phase 4: 清理 deprecated 路径
 
@@ -297,9 +298,10 @@ if (input.agent.name === "orchestrator") {
 
 ## Key Decisions
 
-- **route 作为一等操作**: 路由逻辑内置于工具层, 不依赖 LLM 正确传 topic — 消除了 topic 匹配的根本不可靠性
+- **AI 路由, 工具不匹配**: 路由决策完全由 AI 做 — 基于注入的 `<active-sessions>` 清单和任务语义。工具层不实现任何匹配逻辑 (findBestMatch/heuristic/embedding)。AI 是最好的路由器。
+- **不需要新的 route 工具操作**: AI 直接用现有的 `session send` 执行路由, 用 `session create` 作为 fallback。最小化代码变更。
 - **context injection 而非 on-demand query**: 活会话清单注入 system prompt, 让 Orchestrator 每次 turn 都能看到全貌, 而非需要主动调用 list — 降低认知负担
-- **分阶段实施**: Phase 1-2 是 prompt/harness 层变更, 风险低; Phase 3 是工具层变更, 需要更多测试; Phase 4 是清理
+- **prompt 引导而非硬编码**: 路由行为通过 prompt 迭代优化, 而非工具层强制。如果引导不够, 加强 prompt 而非引入匹配算法。
 
 ## Dependencies / Assumptions
 
@@ -312,6 +314,6 @@ if (input.agent.name === "orchestrator") {
 - `packages/opencode/src/tool/session.ts` — session tool 实现 (create/send/list/topicOf/tagTitle)
 - `packages/opencode/src/session/prompt/orchestrator.txt` — orchestrator 系统提示词
 - `packages/opencode/src/session/llm.ts:240-306` — system prompt 组装 (buildSystemArray)
-- `packages/opencode/src/agent/agent.ts:231-251` — orchestrator agent 定义
+- `packages/opencode/src/agent/agent.ts:231-251` — orchestrestrator agent 定义
 - `docs/harness/MiMo Orchestrator Mode.md` — orchestrator 模式文档
 - PR #1727 — 去掉 topic 字符串匹配 (止血, 非本 redesign)
