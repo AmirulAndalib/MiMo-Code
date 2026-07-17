@@ -169,7 +169,7 @@ export const ToolScriptTool = Tool.define(
             return {
               title: "code too large",
               metadata: { status: "code_error", toolCalls: 0 },
-              output: `<tool_script status="code_error">\n<error>\ncode exceeds ${MAX_CODE_BYTES} bytes\n</error>\n</tool_script>`,
+              output: `<tool_script status="code_error">\n<error_message>\ncode exceeds ${MAX_CODE_BYTES} bytes\n</error_message>\n</tool_script>`,
             }
           }
 
@@ -205,7 +205,7 @@ export const ToolScriptTool = Tool.define(
             return {
               title: "transpile error",
               metadata: { status: "code_error", toolCalls: 0 },
-              output: `<tool_script status="code_error">\n<error>\n${transpiled.error}\n</error>\n</tool_script>`,
+              output: `<tool_script status="code_error">\n<error_message>\n${transpiled.error}\n</error_message>\n</tool_script>`,
             }
           }
 
@@ -329,7 +329,7 @@ export const ToolScriptTool = Tool.define(
             return {
               title: status,
               metadata: { status, toolCalls: trace.length },
-              output: `<tool_script status="${status}">\n<error>\n${message}\n</error>\n${logBlock}${traceBlock}</tool_script>`,
+              output: `<tool_script status="${status}">\n<error_message>\n${message}\n</error_message>\n${logBlock}${traceBlock}</tool_script>`,
             }
           }
 
@@ -343,18 +343,19 @@ export const ToolScriptTool = Tool.define(
               : typeof returned === "string"
                 ? returned
                 : JSON.stringify(returned, null, 2)
-          if (Buffer.byteLength(returnedText, "utf8") > MAX_RESULT_BYTES) {
+          const returnedBytes = Buffer.byteLength(returnedText, "utf8")
+          if (returnedBytes > MAX_RESULT_BYTES) {
             return {
               title: "result too large",
               metadata: { status: "budget_exceeded", toolCalls: trace.length },
-              output: `<tool_script status="budget_exceeded">\n<error>\nreturned value is ${returnedText.length} bytes (max ${MAX_RESULT_BYTES}). Aggregate or slice the data before returning.\n</error>\n${logBlock}${traceBlock}</tool_script>`,
+              output: `<tool_script status="budget_exceeded">\n<error_message>\nreturned value is ${returnedBytes} bytes (max ${MAX_RESULT_BYTES}). Aggregate or slice the data before returning.\n</error_message>\n${logBlock}${traceBlock}</tool_script>`,
             }
           }
 
           return {
             title: `${trace.length} tool calls`,
             metadata: { status: "completed", toolCalls: trace.length },
-            output: `<tool_script status="completed">\n<result>\n${returnedText}\n</result>\n${logBlock}${traceBlock}</tool_script>`,
+            output: `<tool_script status="completed">\n<return_value>\n${returnedText}\n</return_value>\n${logBlock}${traceBlock}</tool_script>`,
           }
         }).pipe(Effect.orDie),
     }

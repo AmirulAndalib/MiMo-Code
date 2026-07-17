@@ -42,7 +42,7 @@ const hits = JSON.parse(await files.readText("/tmp/scan-results.json"))
 
 ## Output format
 
-The tool result comes back as XML-wrapped fields (status, result, logs, trace) — the `return` value is embedded verbatim inside a `<result>` block, not JSON-escaped, so newlines and quotes stay readable.
+The tool result comes back wrapped as `<tool_script status="...">` with three child blocks — `<return_value>`, `<logs>`, `<trace>` — plus `<error_message>` on failure paths. The `return` value is embedded verbatim inside `<return_value>` (not JSON-escaped), so newlines and quotes stay readable. `<return_value>` / `<error_message>` use distinctive names so common words in the returned content (e.g. the literal token "result" or "error") won't be confused for tag boundaries.
 
 ## Example (correct use)
 
