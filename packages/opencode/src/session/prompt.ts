@@ -4156,6 +4156,61 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         // writer (cases 2/3) or assemble context (case 1).
         yield* status.set(input.sessionID, { type: "busy" }).pipe(Effect.catch(() => Effect.void))
 
+        // Case 2: no usable checkpoint → actively spawn a writer and wait for
+        // it to finish, THEN rebuild from the freshly-written checkpoint.
+        // This is the user-decided semantics: /rebuild on a cold session
+        // produces the first checkpoint on the spot rather than deferring.
+        const hasCP = yield* checkpoint
+          .hasCheckpoint(input.sessionID)
+          .pipe(Effect.catch(() => Effect.succeed(false)))
+        if (!hasCP) {
+          const writerRunning = yield* checkpoint
+            .isWriterRunning(input.sessionID)
+            .pipe(Effect.catch(() => Effect.succeed(false)))
+          if (!writerRunning) {
+            // No checkpoint and no writer — start one. promptOps is declared
+            // in TryStartCheckpointWriterInput but never read by the writer
+            // (it spawns as a subagent via spawnRef), so a stub suffices.
+            yield* checkpoint
+              .tryStartCheckpointWriter({
+                sessionID: input.sessionID,
+                model: { providerID: model.providerID, modelID: model.modelID },
+                promptOps: {} as never,
+              })
+              .pipe(Effect.catch(() => Effect.succeed<"started" | "queued" | "skipped">("skipped")))
+          }
+          // Wait for the writer to finish. waitForWriter has its own 5-min
+          // safety bound (checkpoint.ts:985). On "success" the checkpoint file
+          // is on disk and the watermark is advanced; on "failure" or
+          // "no-writer" we fall through and let rebuildFromCheckpoint try
+          // whatever exists (or show the no-checkpoint message).
+          const writerOutcome = yield* checkpoint
+            .waitForWriter(input.sessionID)
+            .pipe(Effect.catch(() => Effect.succeed<"success" | "failure" | "no-writer">("failure")))
+          if (writerOutcome !== "success") {
+            // Writer failed or wasn't running — tell the user. noReply since
+            // there's nothing for the model to respond to.
+            const result = yield* prompt({
+              sessionID: input.sessionID,
+              messageID: input.messageID,
+              agent: agentName,
+              parts: [
+                {
+                  type: "text",
+                  text: "No checkpoint is available to rebuild from yet — continue the conversation and a checkpoint will be written automatically.",
+                  synthetic: true,
+                },
+              ],
+              noReply: true,
+            })
+            yield* status.set(input.sessionID, { type: "idle" }).pipe(Effect.catch(() => Effect.void))
+            return result
+          }
+          // Writer succeeded — fall through to rebuildFromCheckpoint which
+          // will now find the freshly-written checkpoint and insert the
+          // boundary.
+        }
+
         const inserted = yield* rebuildFromCheckpoint({
           sessionID: input.sessionID,
           msgs,
@@ -4165,10 +4220,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         }).pipe(Effect.catch(() => Effect.succeed(false)))
 
         if (!inserted) {
-          // No checkpoint available — tell the user rather than silently doing
-          // nothing. Return a synthetic message WITHOUT entering the runLoop
-          // (noReply: true) so no model response is generated. Clear idle
-          // status since the Runner won't handle it in this path.
+          // Defensive: writer succeeded but boundary insertion still failed
+          // (e.g. renderRebuildContext returned empty — degraded state).
+          // Fall back to the no-checkpoint message.
           const result = yield* prompt({
             sessionID: input.sessionID,
             messageID: input.messageID,

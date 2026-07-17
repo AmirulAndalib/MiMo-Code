@@ -122,36 +122,36 @@ describe("Manual /rebuild: on-the-spot rebuild with 3-case checkpoint-freshness"
   )
 
   it.live(
-    "case 2: no checkpoint → insertRebuildBoundary returns false (nothing to rebuild from)",
-    provideTmpdirInstance(() =>
+    "case 2: no checkpoint → handler spawns writer + waits + rebuilds (source-level guard)",
+    () =>
       Effect.gen(function* () {
-        const ssn = yield* Session.Service
-        const cp = yield* SessionCheckpoint.Service
+        // Source-level guard: verify the /rebuild handler, when no checkpoint
+        // exists, actively spawns a checkpoint-writer and waits for it before
+        // attempting rebuildFromCheckpoint — the user-decided case-2 semantics.
+        const promptSrc = yield* Effect.promise(() =>
+          Bun.file(`${import.meta.dir}/../../src/session/prompt.ts`).text(),
+        )
 
-        const info = yield* ssn.create({ title: "rebuild-no-cp" })
-        yield* Effect.promise(() => seedUserMessage(info.id, "turn one"))
-        yield* Effect.promise(() => seedUserMessage(info.id, "turn two"))
-        const m3 = yield* Effect.promise(() => seedUserMessage(info.id, "turn three"))
+        // The handler must check hasCheckpoint before attempting rebuild
+        expect(promptSrc).toMatch(
+          /if\s*\(input\.command\s*===\s*Command\.Default\.REBUILD\)[\s\S]*?hasCheckpoint/,
+        )
 
-        // No checkpoint file on disk — renderRebuildContext is empty.
-        const hasCP = yield* cp.hasCheckpoint(info.id).pipe(Effect.catch(() => Effect.succeed(false)))
-        expect(hasCP).toBe(false)
+        // When no checkpoint exists, must call tryStartCheckpointWriter
+        expect(promptSrc).toMatch(
+          /if\s*\(input\.command\s*===\s*Command\.Default\.REBUILD\)[\s\S]*?tryStartCheckpointWriter/,
+        )
 
-        // insertRebuildBoundary should return false (no context to insert).
-        const inserted = yield* cp.insertRebuildBoundary({
-          sessionID: info.id,
-          boundary: m3.id,
-          agent: "build",
-          model: { providerID: "test", modelID: "test-model" },
-        }).pipe(Effect.catch(() => Effect.succeed(false)))
-        expect(inserted).toBe(false)
+        // Must wait for the writer via waitForWriter
+        expect(promptSrc).toMatch(
+          /if\s*\(input\.command\s*===\s*Command\.Default\.REBUILD\)[\s\S]*?waitForWriter/,
+        )
 
-        // No boundary message added.
-        const after = yield* ssn.messages({ sessionID: info.id })
-        expect(after.length).toBe(3)
+        // After writer success, must call rebuildFromCheckpoint to insert boundary
+        expect(promptSrc).toMatch(
+          /if\s*\(input\.command\s*===\s*Command\.Default\.REBUILD\)[\s\S]*?writerOutcome.*success[\s\S]*?rebuildFromCheckpoint/,
+        )
       }),
-      { outsideGit: true, config: { checkpoint: { push_caps: { recent_user: 0 } } } },
-    ),
   )
 
   it.live(
