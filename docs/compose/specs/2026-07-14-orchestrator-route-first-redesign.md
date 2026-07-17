@@ -414,6 +414,89 @@ Only after YOUR verification passes should you report success to the user.
 **与 route-first 的关系**: route-first 是 dispatch 的实现机制 (入口); proactive audit 是 quality-gate (出口); acting-for-user 是运行中的代理行为 (中间)。三者共同构成完整的用户代理循环: 派发 → 代理决策 → 验证 → 交付。
 
 
+
+
+## Reliability / Liveness Detection
+
+A dependable Orchestrator is a PREREQUISITE of the "user's agent" identity. If the Orchestrator false-alarms "stalled" on healthy children, or silently hangs on truly stuck ones, it is neither a trustworthy agent nor a reliable coordinator. Liveness detection is not an add-on — it is the foundation that makes dispatch, act-for-user, and audit-quality trustworthy.
+
+### Current State: Black-Box Detection (The Defect)
+
+The stall watchdog (`spawn.ts:960`, T40) and `deriveLiveness` (`actor/schema.ts:73`, T39) only read **turn-boundary signals**: `turnCount` and `lastTurnTime`. These update only when a turn ENDS. During a single long turn — running tests, waiting on the LLM stream, reading big files — these timestamps are frozen.
+
+From outside, a healthy long turn looks **identical to a hang**:
+- Child is running `pytest` for 3 minutes → `lastTurnTime` frozen at turn start → `deriveLiveness` returns `stalled` after 90s (`DEFAULT_LIVENESS_STALL_MS`) → watchdog fires.
+- Child is reading a 10MB log file → same pattern → false alarm.
+- Child is waiting for LLM stream → same pattern → false alarm.
+
+This false-alarm flood makes the Orchestrator feel unreliable ("always stalling") — the exact opposite of a dependable agent.
+
+**Root cause**: black-box (turn-boundary timestamps) fundamentally cannot distinguish "long turn doing work" from "real hang". Both look like "no turn boundary for a while."
+
+### Fix: White-Box Detection (Option A)
+
+Add a **turn-internal activity heartbeat** — update a `lastActivityTime` every time the child produces a part (tool call / tool result / LLM token / reasoning), distinct from the turn-boundary `lastTurnTime`.
+
+The watchdog then reads `now - lastActivityTime`:
+- A long turn that's actually working keeps producing parts → activity time stays fresh → **NOT flagged**.
+- A truly hung turn stops producing parts internally too → activity time freezes → **flagged**.
+
+White-box (turn-internal activity) distinguishes "long turn doing work" from "real hang", which black-box (turn-boundary timestamps) fundamentally cannot.
+
+**Implementation sketch**:
+- In the turn execution loop (where parts are streamed/yielded), bump `lastActivityTime` on each part.
+- `deriveLiveness` gains a new signal: `now - lastActivityTime <= stallMs` → progressing; otherwise → stalled.
+- `lastTurnTime` still updates at turn boundaries (for backward compatibility).
+- The watchdog reads `lastActivityTime` (not just `lastTurnTime`) for stall detection.
+
+This aligns with the I1 heartbeat keystone — the heartbeat must fire at turn-INTERNAL activity points, not only at turn boundaries.
+
+### Real-Hang Root Causes (The Other Half)
+
+White-box detection kills **false stalls** (healthy long turns). The remaining question: what are the **true hangs** to fix?
+
+| Root Cause | Status | Description |
+|-----------|--------|-------------|
+| Empty-tool-call loop | Being reverted | The mis-designed guard (auto-retry) caused infinite loops |
+| Provider "call:" preamble leak | Being fixed | LLM provider emits malformed preamble that blocks processing |
+| Cancel-order deadlock | Fixed (be0c322) | Race condition between cancel and turn execution |
+| Orphaned child on old binary | Fixed (#1724, needs rebuild) | Child process stuck on stale binary after upgrade |
+| Checkpoint-writer deadlock | Fixed (historical) | Checkpoint writer blocked on write lock |
+
+With white-box detection, the Orchestrator can accurately distinguish:
+- "This child is doing work but it's slow" → leave it alone (no false alarm)
+- "This child is genuinely stuck" → nudge or cancel and re-dispatch (real hang)
+
+### Unified Identity: Reliability as Agent Quality
+
+The three pillars of the Orchestrator's identity are not independent features — they are expressions of the same principle: **the Orchestrator is the user's dependable agent**.
+
+```
+                    ┌─────────────────────────┐
+                    │  Orchestrator: 用户的代理人  │
+                    └────────────┬────────────┘
+               ┌─────────────────┼─────────────────┐
+               ▼                 ▼                   ▼
+        ┌──────────┐     ┌──────────────┐    ┌──────────────┐
+        │ Dispatch  │     │ Act for User  │    │ Reliability   │
+        │ (派发)     │     │ (代用户决策)    │    │ (可信赖)       │
+        └─────┬────┘     └──────┬───────┘    └──────┬───────┘
+              │                  │                    │
+    route-first             approve/answer      accurate liveness
+    <active-sessions>       grant-approval      white-box heartbeat
+    send/create             audit completion     no false alarms
+              │                  │                    │
+              ▼                  ▼                    ▼
+        入口: 工作送对     运行中: 代用户判断      基础: 可信赖的状态
+```
+
+Reliability is the **foundation** — without accurate liveness, dispatch (route to a "stalled" child that's actually working) and audit (trust a "completed" report that's actually stuck) break down. A false "stalled" alarm causes the Orchestrator to nudge or cancel a healthy child; a missed stall causes it to wait forever. Either way, the user's agent is not dependable.
+
+### Implementation Roadmap Addition
+
+**Phase 1.5 (between Phase 1 and Phase 2)**: Add `lastActivityTime` heartbeat to turn execution, update `deriveLiveness` to use it, verify false-alarm rate drops. This is a prerequisite for the Orchestrator to reliably act on liveness signals in its dispatch and audit decisions.
+
+
 ## Code Impact Analysis
 
 ### 1. session 工具: 无新 verb, 仅清理
