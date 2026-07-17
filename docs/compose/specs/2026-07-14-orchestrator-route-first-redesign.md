@@ -4,9 +4,11 @@ topic: orchestrator-route-first-redesign
 revisions:
   - date: 2026-07-15
     change: "AI-route revision: removed tool-level matching (findBestMatch/heuristic/embedding). Route decision is entirely AI-side — harness injects <active-sessions>, prompt guides AI to route-first, AI uses existing session send/create directly. No new route tool operation."
+  - date: 2026-07-17
+    change: "User's Agent upgrade: reframed Orchestrator from message-router to user's proxy/agent. Added 3 active-decision duties (permission decisions, answer child questions, proactive audit) mapped to existing session-tool primitives. Route-first becomes the dispatch sub-part of the larger agent identity."
 ---
 
-# Orchestrator Route-First Redesign
+# Orchestrator Redesign: The User's Agent
 
 ## Problem Frame
 
@@ -57,29 +59,52 @@ In practice, the Orchestrator面对同一条主题的反复工作请求时, 每�
 
 ## First-Principles Analysis
 
-### Orchestrator 的本质: 传声筒/路由器
+### Orchestrator 的本质: 用户的代理人
 
-Orchestrator 不是 "decompose → dispatch (create)" 模型。它的本质是:
+Orchestrator 不是 "decompose → dispatch (create)" 模型, 也不仅仅是一个传声筒/路由器。它的本质是:
 
-> **面对一条工作, 决定"传给哪个已存在的会话"**
+> **站在用户的角度, 代替用户做决策**
 
-这个决策的输入是:
+它不是被动地把消息从 A 搬到 B。它是用户的 **代理人 (agent/proxy)** — 理解用户的意图, 在用户的名义下做判断、做决定、把关质量。Route-first (该发给哪个会话) 只是它的一项职能 — **dispatch (派发)** — 而不是它的全部身份。
+
+Orchestrator 作为用户代理人的三项核心职责:
+
+| 职责 | 含义 | 对应的用户行为 |
+|------|------|---------------|
+| **Dispatch (派发)** | 决定任务交给哪个已有会话, 或是否需要新建 | 用户看聊天列表选一个发消息 |
+| **Act for user (代用户决策)** | 代替用户批准权限请求、回答子会话的问题 | 用户看到权限弹窗点击批准; 用户看到子会话提问直接回答 |
+| **Audit quality (把关质量)** | 主动检查子会话是否真正完成且质量达标, 而非被动等待汇报 | 用户审查交付物, 不盲目相信"做完了" |
+
+这三项职责不是独立的功能列表, 而是 **同一个代理身份的不同表达**:
+- Dispatch 是 **入口**: 把工作送到对的地方
+- Act-for-user 是 **运行中**: 子会话需要用户介入时, 代理人代为决策
+- Audit quality 是 **出口**: 子会话说"做完了"时, 代理人验证是否真的做完了
+
+这个身份不与 route-first 矛盾 — route-first 是 dispatch 的机制; proactive audit 是 quality-gate 的机制; acting-for-the-user 是底层的 agent 本质。三者共同构成 "用户的代理人" 完整身份。
+
+决策的输入是:
 - 活会话清单 (谁在线, 在做什么, 做到哪了)
 - 当前任务的语义
-- 会话之间的依赖关系
+- 子会话的请求 (权限、问题、完成通知)
+- 用户的意图和偏好
 
 决策的输出是:
 - route-to-existing: 把任务发给某个已有会话 (`session send`)
 - create-as-fallback: 清单里没合适的 → 新建一个, 加入清单
+- approve/answer: 代替用户批准权限、回答子会话问题
+- audit: 验证子会话的交付质量
 
 ### 当前模型 vs 目标模型
 
 ```
 Current:  user task → decompose → create (default) → (maybe topic reuse)
-                                    ↑ create 是一等操作
+                                    ↑ create 是一等操作; 被动等通知; 盲目转发权限
 
-Target:   user task → AI reads <active-sessions> → route (send) or create
-                                    ↑ AI 做路由决策, 工具只提供清单+执行
+Target:   user task → Orchestrator (as user's agent):
+              ├─ Dispatch: read <active-sessions> → send or create (route-first)
+              ├─ Act for user: decide permission asks, answer child questions
+              └─ Audit quality: verify completion before declaring done
+                                    ↑ 主动代理, 不是被动传声筒
 ```
 
 ### 类比: 人如何管理多会话
@@ -96,18 +121,21 @@ Target:   user task → AI reads <active-sessions> → route (send) or create
 
 ## Target Design
 
-### Core Principle: AI Routes, Tools Provide + Execute
+### Core Principle: Orchestrator is the User's Agent
 
 整个设计的核心原则:
 
-> **路由决策是 AI 的职责。工具层只负责两件事: (1) 提供活会话清单作为 AI 的决策输入; (2) 执行 AI 选定的 send/create 操作。**
+> **Orchestrator 是用户的代理人。它不是传声筒, 而是在用户的名义下主动做决策 — 派发工作、代用户回答和批准、把关交付质量。工具层提供信息和执行, AI 做所有决策。**
 
-没有独立的 `route` 工具操作。没有 `findBestMatch`。没有启发式匹配。没有 embedding 相似度。AI 看着清单, 自己决定 send 给谁。
+具体来说:
+- **Dispatch (派发)**: AI 看 `<active-sessions>` 清单, 决定 send 给谁或 create 新会话。没有 `findBestMatch`, 没有启发式 — AI 是最好的路由器。
+- **Act for user (代用户决策)**: 子会话的权限请求和提问, Orchestrator 代替用户判断和回答, 而非盲目转发。
+- **Audit quality (把关质量)**: 子会话报告完成时, Orchestrator 主动验证交付质量, 而非被动接受。
 
 这意味着:
-- **不需要新的 tool verb** — AI 直接用现有的 `session send` 和 `session create`
-- **不需要工具层的匹配逻辑** — 路由决策完全在 prompt + AI 层
-- **最小化代码变更** — 核心变更是 (1) context injection, (2) prompt rewrite
+- **不需要新的 tool verb** — 所有操作都映射到现有 session tool primitives
+- **不需要工具层的匹配逻辑** — 所有决策完全在 prompt + AI 层
+- **最小化代码变更** — 核心变更是 (1) context injection, (2) orchestrator.txt 重写
 
 ### R1: Harness 注入活会话清单
 
@@ -197,9 +225,9 @@ orchestrator.txt 的核心变化 — 让 AI 自己做路由决策:
 | Section | Before | After |
 |---------|--------|-------|
 | 核心循环 | decompose → dispatch (create) | understand → **route** (AI reads list, decides send or create) → yield → integrate → report |
-| session tool 参考 | create 是主要操作 | **send 是主要操作**, create 是 fallback |
+| session tool 参考 | create 是主要操作; approve/grant-approval 未使用 | **send 是主要操作**, create 是 fallback; **approve/grant-approval 代用户决策** |
 | 复用指引 | "reuse a standing session per theme" via topic | "see `<active-sessions>` in your context — pick the best match and `session send`" |
-| 新增 Route Decision | — | AI 如何从清单中选择: 看 title/mode/status/dir, 结合任务语义判断 |
+| 新增 Duties | — | Route Decision (dispatch); Permission Decision (act-for-user); Answer Questions (act-for-user); Audit Completion (quality gate) |
 
 **orchestrator.txt 新增 Route Decision section 的内容指引**:
 
@@ -246,6 +274,146 @@ Orchestrator 的决策流程变为:
 4. 返回结果给用户
 ```
 
+
+
+## Orchestrator as the User's Agent/Proxy
+
+前文的 route-first + `<active-sessions>` injection 覆盖了 **dispatch (派发)** 职责 — 这是 Orchestrator 的入口。但一个真正的用户代理人还需要在 **运行中** 和 **出口** 做决策。本节将 Orchestrator 的完整代理身份映射到现有 session-tool primitives。
+
+### Duty 1: Permission Decisions — 代替用户批准
+
+**场景**: 子会话运行中碰到需要用户授权的权限请求 (访问工作区外目录、读 `.env` 等)。当前行为是盲目转发给用户, 用户需要切进子会话面板手动批准。
+
+**代理人行为**: Orchestrator **代替用户判断**这个权限请求是否合理, 在自己的上下文中批准或拒绝, 而非每次都转发给用户。
+
+**映射到现有 primitives**:
+
+| Primitive | 作用 | 代理人用法 |
+|-----------|------|-----------|
+| `session approve <id>` | 批准某子会话当前挂起的一个权限请求 | Orchestrator 收到转发的权限请求后, 判断是否合理 → 合理则 `session approve`; 不合理则拒绝 |
+| `session grant-approval <id>` / `session grant-approval all` | 预授权: 未来权限请求自动批准 | 对已建立信任的子会话, 预授权免每次判断 |
+| `decideAskRouting` (config.ts) | 决定权限请求转发给谁 | 现有逻辑: Orchestrator peer → 转发给 Orchestrator。**不变** — 转发机制已有, 改变的是 Orchestrator 收到后的处理方式 |
+
+**orchestrator.txt 指引**:
+
+```
+## Permission decisions — act on the user's behalf
+
+When a child session sends you a permission request (forwarded ask), you are
+the user's proxy. DO NOT blindly relay every permission prompt to the user —
+that would make you a mere message relay, not an agent.
+
+Instead, judge the request yourself:
+- Is this permission reasonable for the child's stated task? → APPROVE it.
+- Is this suspicious or outside the child's scope? → DENY it.
+- Is this genuinely uncertain or irreversible? → THEN relay to the user.
+
+Use `session approve <id>` for one-time approvals.
+Use `session grant-approval <id>` when you trust a child's judgment for its
+entire task scope (e.g. a build child that needs file access across its directory).
+Only escalate to the user for genuinely ambiguous or high-stakes decisions.
+```
+
+### Duty 2: Respond to Child Questions — 代替用户回答
+
+**场景**: 子会话在运行中遇到需要用户输入的问题 (选哪个方案? 确认需求? 提供缺失信息?)。当前行为是把问题转发给用户。
+
+**代理人行为**: Orchestrator **利用自己对用户意图的理解**直接回答子会话的问题, 而非每次都转发。只有真正需要用户亲自判断时才转发。
+
+**映射到现有 primitives**:
+
+| Primitive | 作用 | 代理人用法 |
+|-----------|------|-----------|
+| `session send <id> <message>` | 向子会话发送消息 (唤醒或追加) | Orchestrator 直接 send 回答给子会话, 代替用户回复 |
+| `session ask <id> <question>` | 向子会话提只读问题 (不打断其任务) | Orchestrator 可以先 ask 了解子会话的上下文, 再决定如何回答 |
+| `actor_notification` (inbox) | 子会话的通知/问题到达 Orchestrator 的 inbox | **不变** — 通知机制已有; 改变的是 Orchestrator 收到后的处理方式: 从 "转发给用户" 变为 "自己回答或有条件转发" |
+
+**orchestrator.txt 指引**:
+
+```
+## Answer child questions — you know the user's intent
+
+When a child session asks a question upward, you are the user's proxy.
+You know the user's goals, preferences, and constraints from the conversation.
+DO NOT blindly relay every child question to the user — answer it yourself
+when you can, based on your understanding of the user's intent.
+
+- You know the user wants X? Tell the child to do X. Use `session send`.
+- The question is about implementation details you don't know? Let the child
+  decide (it has the context). Use `session send` with "use your judgment".
+- The question is about an irreversible choice you can't decide? THEN relay
+  to the user. But this should be rare.
+
+The user delegated to you because they don't want to be interrupted by every
+sub-decision. Be the buffer, not the conduit.
+```
+
+### Duty 3: Proactive Audit — 主动把关质量
+
+**场景**: 子会话报告 "任务完成"。当前行为是被动接受通知, 假设子会话说完成就是完成。
+
+**代理人行为**: Orchestrator **主动验证**子会话的交付是否真的完成且质量达标, 而非盲目相信。这是 **fan-in/aggregation** 的质量门: 不是子会话说 done 就 done, 而是代理人审查后确认 done。
+
+**映射到现有 primitives**:
+
+| Primitive | 作用 | 代理人用法 |
+|-----------|------|-----------|
+| `session join <id...>` | 等待所有子会话到达 terminal 状态, 返回聚合摘要 | 批量派发后的 fan-in 聚合点 — Orchestrator 收到聚合结果后审查 |
+| `session status <id>` | 查询子会话的派生 liveness (progressing/stalled/terminal) | 定期或收到通知后, 检查子会话的真实状态 |
+| `session ask <id> <question>` | 向子会话提只读问题 (基于其历史回答) | 审查: "你的任务完成了吗? 交付物是什么? 有没有遗漏?" — 基于子会话历史的只读查询 |
+| `session dashboard` | 舰队全景 (liveness + worktree 状态) | 宏观审查: 所有子会话的整体进展和健康度 |
+| `git log/diff` (via bash) | 审查 isolated 子会话的提交 | 对 isolated child: 直接审查 git commits 的质量, 而非只看子会话的自我报告 |
+
+**orchestrator.txt 指引**:
+
+```
+## Audit completion — verify, don't trust
+
+When a child session reports completion, you are the quality gate.
+DO NOT blindly accept "I'm done" as final — verify before declaring success.
+
+Verification steps (pick per situation):
+1. `session status <id>` — is it truly terminal (not just idle-without-reporting)?
+2. `session ask <id> "Summarize what you did and any open items"` — get a
+   self-report from the child's own history
+3. For isolated children: `git log <branch>` / `git diff` — inspect the
+   actual commits, not just the child's claim
+4. `session dashboard` — survey the whole fleet's health before declaring
+   the overall goal done
+
+A child that says "done" but left uncommitted changes, missed acceptance
+criteria, or introduced regressions is NOT done. You catch this; the user
+trusts you to catch this.
+
+Only after YOUR verification passes should you report success to the user.
+```
+
+### Three Duties, One Identity
+
+这三项职责不是三个独立功能, 而是 **同一个代理身份** 的三种表现:
+
+```
+                    ┌─────────────────────────┐
+                    │  Orchestrator: 用户的代理人  │
+                    └────────────┬────────────┘
+               ┌─────────────────┼─────────────────┐
+               ▼                 ▼                   ▼
+        ┌──────────┐     ┌──────────────┐    ┌──────────────┐
+        │ Dispatch  │     │ Act for User  │    │ Audit Quality │
+        │ (派发)     │     │ (代用户决策)    │    │ (把关质量)     │
+        └─────┬────┘     └──────┬───────┘    └──────┬───────┘
+              │                  │                    │
+    session send/create   session approve      session join/status
+    <active-sessions>     session send (reply)  session ask (verify)
+    injection             grant-approval        git log/diff (inspect)
+              │                  │                    │
+              ▼                  ▼                    ▼
+        入口: 工作送对     运行中: 代用户判断      出口: 验证质量
+```
+
+**与 route-first 的关系**: route-first 是 dispatch 的实现机制 (入口); proactive audit 是 quality-gate (出口); acting-for-user 是运行中的代理行为 (中间)。三者共同构成完整的用户代理循环: 派发 → 代理决策 → 验证 → 交付。
+
+
 ## Code Impact Analysis
 
 ### 1. session 工具: 无新 verb, 仅清理
@@ -286,22 +454,25 @@ if (input.agent.name === "orchestrator") {
 
 核心重写部分:
 
-- **Line 1-5 (Identity)**: 强调 "route-first coordinator", 而非 "decompose-and-dispatch leader"
-- **Line 22-30 (The loop)**: 循环改为 "understand → route (AI reads list, decides send or create) → yield → integrate → report"
-- **Line 48-59 (session tool reference)**: `send` 提升为主要操作, `create` 标注为 fallback
+- **Line 1-5 (Identity)**: 从 "leader who accomplishes goals by delegating" 改为 "the user's agent — you make decisions on the user's behalf, not just relay messages"
+- **Line 22-30 (The loop)**: 循环改为 "understand → route → yield → on notification: **audit + act for user** → integrate → report"
+- **Line 48-59 (session tool reference)**: `send` 提升为主要操作, `create` 标注为 fallback; 新增 `approve`/`grant-approval` 作为代用户决策的核心操作
 - **Line 82-88 (Reuse section)**: 从 "reuse per theme via topic" 改为 "see `<active-sessions>` — pick the best match and send"
 - **新增 Route Decision section**: 指导 AI 如何利用 `<active-sessions>` 上下文做路由决策 (见 R2)
+- **新增 Permission Decision section**: 指导 AI 代替用户批准/拒绝权限请求 (见 Duty 1)
+- **新增 Answer Child Questions section**: 指导 AI 代替用户回答子会话问题 (见 Duty 2)
+- **新增 Audit Completion section**: 指导 AI 主动验证子会话交付质量 (见 Duty 3)
 
 ### 4. 涉及文件汇总
 
 | File | Change Type | Description |
 |------|-------------|-------------|
 | `packages/opencode/src/session/llm.ts` | **修改** | `buildSystemArray` 中注入 `<active-sessions>` context |
-| `packages/opencode/src/session/prompt/orchestrator.txt` | **修改** | 决策指引从 create-first 改为 route-first; 新增 Route Decision section |
+| `packages/opencode/src/session/prompt/orchestrator.txt` | **修改** | 身份从 coordinator 升级为 user's agent; 新增 Route/Permission/Answer/Audit 四个 decision sections; send/approve 提升为主要操作 |
 | `packages/opencode/src/tool/session.ts` | **修改** | `create` 中移除 topic find-or-reuse; `list` 新增 summary 格式 |
 | `packages/opencode/src/session/prompt.ts` | **小改** | `buildActiveSessionsContext` 新函数 (可放此处或 llm.ts) |
 
-**注意**: 没有新增 Zod schema, 没有新增 KNOWN_VERBS, 没有新增 tool verb。核心变更是 context injection + prompt rewrite。
+**注意**: 没有新增 Zod schema, 没有新增 KNOWN_VERBS, 没有新增 tool verb。三项代理职责全部映射到现有 primitives。核心变更是 context injection + orchestrator.txt 重写。
 
 ## Implementation Roadmap
 
@@ -354,10 +525,11 @@ if (input.agent.name === "orchestrator") {
 
 ## Key Decisions
 
-- **AI 路由, 工具不匹配**: 路由决策完全由 AI 做 — 基于注入的 `<active-sessions>` 清单和任务语义。工具层不实现任何匹配逻辑 (findBestMatch/heuristic/embedding)。AI 是最好的路由器。
-- **不需要新的 route 工具操作**: AI 直接用现有的 `session send` 执行路由, 用 `session create` 作为 fallback。最小化代码变更。
-- **context injection 而非 on-demand query**: 活会话清单注入 system prompt, 让 Orchestrator 每次 turn 都能看到全貌, 而非需要主动调用 list — 降低认知负担
-- **prompt 引导而非硬编码**: 路由行为通过 prompt 迭代优化, 而非工具层强制。如果引导不够, 加强 prompt 而非引入匹配算法。
+- **Orchestrator 是用户的代理人, 不是传声筒**: 核心身份从 "message router" 升级为 "user's agent/proxy"。三项职责 (dispatch/act-for-user/audit-quality) 共同构成完整的代理身份, 而非独立功能列表。
+- **AI 做所有决策, 工具只提供信息+执行**: 路由决策、权限判断、质量审查全部由 AI 做。工具层不实现任何匹配逻辑, 也不代替用户做判断。
+- **不需要新的 tool verb**: 所有三项职责都映射到现有 session tool primitives (send/create/approve/grant-approval/ask/join/status/dashboard)。最小化代码变更。
+- **context injection 而非 on-demand query**: 活会话清单注入 system prompt, 让 Orchestrator 每次 turn 都能看到全貌 — 降低认知负担。
+- **prompt 引导而非硬编码**: 所有行为 (路由、权限决策、质量审查) 通过 prompt 迭代优化, 而非工具层强制。
 
 ## Dependencies / Assumptions
 
@@ -367,9 +539,11 @@ if (input.agent.name === "orchestrator") {
 
 ## References
 
-- `packages/opencode/src/tool/session.ts` — session tool 实现 (create/send/list/topicOf/tagTitle)
+- `packages/opencode/src/tool/session.ts` — session tool 实现 (create/send/list/ask/approve/grant-approval/join/status/dashboard)
 - `packages/opencode/src/session/prompt/orchestrator.txt` — orchestrator 系统提示词
 - `packages/opencode/src/session/llm.ts:240-306` — system prompt 组装 (buildSystemArray)
-- `packages/opencode/src/agent/agent.ts:231-251` — orchestrestrator agent 定义
+- `packages/opencode/src/agent/agent.ts:231-251` — orchestrator agent 定义
+- `packages/opencode/src/agent/config.ts:7-46` — `decideAskRouting` 权限转发决策
+- `packages/opencode/src/permission/permission-forward-ref.ts` — 权限转发/授权 ref + 去重
 - `docs/harness/MiMo Orchestrator Mode.md` — orchestrator 模式文档
 - PR #1727 — 去掉 topic 字符串匹配 (止血, 非本 redesign)
