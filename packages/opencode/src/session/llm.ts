@@ -33,6 +33,8 @@ import { ActorRegistry } from "@/actor/registry"
 import { Memory } from "@/memory"
 import { isRetryableTransientError } from "./retry"
 import { MCP_TOOL_SEARCH_ID } from "@/tool/mcp-tool-search"
+import { deriveLiveness } from "@/actor/schema"
+import { SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
 
 const log = Log.create({ service: "llm" })
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
@@ -248,6 +250,25 @@ const live: Layer.Layer<
       agentID?: string
     }) {
       const system: string[] = []
+
+      // Build a compact <active-sessions> XML block for the orchestrator.
+      // Pure function: takes enriched peer data, returns XML string or undefined.
+      const buildActiveSessionsContext = (
+        peers: { child: { id: SessionID; title: string }; actor: any }[],
+      ): string | undefined => {
+        const now = Date.now()
+        const active = peers.filter(({ actor }) => {
+          if (!actor) return true
+          const live = deriveLiveness(actor, now)
+          return live !== "success" && live !== "failure" && live !== "cancelled"
+        })
+        if (active.length === 0) return undefined
+        const lines = active.map(({ child, actor }) => {
+          const live = actor ? deriveLiveness(actor, Date.now()) : "idle"
+          return `  ${child.id} | ${child.title} | ${actor?.agent ?? "?"} | ${live}`
+        })
+        return `<active-sessions>\n${lines.join("\n")}\n</active-sessions>`
+      }
       system.push(
         [
           ...SystemPrompt.agent(input.agent, input.model),
@@ -286,6 +307,38 @@ const live: Layer.Layer<
         // the "agent edits MEMORY.md before any checkpoint" path. Idempotent.
         yield* Effect.promise(() => migrateProjectMemory(projectID)).pipe(Effect.ignore)
         system.push(buildMemoryInstructions(SessionID.make(input.sessionID), projectID, yield* memory.root()))
+      }
+
+      // Orchestrator active-sessions roster: inject a compact one-line-per-session
+      // list of the orchestrator's live child sessions. Only for the orchestrator
+      // agent — other agents don't manage children. Format is intentionally compact
+      // (~30 tokens/session): id | title | mode | status. Terminal sessions are
+      // filtered out. AI needs details on demand → session status/ask.
+      if (input.agent.name === "orchestrator") {
+        // Fetch child actors via actor registry (no Session.Service needed in this layer).
+        // listByParent returns all actors spawned by this session; we filter to real
+        // peers and derive liveness for the compact roster.
+        const allActors = yield* actorReg.listByParent(
+          SessionID.make(input.sessionID),
+          input.agentID ?? "main",
+        )
+        const peers = allActors.filter(
+          (a) => a.mode !== "subagent" && !SYSTEM_SPAWNED_AGENT_TYPES.has(a.agent),
+        )
+        if (peers.length > 0) {
+          const now = Date.now()
+          const active = peers.filter((a) => {
+            const live = deriveLiveness(a, now)
+            return live !== "success" && live !== "failure" && live !== "cancelled"
+          })
+          if (active.length > 0) {
+            const lines = active.map((a) => {
+              const live = deriveLiveness(a, Date.now())
+              return `  ${a.sessionID} | ${a.agent} | ${live}`
+            })
+            system.push(`<active-sessions>\n${lines.join("\n")}\n</active-sessions>`)
+          }
+        }
       }
 
       // Plugins still see the multi-part array (base prompt as [0], memory as a
