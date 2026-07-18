@@ -1,5 +1,5 @@
 ---
-name: mimocode
+name: mimocode-docs
 description: Use when the user asks what MiMoCode can do, how a feature works (memory, checkpoints, agents, subagents, tasks, compose, voice, dream/distill, goal), how to configure it, where config/data lives, which config key controls a behavior, what CLI or slash commands exist, or how to enable/disable/tune something — the self-documenting reference for MiMoCode itself.
 ---
 
