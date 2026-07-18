@@ -221,6 +221,10 @@ export const dict: Record<string, string> = {
     "Deep multi-source investigation with cross-checked, cited reports",
   "tui.skill.modern-python-toolchain.description":
     "Modern Python project setup with uv, ruff, and pyright",
+  "tui.skill.data-analytics.description":
+    "Analyze product and business data, design KPIs, and build dashboards and reports",
+  "tui.skill.product-design.description": "Research, audit, prototype, and validate product and UX designs",
+  "tui.skill.sales.description": "Prepare meetings, research accounts, plan deals, and work with sales systems",
   "tui.skill.compose:ask.description": "Ask the user for decisions or clarifications",
   "tui.skill.compose:brainstorm.description": "Explore requirements and design before implementation",
   "tui.skill.compose:debug.description": "Systematic debugging before proposing fixes",

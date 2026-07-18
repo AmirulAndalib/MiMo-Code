@@ -297,6 +297,12 @@ export const dict = {
     "Глубокое многоисточниковое исследование с перекрёстной проверкой и цитированием",
   "tui.skill.modern-python-toolchain.description":
     "Настройка Python-проекта с uv, ruff и pyright",
+  "tui.skill.data-analytics.description":
+    "Анализ данных о продукте и бизнесе, проектирование KPI, создание дашбордов и отчётов",
+  "tui.skill.product-design.description":
+    "Исследование, аудит, прототипирование и проверка дизайна продукта и UX",
+  "tui.skill.sales.description":
+    "Подготовка встреч, исследование клиентов, планирование сделок и работа с системами продаж",
   "tui.skill.compose:ask.description": "Запросить у пользователя решение или уточнение",
   "tui.skill.compose:brainstorm.description": "Исследовать требования и дизайн перед реализацией",
   "tui.skill.compose:debug.description": "Системная отладка перед предложением исправлений",

@@ -47,4 +47,12 @@ describe("skillDescription", () => {
       expect(dict["tui.skill.claude-code.description"]).toBeTruthy()
     }
   })
+
+  test("data analytics, product design, and sales skills have descriptions in every TUI locale", () => {
+    for (const dict of [en, es, fr, ja, ru, zh, zht]) {
+      expect(dict["tui.skill.data-analytics.description"]).toBeTruthy()
+      expect(dict["tui.skill.product-design.description"]).toBeTruthy()
+      expect(dict["tui.skill.sales.description"]).toBeTruthy()
+    }
+  })
 })

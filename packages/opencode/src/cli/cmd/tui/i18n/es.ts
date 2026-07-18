@@ -295,6 +295,11 @@ export const dict = {
     "Investigación multi-fuente profunda con informe citado y verificado",
   "tui.skill.modern-python-toolchain.description":
     "Configuración de proyecto Python moderno con uv, ruff y pyright",
+  "tui.skill.data-analytics.description":
+    "Analizar datos de producto y negocio, diseñar KPI y crear dashboards e informes",
+  "tui.skill.product-design.description": "Investigar, auditar, prototipar y validar diseños de producto y UX",
+  "tui.skill.sales.description":
+    "Preparar reuniones, investigar cuentas, planificar ventas y usar sistemas comerciales",
   "tui.skill.compose:ask.description": "Solicitar decisiones o aclaraciones al usuario",
   "tui.skill.compose:brainstorm.description": "Explorar requisitos y diseño antes de implementar",
   "tui.skill.compose:debug.description": "Depuración sistemática antes de proponer correcciones",
