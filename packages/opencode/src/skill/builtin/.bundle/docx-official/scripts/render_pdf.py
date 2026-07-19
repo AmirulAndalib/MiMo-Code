@@ -23,7 +23,7 @@ _MAC_STANDALONE = Path("/Applications/LibreOffice.app/Contents/MacOS/soffice")
 
 
 def _find_soffice() -> str:
-    override = os.environ.get("DOCX_SKILL_SOFFICE")
+    override = os.environ.get("DOCX_SKILL_SOFFICE") or os.environ.get("MIMO_SOFFICE")
     if override:
         return override
     for candidate in ("soffice", "libreoffice"):

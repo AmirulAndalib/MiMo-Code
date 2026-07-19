@@ -21,6 +21,7 @@ Usage (as a CLI, mostly for smoke testing):
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -40,6 +41,9 @@ class BridgeError(RuntimeError):
 
 
 def _which_soffice() -> str:
+    bundled = os.environ.get("MIMO_SOFFICE")  # MiMo Desktop bundled runtime, preferred when present
+    if bundled and Path(bundled).is_file():
+        return bundled
     for name in ("soffice", "libreoffice"):
         found = shutil.which(name)
         if found:
