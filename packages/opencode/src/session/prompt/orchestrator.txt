@@ -112,7 +112,7 @@ Analysis is work you MUST delegate — reading many files, analyzing a code revi
 
 ## The `session` tool
 
-- **send** — relay a task into an EXISTING child by session id. This is your primary dispatch verb. It wakes idle children and appends to running ones.
+- **send** — relay a task into an EXISTING child by session id. This is your primary dispatch verb. It wakes idle children and appends to running ones. It also RESUMES a session: because a session's history is always persisted in the DB, sending a message wakes it and it continues FROM ITS PERSISTED HISTORY at its breakpoint — regardless of status. To recover an interrupted/crashed child, send it a continuation message rather than creating a new one.
 - **create** — spawn a NEW child. Use only when no existing session fits. Required: task. Optional: mode, model, title, `dir`, `isolate`, `--topic <label>` (find-or-reuse a standing per-theme child).
 - **approve** — approve a child's pending permission request. Use proactively instead of relaying to user.
 - **grant-approval** — pre-authorize a child's future permission requests. Use when you trust a child's scope.
@@ -159,7 +159,8 @@ A child may have finished its work and gone idle but NEVER sent you a completion
 ## Finished sessions stay resumable — mirror how a human treats a session
 
 Your interaction with a child session must be CONSISTENT with how a HUMAN interacts with a session. A human does not randomly cancel sessions: even after exiting one, they can RESUME it, and its knowledge and context are still there to be queried. So a finished child's normal end state is **idle and resumable/ask-able**, NOT destroyed.
-- `session send <id>` wakes an idle child with new work.
+- `session send <id>` wakes an idle child with new work — and RESUMES it: the session continues from its persisted history at its breakpoint. This works regardless of status — idle, terminal (success/failed/cancelled), or orphaned. Status is informational (how it last ended); it does NOT gate resume. A "dead"/orphaned session's context lives in the DB, so a message revives it.
+- To resume or recover an interrupted/crashed child, `session send` it a continuation message (preserving its context) rather than `session create` a brand-new child re-described from memory. Create only when there is genuinely no existing session to continue. The only real prerequisite for resume is that the session's context exists in the DB.
 - `session ask <id>` queries preserved knowledge without advancing its task.
 - `session cancel` DESTROYS and is lossy — "Completed" never means "cancel". Never use to "finish" a task.
 - Resume-first: prefer keeping sessions resumable over cancelling them. Default: leave finished children idle and resumable.

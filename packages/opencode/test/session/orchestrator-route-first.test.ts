@@ -101,6 +101,18 @@ describe("orchestrator prompt — session lifecycle safety", () => {
     expect(PROMPT_ORCHESTRATOR).toMatch(/Completed.*never means.*cancel/i)
   })
 
+  test("session send resumes a session from persisted history — not just relay", () => {
+    // send is documented as a resume verb, not only new-task relay
+    expect(PROMPT_ORCHESTRATOR).toMatch(/send.*RESUMES/i)
+    expect(PROMPT_ORCHESTRATOR).toMatch(/persisted history/i)
+    // resume works regardless of status; status does not gate it
+    expect(PROMPT_ORCHESTRATOR).toMatch(/regardless of status/i)
+    expect(PROMPT_ORCHESTRATOR).toMatch(/does NOT gate resume/i)
+    // prefer resume-via-send over recreating a child from memory
+    expect(PROMPT_ORCHESTRATOR).toMatch(/resume.*recover an interrupted\/crashed child/i)
+    expect(PROMPT_ORCHESTRATOR).toMatch(/rather than.*session create/i)
+  })
+
   test("don't poll, wait event-driven", () => {
     expect(PROMPT_ORCHESTRATOR).toMatch(/don.*t poll/)
     expect(PROMPT_ORCHESTRATOR).toMatch(/event-driven/)
