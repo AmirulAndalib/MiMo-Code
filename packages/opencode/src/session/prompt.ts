@@ -4245,10 +4245,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           return result
         }
 
-        // Checkpoint was inserted — enter the runLoop (no noReply) so the
-        // model sees the rebuilt context boundary and produces a response.
-        // The Runner's onIdle callback clears busy status automatically.
-        return yield* prompt({
+        // Checkpoint was inserted. A MANUAL /rebuild is a user action whose
+        // whole intent is to free/rebuild the context — the user asked no
+        // question, so the model must NOT produce a reply. Return the synthetic
+        // note via noReply:true so the boundary is recorded and the waiting UI
+        // shown, but the runLoop is never entered (no spurious "reply to
+        // nothing" turn). The AUTO-triggered rebuild path (runLoop, prompt.ts
+        // ~3188/3761) is unaffected: it rebuilds mid-turn and `continue`s to
+        // answer the pending user message, which is correct there.
+        // Because the runLoop doesn't run, its onIdle won't clear busy status,
+        // so clear it explicitly here (mirrors the no-checkpoint paths above).
+        const result = yield* prompt({
           sessionID: input.sessionID,
           messageID: input.messageID,
           agent: agentName,
@@ -4259,7 +4266,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               synthetic: true,
             },
           ],
+          noReply: true,
         })
+        yield* status.set(input.sessionID, { type: "idle" }).pipe(Effect.catch(() => Effect.void))
+        return result
       }
 
       const raw = input.arguments.match(argsRegex) ?? []

@@ -259,13 +259,28 @@ describe("Manual /rebuild: on-the-spot rebuild driven through SessionPrompt.comm
                   agent: "build",
                 })
 
-                // The success path enters the runLoop → the model was called and
-                // an assistant reply came back (NOT the noReply no-checkpoint path).
-                expect(result.info.role).toBe("assistant")
-                expect(result.parts.some((p) => p.type === "text" && p.text.includes("rebuilt-reply-from-model"))).toBe(
-                  true,
+                // A MANUAL /rebuild must NOT enter the runLoop: it inserts the
+                // boundary and returns the synthetic note WITHOUT producing a
+                // model reply (the user asked no question). So the returned
+                // message is the synthetic rebuild note (role "user", not an
+                // assistant turn), and the LLM was never called — no spurious
+                // "reply to nothing" turn.
+                expect(result.info.role).not.toBe("assistant")
+                expect(
+                  result.parts.some(
+                    (p) => p.type === "text" && p.text.includes("Context rebuilt from the latest checkpoint"),
+                  ),
+                ).toBe(true)
+                expect(
+                  result.parts.some((p) => p.type === "text" && p.text.includes("rebuilt-reply-from-model")),
+                ).toBe(false)
+                expect(llm.calls).toBe(0)
+
+                // And no assistant reply carrying the scripted text landed in the DB.
+                const replied = (yield* sessions.messages({ sessionID: info.id })).some((m) =>
+                  m.parts.some((p) => p.type === "text" && p.text.includes("rebuilt-reply-from-model")),
                 )
-                expect(llm.calls).toBeGreaterThanOrEqual(1)
+                expect(replied).toBe(false)
 
                 // A checkpoint boundary message was actually inserted into the DB.
                 const after = yield* sessions.messages({ sessionID: info.id })
@@ -327,12 +342,18 @@ describe("Manual /rebuild: on-the-spot rebuild driven through SessionPrompt.comm
                   })
 
                   // The writer wrote a checkpoint and the handler rebuilt from
-                  // it → entered the runLoop → the model produced a reply.
-                  expect(result.info.role).toBe("assistant")
+                  // it, but a MANUAL /rebuild must NOT reply: it returns the
+                  // synthetic rebuild note via noReply and never enters the
+                  // runLoop, so the LLM is not called.
+                  expect(
+                    result.parts.some(
+                      (p) => p.type === "text" && p.text.includes("Context rebuilt from the latest checkpoint"),
+                    ),
+                  ).toBe(true)
                   expect(
                     result.parts.some((p) => p.type === "text" && p.text.includes("case2-model-reply")),
-                  ).toBe(true)
-                  expect(llm.calls).toBeGreaterThanOrEqual(1)
+                  ).toBe(false)
+                  expect(llm.calls).toBe(0)
 
                   // A rebuild boundary was inserted from the freshly-written checkpoint.
                   const msgs = yield* sessions.messages({ sessionID: info.id })
