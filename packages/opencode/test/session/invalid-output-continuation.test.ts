@@ -21,6 +21,7 @@ import {
   startScriptedLLMServer,
   textStopResponse,
   emptyStopResponse,
+  reasoningLengthResponse,
   reasoningStopResponse,
 } from "../lib/scripted-llm-server"
 
@@ -46,6 +47,40 @@ function writeConfig(dir: string, origin: string) {
         alibaba: { options: { apiKey: "test-key", baseURL: `${origin}/v1` } },
       },
       agent: { build: { model: "alibaba/qwen-plus" } },
+    }),
+  )
+}
+
+function writeGPTConfig(dir: string, origin: string) {
+  return Bun.write(
+    path.join(dir, "mimocode.json"),
+    JSON.stringify({
+      $schema: "https://opencode.ai/config.json",
+      enabled_providers: ["test"],
+      provider: {
+        test: {
+          name: "Test",
+          id: "test",
+          env: [],
+          npm: "@ai-sdk/openai-compatible",
+          models: {
+            "gpt-5.5": {
+              id: "gpt-5.5",
+              name: "GPT-5.5",
+              attachment: false,
+              reasoning: true,
+              temperature: false,
+              tool_call: true,
+              release_date: "2026-01-01",
+              limit: { context: 100_000, output: 10_000 },
+              cost: { input: 0, output: 0 },
+              options: {},
+            },
+          },
+          options: { apiKey: "test-key", baseURL: `${origin}/v1` },
+        },
+      },
+      agent: { build: { model: "test/gpt-5.5" } },
     }),
   )
 }
@@ -106,6 +141,72 @@ describe("invalid-output continuation — integration", () => {
               expect(stub.captures.length).toBe(2)
               expect(result.info.role).toBe("assistant")
               if (result.info.role === "assistant") expect(result.info.error).toBeUndefined()
+              expect(result.parts.some((p) => p.type === "text" && p.text === "final answer")).toBe(true)
+            }),
+          ),
+      })
+    } finally {
+      await stub.stop()
+    }
+  })
+
+  test("GPT reasoning-only stop step is terminal and is not retried", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const stub = startScriptedLLMServer([
+      { lines: reasoningStopResponse("let me think about this...") },
+      { lines: textStopResponse("unexpected retry") },
+    ])
+    try {
+      await writeGPTConfig(tmp.path, stub.origin)
+      await Instance.provide({
+        directory: tmp.path,
+        fn: () =>
+          run(
+            Effect.gen(function* () {
+              const sessions = yield* Session.Service
+              const prompt = yield* SessionPrompt.Service
+              const session = yield* sessions.create({ title: "gpt-reasoning-only" })
+              const result = yield* prompt.prompt({
+                sessionID: session.id,
+                agent: "build",
+                parts: [{ type: "text", text: "Answer my question." }],
+              })
+              expect(stub.captures.length).toBe(1)
+              expect(result.info.role).toBe("assistant")
+              if (result.info.role === "assistant") expect(result.info.error).toBeUndefined()
+              expect(result.parts.some((p) => p.type === "reasoning" && p.text.includes("let me think"))).toBe(true)
+              expect(result.parts.some((p) => p.type === "text")).toBe(false)
+            }),
+          ),
+      })
+    } finally {
+      await stub.stop()
+    }
+  })
+
+  test("GPT reasoning-only length step still auto-continues", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const stub = startScriptedLLMServer([
+      { lines: reasoningLengthResponse("token budget exhausted while thinking...") },
+      { lines: textStopResponse("final answer") },
+    ])
+    try {
+      await writeGPTConfig(tmp.path, stub.origin)
+      await Instance.provide({
+        directory: tmp.path,
+        fn: () =>
+          run(
+            Effect.gen(function* () {
+              const sessions = yield* Session.Service
+              const prompt = yield* SessionPrompt.Service
+              const session = yield* sessions.create({ title: "gpt-reasoning-length" })
+              const result = yield* prompt.prompt({
+                sessionID: session.id,
+                agent: "build",
+                parts: [{ type: "text", text: "Answer my question." }],
+              })
+              expect(stub.captures.length).toBe(2)
+              expect(JSON.stringify(stub.captures[1].messages)).toContain("output token limit")
               expect(result.parts.some((p) => p.type === "text" && p.text === "final answer")).toBe(true)
             }),
           ),
