@@ -19,6 +19,7 @@ import { SessionCwd } from "./session-cwd"
 import { BashArity } from "@/permission/arity"
 import * as Truncate from "./truncate"
 import { Plugin } from "@/plugin"
+import { Git } from "@/git"
 import { Effect, Stream } from "effect"
 import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
@@ -449,6 +450,34 @@ export const BashTool = Tool.define(
     const fs = yield* AppFileSystem.Service
     const trunc = yield* Truncate.Service
     const plugin = yield* Plugin.Service
+    const gitSvc = yield* Git.Service
+
+    // Layer-2 floor for git authorship: an agent may create a worktree/clone or
+    // commit in an ad-hoc dir via this bash tool, bypassing Worktree.setup()'s
+    // per-worktree local-config fix. Without an identity, `git commit`
+    // autodetects `user@hostname` (e.g. `MI <mi@host.local>`), leaking the
+    // machine hostname + wrong authorship into pushed commits. We inject
+    // GIT_AUTHOR_*/COMMITTER_* env as a FLOOR (below repo/worktree local config,
+    // which still wins). Resolved once per worktree and memoized.
+    const AGENT_NAME = "mimocode-agent[bot]"
+    const AGENT_EMAIL = "mimocode-agent[bot]@users.noreply.github.com"
+    const gitIdentityCache = new Map<string, { name: string; email: string }>()
+    const resolveGitIdentity = Effect.fn("BashTool.resolveGitIdentity")(function* () {
+      const worktree = Instance.worktree
+      const cached = gitIdentityCache.get(worktree)
+      if (cached) return cached
+      // Non-git projects set worktree to "/"; never read git config at root.
+      if (worktree === "/") {
+        const bot = { name: AGENT_NAME, email: AGENT_EMAIL }
+        gitIdentityCache.set(worktree, bot)
+        return bot
+      }
+      const name = (yield* gitSvc.run(["config", "user.name"], { cwd: worktree })).text().trim()
+      const email = (yield* gitSvc.run(["config", "user.email"], { cwd: worktree })).text().trim()
+      const identity = { name: name || AGENT_NAME, email: email || AGENT_EMAIL }
+      gitIdentityCache.set(worktree, identity)
+      return identity
+    })
 
     const cygpath = Effect.fn("BashTool.cygpath")(function* (shell: string, text: string) {
       const lines = yield* spawner
@@ -519,12 +548,23 @@ export const BashTool = Tool.define(
         { cwd, sessionID: ctx.sessionID, callID: ctx.callID },
         { env: {} },
       )
+      const identity = yield* resolveGitIdentity()
+      // Only fill vars the operator hasn't already set, so an explicit
+      // GIT_AUTHOR_* in the environment still wins over our floor.
+      const gitFloor: Record<string, string> = {}
+      if (!process.env["GIT_AUTHOR_NAME"]) gitFloor["GIT_AUTHOR_NAME"] = identity.name
+      if (!process.env["GIT_AUTHOR_EMAIL"]) gitFloor["GIT_AUTHOR_EMAIL"] = identity.email
+      if (!process.env["GIT_COMMITTER_NAME"]) gitFloor["GIT_COMMITTER_NAME"] = identity.name
+      if (!process.env["GIT_COMMITTER_EMAIL"]) gitFloor["GIT_COMMITTER_EMAIL"] = identity.email
       return {
         ...process.env,
         // Python ignores the console code page when stdout is a pipe and falls
         // back to the ANSI code page (GBK on zh-CN), producing mojibake. Force
         // UTF-8 for child Python processes on Windows.
         ...(process.platform === "win32" ? { PYTHONIOENCODING: "utf-8" } : {}),
+        // Git authorship floor: below process.env (operator override wins) but
+        // above plugin extra.env (a plugin can still override).
+        ...gitFloor,
         ...extra.env,
       }
     })

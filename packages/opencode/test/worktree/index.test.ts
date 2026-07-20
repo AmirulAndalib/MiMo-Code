@@ -65,8 +65,8 @@ describe("Worktree.setup git identity", () => {
           const email = (
             yield* Effect.promise(() => $`git config user.email`.cwd(info.directory).quiet().text())
           ).trim()
-          expect(name).toBe("mimocode")
-          expect(email).toBe("mimocode@users.noreply.github.com")
+          expect(name).toBe("mimocode-agent[bot]")
+          expect(email).toBe("mimocode-agent[bot]@users.noreply.github.com")
           // Sanity: identity is never left empty (the hostname-fallback trigger).
           expect(name.length).toBeGreaterThan(0)
           expect(email.length).toBeGreaterThan(0)

@@ -15,6 +15,7 @@ import { SessionID, MessageID } from "../../src/session/schema"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
 import { AppFileSystem } from "@mimo-ai/shared/filesystem"
 import { Plugin } from "../../src/plugin"
+import { Git } from "../../src/git"
 
 const runtime = ManagedRuntime.make(
   Layer.mergeAll(
@@ -23,6 +24,7 @@ const runtime = ManagedRuntime.make(
     Plugin.defaultLayer,
     Truncate.defaultLayer,
     Agent.defaultLayer,
+    Git.defaultLayer,
   ),
 )
 
@@ -187,6 +189,112 @@ describe("tool.bash", () => {
         expect(result.metadata.output).toContain("test")
       },
     })
+  })
+})
+
+describe("tool.bash git identity floor", () => {
+  const savedEnv = () => ({
+    GIT_AUTHOR_NAME: process.env["GIT_AUTHOR_NAME"],
+    GIT_AUTHOR_EMAIL: process.env["GIT_AUTHOR_EMAIL"],
+    GIT_COMMITTER_NAME: process.env["GIT_COMMITTER_NAME"],
+    GIT_COMMITTER_EMAIL: process.env["GIT_COMMITTER_EMAIL"],
+  })
+  const restoreEnv = (saved: ReturnType<typeof savedEnv>) => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+  }
+  const printGitEnv =
+    process.platform === "win32"
+      ? "echo GIT_AUTHOR_NAME=$env:GIT_AUTHOR_NAME; echo GIT_AUTHOR_EMAIL=$env:GIT_AUTHOR_EMAIL; echo GIT_COMMITTER_NAME=$env:GIT_COMMITTER_NAME; echo GIT_COMMITTER_EMAIL=$env:GIT_COMMITTER_EMAIL"
+      : "echo GIT_AUTHOR_NAME=$GIT_AUTHOR_NAME; echo GIT_AUTHOR_EMAIL=$GIT_AUTHOR_EMAIL; echo GIT_COMMITTER_NAME=$GIT_COMMITTER_NAME; echo GIT_COMMITTER_EMAIL=$GIT_COMMITTER_EMAIL"
+
+  each("injects the 4 GIT_* vars inherited from the repo config", async () => {
+    const saved = savedEnv()
+    restoreEnv({
+      GIT_AUTHOR_NAME: undefined,
+      GIT_AUTHOR_EMAIL: undefined,
+      GIT_COMMITTER_NAME: undefined,
+      GIT_COMMITTER_EMAIL: undefined,
+    })
+    try {
+      await using tmp = await tmpdir({ git: true })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const bash = await initBash()
+          const result = await Effect.runPromise(
+            bash.execute({ command: printGitEnv, description: "print git env" }, ctx),
+          )
+          // The tmpdir git fixture sets user.name=Test / user.email=test@mimocode.test.
+          expect(result.metadata.output).toContain("GIT_AUTHOR_NAME=Test")
+          expect(result.metadata.output).toContain("GIT_AUTHOR_EMAIL=test@mimocode.test")
+          expect(result.metadata.output).toContain("GIT_COMMITTER_NAME=Test")
+          expect(result.metadata.output).toContain("GIT_COMMITTER_EMAIL=test@mimocode.test")
+        },
+      })
+    } finally {
+      restoreEnv(saved)
+    }
+  })
+
+  each("falls back to the stable bot identity for a non-git project (worktree=/)", async () => {
+    const saved = savedEnv()
+    restoreEnv({
+      GIT_AUTHOR_NAME: undefined,
+      GIT_AUTHOR_EMAIL: undefined,
+      GIT_COMMITTER_NAME: undefined,
+      GIT_COMMITTER_EMAIL: undefined,
+    })
+    try {
+      // outsideGit -> a truly non-git project -> Instance.worktree === "/".
+      await using tmp = await tmpdir({ outsideGit: true })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          expect(Instance.worktree).toBe("/")
+          const bash = await initBash()
+          const result = await Effect.runPromise(
+            bash.execute({ command: printGitEnv, description: "print git env" }, ctx),
+          )
+          expect(result.metadata.output).toContain("GIT_AUTHOR_NAME=mimocode-agent[bot]")
+          expect(result.metadata.output).toContain("GIT_AUTHOR_EMAIL=mimocode-agent[bot]@users.noreply.github.com")
+          expect(result.metadata.output).toContain("GIT_COMMITTER_NAME=mimocode-agent[bot]")
+          expect(result.metadata.output).toContain("GIT_COMMITTER_EMAIL=mimocode-agent[bot]@users.noreply.github.com")
+        },
+      })
+    } finally {
+      restoreEnv(saved)
+    }
+  })
+
+  each("does not override an operator-set GIT_AUTHOR_NAME", async () => {
+    const saved = savedEnv()
+    restoreEnv({
+      GIT_AUTHOR_NAME: "Operator",
+      GIT_AUTHOR_EMAIL: undefined,
+      GIT_COMMITTER_NAME: undefined,
+      GIT_COMMITTER_EMAIL: undefined,
+    })
+    try {
+      await using tmp = await tmpdir({ git: true })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const bash = await initBash()
+          const result = await Effect.runPromise(
+            bash.execute({ command: printGitEnv, description: "print git env" }, ctx),
+          )
+          // process.env value wins over the floor.
+          expect(result.metadata.output).toContain("GIT_AUTHOR_NAME=Operator")
+          // Unset ones still get the floor.
+          expect(result.metadata.output).toContain("GIT_COMMITTER_NAME=Test")
+        },
+      })
+    } finally {
+      restoreEnv(saved)
+    }
   })
 })
 

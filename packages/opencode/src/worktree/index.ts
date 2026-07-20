@@ -288,8 +288,8 @@ export const layer: Layer.Layer<
           // non-zero / empty, which the `git()` runner returns as empty text.
           const parentName = (yield* git(["config", "user.name"], { cwd: ctx.worktree })).text.trim()
           const parentEmail = (yield* git(["config", "user.email"], { cwd: ctx.worktree })).text.trim()
-          const name = parentName || "mimocode"
-          const email = parentEmail || "mimocode@users.noreply.github.com"
+          const name = parentName || "mimocode-agent[bot]"
+          const email = parentEmail || "mimocode-agent[bot]@users.noreply.github.com"
           yield* git(["config", "user.name", name], { cwd: info.directory })
           yield* git(["config", "user.email", email], { cwd: info.directory })
         }),
