@@ -155,18 +155,25 @@ describe("Manual /rebuild: on-the-spot rebuild with 3-case checkpoint-freshness"
   )
 
   it.live(
-    "busy status is set before rebuild work and cleared after (source-level guard)",
+    "busy status carries a descriptive message (source-level guard)",
     () =>
       Effect.gen(function* () {
         // Source-level guard: verify the /rebuild handler sets busy status
-        // BEFORE calling rebuildFromCheckpoint and clears it when done.
+        // WITH a descriptive message so the user sees what's happening.
         const promptSrc = yield* Effect.promise(() =>
           Bun.file(`${import.meta.dir}/../../src/session/prompt.ts`).text(),
         )
 
-        // Must set busy status before rebuildFromCheckpoint
+        // Must set busy status with "Rebuilding context…" message before work.
+        // The source has \u2026 as a literal Unicode escape in the string,
+        // so the raw source text contains the 6 chars \u2026.
         expect(promptSrc).toMatch(
-          /if\s*\(input\.command\s*===\s*Command\.Default\.REBUILD\)[\s\S]*?status\.set\(input\.sessionID,\s*\{\s*type:\s*"busy"\s*\}/,
+          /status[\s\S]*?\.set\(input\.sessionID,\s*\{\s*type:\s*"busy",\s*message:\s*"Rebuilding context\\u2026"\s*\}/,
+        )
+
+        // Case 2 writer-wait path must set "Writing checkpoint…" message
+        expect(promptSrc).toMatch(
+          /status[\s\S]*?\.set\(input\.sessionID,\s*\{\s*type:\s*"busy",\s*message:\s*"Writing checkpoint\\u2026"\s*\}/,
         )
 
         // Must NOT use noReply:true on the rebuild-success path (so runLoop runs)

@@ -4154,7 +4154,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
         // Set busy status so the TUI shows a spinner while we wait on the
         // writer (cases 2/3) or assemble context (case 1).
-        yield* status.set(input.sessionID, { type: "busy" }).pipe(Effect.catch(() => Effect.void))
+        yield* status.set(input.sessionID, { type: "busy", message: "Rebuilding context\u2026" }).pipe(
+          Effect.catch(() => Effect.void),
+        )
 
         // Case 2: no usable checkpoint → actively spawn a writer and wait for
         // it to finish, THEN rebuild from the freshly-written checkpoint.
@@ -4184,6 +4186,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           // is on disk and the watermark is advanced; on "failure" or
           // "no-writer" we fall through and let rebuildFromCheckpoint try
           // whatever exists (or show the no-checkpoint message).
+          yield* status
+            .set(input.sessionID, { type: "busy", message: "Writing checkpoint\u2026" })
+            .pipe(Effect.catch(() => Effect.void))
           const writerOutcome = yield* checkpoint
             .waitForWriter(input.sessionID)
             .pipe(Effect.catch(() => Effect.succeed<"success" | "failure" | "no-writer">("failure")))
