@@ -1820,7 +1820,7 @@ export type ProviderConfig = {
       interleaved?:
         | true
         | {
-            field: "reasoning_content" | "reasoning_details"
+            field: "reasoning" | "reasoning_content" | "reasoning_details"
           }
       cost?: {
         input: number
@@ -2487,7 +2487,7 @@ export type Model = {
     interleaved:
       | boolean
       | {
-          field: "reasoning_content" | "reasoning_details"
+          field: "reasoning" | "reasoning_content" | "reasoning_details"
         }
   }
   cost: {
@@ -6778,6 +6778,7 @@ export type AppSkillsResponses = {
   200: Array<{
     name: string
     description: string
+    aliases?: Array<string>
     location: string
     content: string
     hidden?: boolean

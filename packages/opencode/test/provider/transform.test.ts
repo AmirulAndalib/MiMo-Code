@@ -4410,3 +4410,101 @@ describe("ProviderTransform.message - non-array content guard (j.map is not a fu
     expect(() => ProviderTransform.message(msgs, genericModel, {})).not.toThrow()
   })
 })
+
+describe("ProviderTransform.message - interleaved field: openrouter exclusion", () => {
+  const openrouterModel = {
+    id: "openrouter/anthropic/claude-sonnet-4",
+    providerID: "openrouter",
+    api: {
+      id: "anthropic/claude-sonnet-4",
+      url: "https://openrouter.ai/api",
+      npm: "@openrouter/ai-sdk-provider",
+    },
+    name: "Claude Sonnet 4",
+    capabilities: {
+      temperature: true,
+      reasoning: true,
+      attachment: true,
+      toolcall: true,
+      input: { text: true, audio: false, image: true, video: false, pdf: false },
+      output: { text: true, audio: false, image: false, video: false, pdf: false },
+      interleaved: { field: "reasoning_content" },
+    },
+    cost: { input: 0.001, output: 0.002, cache: { read: 0.0001, write: 0.0002 } },
+    limit: { context: 200000, output: 8192 },
+    status: "active",
+    options: {},
+    headers: {},
+  } as any
+
+  test("openrouter is excluded from interleaved field injection", () => {
+    const msgs = [
+      {
+        role: "assistant",
+        content: [
+          { type: "reasoning", text: "Thinking..." },
+          { type: "text", text: "Answer" },
+        ],
+      },
+      { role: "user", content: [{ type: "text", text: "next" }] },
+    ] as any[]
+
+    const result = ProviderTransform.message(msgs, openrouterModel, {})
+
+    // Reasoning parts should be LEFT IN content (not extracted to providerOptions.openaiCompatible)
+    const assistantContent = result[0].content as any[]
+    expect(assistantContent).toHaveLength(2)
+    expect(assistantContent[0].type).toBe("reasoning")
+    expect(assistantContent[0].text).toBe("Thinking...")
+    expect(assistantContent[1].type).toBe("text")
+    expect(assistantContent[1].text).toBe("Answer")
+    // The interleaved field must NOT be set on the message (openrouter excluded)
+    expect(result[0].providerOptions?.openaiCompatible?.reasoning_content).toBeUndefined()
+  })
+})
+
+describe("ProviderTransform.message - interleaved field: empty reasoning still sets the field", () => {
+  test("empty reasoning_content is echoed back (DeepSeek-style)", () => {
+    const deepseekModel = {
+      id: "deepseek/deepseek-chat",
+      providerID: "deepseek",
+      api: {
+        id: "deepseek-chat",
+        url: "https://api.deepseek.com",
+        npm: "@ai-sdk/openai-compatible",
+      },
+      name: "DeepSeek Chat",
+      capabilities: {
+        temperature: true,
+        reasoning: true,
+        attachment: false,
+        toolcall: true,
+        input: { text: true, audio: false, image: false, video: false, pdf: false },
+        output: { text: true, audio: false, image: false, video: false, pdf: false },
+        interleaved: { field: "reasoning_content" },
+      },
+      cost: { input: 0.001, output: 0.002, cache: { read: 0.0001, write: 0.0002 } },
+      limit: { context: 128000, output: 8192 },
+      status: "active",
+      options: {},
+      headers: {},
+    } as any
+
+    const msgs = [
+      {
+        role: "assistant",
+        content: [
+          { type: "reasoning", text: "" },
+          { type: "text", text: "Hello" },
+        ],
+      },
+      { role: "user", content: [{ type: "text", text: "next" }] },
+    ] as any[]
+
+    const result = ProviderTransform.message(msgs, deepseekModel, {})
+
+    expect(result[0].content).toEqual([{ type: "text", text: "Hello" }])
+    // The field MUST be set even when reasoningText is empty
+    expect(result[0].providerOptions?.openaiCompatible?.reasoning_content).toBe("")
+  })
+})
