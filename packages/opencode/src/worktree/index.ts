@@ -276,6 +276,22 @@ export const layer: Layer.Layer<
               message: `Worktree HEAD is not attached to ${expected} (got ${head || "detached HEAD"})`,
             })
           }
+
+          // A separate worktree checkout shares the object/ref store but has its
+          // own config, so it does NOT inherit the parent repo's LOCAL identity.
+          // If global identity is also empty, `git commit` here would autodetect
+          // `user@hostname` (e.g. `MI <mi@host.local>`), leaking the machine
+          // hostname + wrong authorship into pushed commits. Resolve the parent's
+          // identity (walks local->global->system) and pin it into the new
+          // worktree's own local config; fall back to a stable mimocode identity
+          // so the worktree is NEVER left without one. Reading an unset key exits
+          // non-zero / empty, which the `git()` runner returns as empty text.
+          const parentName = (yield* git(["config", "user.name"], { cwd: ctx.worktree })).text.trim()
+          const parentEmail = (yield* git(["config", "user.email"], { cwd: ctx.worktree })).text.trim()
+          const name = parentName || "mimocode"
+          const email = parentEmail || "mimocode@users.noreply.github.com"
+          yield* git(["config", "user.name", name], { cwd: info.directory })
+          yield* git(["config", "user.email", email], { cwd: info.directory })
         }),
       )
 
