@@ -71,7 +71,16 @@ type MCPClient = Client
 
 export const TURN_LIFECYCLE_CAPABILITY = "com.xiaomi.mimo/turn-lifecycle"
 export const TURN_LIFECYCLE_NOTIFICATION = `notifications/${TURN_LIFECYCLE_CAPABILITY}`
+export const TURN_LIFECYCLE_VERSION = 1
 export const TURN_LIFECYCLE_NOTIFICATION_TIMEOUT = 1_000
+
+const turnLifecycleClientOptions = {
+  capabilities: {
+    experimental: {
+      [TURN_LIFECYCLE_CAPABILITY]: { version: TURN_LIFECYCLE_VERSION },
+    },
+  },
+}
 
 interface PendingTurnLifecycleNotification {
   readonly promise: Promise<void>
@@ -91,7 +100,12 @@ export type TurnStatus = "completed" | "cancelled" | "error"
 
 function supportsTurnLifecycle(client: MCPClient) {
   const capability = client.getServerCapabilities()?.experimental?.[TURN_LIFECYCLE_CAPABILITY]
-  return typeof capability === "object" && capability !== null && "version" in capability && capability.version === 1
+  return (
+    typeof capability === "object" &&
+    capability !== null &&
+    "version" in capability &&
+    capability.version === TURN_LIFECYCLE_VERSION
+  )
 }
 
 function startTurnLifecycleNotification(client: MCPClient, context: TurnContext, status: TurnStatus) {
@@ -263,7 +277,7 @@ function convertMcpTool(mcpTool: MCPToolDef, client: MCPClient, timeout?: number
   return dynamicTool({
     description: mcpTool.description ?? "",
     inputSchema: jsonSchema(schema),
-    execute: async (args: unknown) => {
+    execute: async (args: unknown, options) => {
       const metadata =
         context && supportsTurnLifecycle(client) ? { _meta: { [TURN_LIFECYCLE_CAPABILITY]: context } } : {}
       return client.callTool(
@@ -275,6 +289,7 @@ function convertMcpTool(mcpTool: MCPToolDef, client: MCPClient, timeout?: number
         CallToolResultSchema,
         {
           resetTimeoutOnProgress: true,
+          signal: options.abortSignal,
           timeout,
         },
       )
@@ -375,6 +390,8 @@ export const layer = Layer.effect(
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
     const auth = yield* McpAuth.Service
     const bus = yield* Bus.Service
+    const createClient = () =>
+      new Client({ name: "mimocode", version: InstallationVersion }, turnLifecycleClientOptions)
 
     type Transport = StdioClientTransport | StreamableHTTPClientTransport | SSEClientTransport
 
@@ -388,7 +405,7 @@ export const layer = Layer.effect(
         (t) =>
           Effect.tryPromise({
             try: () => {
-              const client = new Client({ name: "mimocode", version: InstallationVersion })
+              const client = createClient()
               return withTimeout(client.connect(t), timeout).then(() => client)
             },
             catch: (e) => (e instanceof Error ? e : new Error(String(e))),
@@ -897,7 +914,7 @@ export const layer = Layer.effect(
 
       return yield* Effect.tryPromise({
         try: () => {
-          const client = new Client({ name: "mimocode", version: InstallationVersion })
+          const client = createClient()
           return client
             .connect(transport)
             .then(() => ({ authorizationUrl: "", oauthState, client }) satisfies AuthResult)

@@ -18,6 +18,9 @@ interface MockClientState {
   notificationHandlers: Map<unknown, (...args: any[]) => any>
   serverCapabilities: Record<string, unknown>
   toolCalls: Array<Record<string, unknown>>
+  toolCallSignals: Array<AbortSignal | undefined>
+  toolCallHangs: boolean
+  toolCallAbortCount: number
   notifications: Array<Record<string, unknown>>
   notificationCalls: number
   notificationInFlight: number
@@ -34,6 +37,7 @@ let connectShouldHang = false
 let connectError = "Mock transport cannot connect"
 // Tracks how many Client instances were created (detects leaks)
 let clientCreateCount = 0
+const clientOptions: unknown[] = []
 // Tracks how many times transport.close() is called across all mock transports
 let transportCloseCount = 0
 
@@ -54,6 +58,9 @@ function getOrCreateClientState(name?: string): MockClientState {
       notificationHandlers: new Map(),
       serverCapabilities: {},
       toolCalls: [],
+      toolCallSignals: [],
+      toolCallHangs: false,
+      toolCallAbortCount: 0,
       notifications: [],
       notificationCalls: 0,
       notificationInFlight: 0,
@@ -131,8 +138,9 @@ void mock.module("@modelcontextprotocol/sdk/client/index.js", () => ({
     _state!: MockClientState
     transport: any
 
-    constructor(_opts: any) {
+    constructor(_opts: any, options?: unknown) {
       clientCreateCount++
+      clientOptions.push(options)
     }
 
     async connect(transport: { start: () => Promise<void> }) {
@@ -150,8 +158,27 @@ void mock.module("@modelcontextprotocol/sdk/client/index.js", () => ({
       return this._state?.serverCapabilities
     }
 
-    async callTool(params: Record<string, unknown>) {
+    async callTool(
+      params: Record<string, unknown>,
+      _schema?: unknown,
+      options?: { signal?: AbortSignal },
+    ) {
       this._state?.toolCalls.push(params)
+      this._state?.toolCallSignals.push(options?.signal)
+      if (this._state?.toolCallHangs) {
+        await new Promise<void>((_resolve, reject) => {
+          const signal = options?.signal
+          const onAbort = () => {
+            signal?.removeEventListener("abort", onAbort)
+            if (this._state) this._state.toolCallAbortCount++
+            reject(signal?.reason instanceof Error ? signal.reason : new Error("tool call aborted"))
+          }
+          signal?.addEventListener("abort", onAbort, { once: true })
+          if (signal?.aborted) onAbort()
+          // Deliberately no resolver: this request must settle only through
+          // the propagated cancellation signal.
+        })
+      }
       return { content: [{ type: "text", text: "ok" }] }
     }
 
@@ -209,6 +236,7 @@ beforeEach(() => {
   connectShouldHang = false
   connectError = "Mock transport cannot connect"
   clientCreateCount = 0
+  clientOptions.length = 0
   transportCloseCount = 0
 })
 
@@ -280,6 +308,29 @@ test(
 )
 
 test(
+  "client advertises the exact lifecycle v1 capability during initialization",
+  withInstance({}, (mcp) =>
+    Effect.gen(function* () {
+      lastCreatedClientName = "lifecycle-server"
+      yield* mcp.add("lifecycle-server", {
+        type: "local",
+        command: ["echo", "test"],
+      })
+
+      expect(clientOptions).toEqual([
+        {
+          capabilities: {
+            experimental: {
+              "com.xiaomi.mimo/turn-lifecycle": { version: 1 },
+            },
+          },
+        },
+      ])
+    }),
+  ),
+)
+
+test(
   "turn metadata is omitted unless the server advertises lifecycle v1",
   withInstance({}, (mcp) =>
     Effect.gen(function* () {
@@ -343,6 +394,55 @@ test(
           name: "test_tool",
           arguments: { index: 2 },
           _meta: { "com.xiaomi.mimo/turn-lifecycle": context },
+        },
+      ])
+    }),
+  ),
+)
+
+test(
+  "cancelling tool execution aborts the in-flight MCP request before terminal notification",
+  withInstance({}, (mcp) =>
+    Effect.gen(function* () {
+      lastCreatedClientName = "lifecycle-server"
+      const serverState = getOrCreateClientState("lifecycle-server")
+      serverState.serverCapabilities = {
+        experimental: { "com.xiaomi.mimo/turn-lifecycle": { version: 1 } },
+      }
+      serverState.toolCallHangs = true
+      yield* mcp.add("lifecycle-server", {
+        type: "local",
+        command: ["echo", "test"],
+      })
+
+      const context = { sessionId: "ses_1", turnId: "turn_1", actorId: "main" }
+      const tools = yield* mcp.tools(context)
+      const execute = tools["lifecycle-server_test_tool"]?.execute
+      expect(execute).toBeDefined()
+      const controller = new AbortController()
+      const execution = Promise.resolve(
+        execute?.({}, { toolCallId: "call_1", messages: [], abortSignal: controller.signal }),
+      )
+
+      expect(serverState.toolCallSignals).toEqual([controller.signal])
+      expect(serverState.notifications).toEqual([])
+      controller.abort(new Error("turn cancelled"))
+      yield* Effect.promise(() =>
+        execution.then(
+          () => Promise.reject(new Error("cancelled MCP call unexpectedly resolved")),
+          (error) => {
+            expect(error).toBeInstanceOf(Error)
+            expect((error as Error).message).toBe("turn cancelled")
+          },
+        ),
+      )
+      expect(serverState.toolCallAbortCount).toBe(1)
+
+      yield* MCP.notifyTurnLifecycle(yield* mcp.clients(), context, "cancelled")
+      expect(serverState.notifications).toEqual([
+        {
+          method: "notifications/com.xiaomi.mimo/turn-lifecycle",
+          params: { ...context, status: "cancelled" },
         },
       ])
     }),

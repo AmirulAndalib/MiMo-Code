@@ -352,6 +352,8 @@ const mcpIt = testEffect(
 const lifecycleContexts: MCP.TurnContext[] = []
 const lifecycleNotifications: Array<Record<string, any>> = []
 let lifecycleNotificationHangs = false
+let lifecycleToolStarted: Deferred.Deferred<void> | undefined
+let lifecycleToolGate: Deferred.Deferred<void> | undefined
 const lifecycleClient = {
   getServerCapabilities: () => ({
     experimental: { "com.xiaomi.mimo/turn-lifecycle": { version: 1 } },
@@ -374,6 +376,8 @@ const lifecycleMcpIt = testEffect(
           }),
           execute: async () => {
             if (context) lifecycleContexts.push(context)
+            if (lifecycleToolStarted) Effect.runSync(Deferred.succeed(lifecycleToolStarted, undefined))
+            if (lifecycleToolGate) await Effect.runPromise(Deferred.await(lifecycleToolGate))
             return { content: [{ type: "text", text: "ok" }] }
           },
         }),
@@ -1399,6 +1403,56 @@ lifecycleMcpIt.live("MCP calls in one outer run share one turn and emit one term
           params: { ...lifecycleContexts[0], status: "completed" },
         },
       ])
+    }),
+    { git: true, config: providerCfg },
+  ),
+)
+
+lifecycleMcpIt.live("MCP lifecycle waits for an in-flight tool call before notifying", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* ({ llm }) {
+      lifecycleContexts.length = 0
+      lifecycleNotifications.length = 0
+      lifecycleNotificationHangs = false
+      const started = yield* Deferred.make<void>()
+      const gate = yield* Deferred.make<void>()
+      lifecycleToolStarted = started
+      lifecycleToolGate = gate
+      yield* Effect.addFinalizer(() =>
+        Effect.gen(function* () {
+          yield* Deferred.succeed(gate, undefined)
+          lifecycleToolStarted = undefined
+          lifecycleToolGate = undefined
+        }),
+      )
+
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({
+        title: "Lifecycle settling",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: "call the lifecycle tool" }],
+      })
+      yield* llm.tool("mcp_lifecycle", { index: 1 })
+      yield* llm.text("done")
+
+      const run = yield* prompt.loop({ sessionID: session.id }).pipe(Effect.forkChild)
+      yield* Deferred.await(started)
+      expect(lifecycleNotifications).toEqual([])
+
+      yield* Deferred.succeed(gate, undefined)
+      yield* Fiber.join(run)
+      expect(lifecycleNotifications).toHaveLength(1)
+      expect(lifecycleNotifications[0]?.params).toMatchObject({
+        sessionId: session.id,
+        turnId: lifecycleContexts[0]?.turnId,
+        status: "completed",
+      })
     }),
     { git: true, config: providerCfg },
   ),
