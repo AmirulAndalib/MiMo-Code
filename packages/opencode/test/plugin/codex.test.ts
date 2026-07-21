@@ -1,10 +1,22 @@
 import { describe, expect, test } from "bun:test"
 import {
+  CodexAuthPlugin,
   parseJwtClaims,
   extractAccountIdFromClaims,
   extractAccountId,
   type IdTokenClaims,
 } from "../../src/plugin/codex"
+import type { PluginInput } from "@mimo-ai/plugin"
+
+const fakeInput = {
+  client: {},
+  project: {},
+  worktree: "",
+  directory: "",
+  experimental_workspace: { register() {} },
+  serverUrl: new URL("http://localhost:4096"),
+  $: undefined,
+} as unknown as PluginInput
 
 function createTestJwt(payload: object): string {
   const header = Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url")
@@ -13,6 +25,25 @@ function createTestJwt(payload: object): string {
 }
 
 describe("plugin.codex", () => {
+  describe("loader", () => {
+    test("keeps all OpenAI models for OAuth", async () => {
+      const hooks = await CodexAuthPlugin(fakeInput)
+      const provider = {
+        models: {
+          "gpt-5.6-sol": { api: { id: "gpt-5.6-sol" }, cost: {} },
+          "gpt-4o": { api: { id: "gpt-4o" }, cost: {} },
+        },
+      }
+
+      await hooks.auth!.loader!(
+        async () => ({ type: "oauth", access: "access", refresh: "refresh", expires: Date.now() + 60_000 }),
+        provider as never,
+      )
+
+      expect(Object.keys(provider.models)).toEqual(["gpt-5.6-sol", "gpt-4o"])
+    })
+  })
+
   describe("parseJwtClaims", () => {
     test("parses valid JWT with claims", () => {
       const payload = { email: "test@example.com", chatgpt_account_id: "acc-123" }

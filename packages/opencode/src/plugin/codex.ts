@@ -368,23 +368,6 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
         const auth = await getAuth()
         if (auth.type !== "oauth") return {}
 
-        // Filter models to only allowed Codex models for OAuth
-        const allowedModels = new Set([
-          "gpt-5.1-codex",
-          "gpt-5.1-codex-max",
-          "gpt-5.1-codex-mini",
-          "gpt-5.2",
-          "gpt-5.2-codex",
-          "gpt-5.3-codex",
-          "gpt-5.4",
-          "gpt-5.4-mini",
-        ])
-        for (const [modelId, model] of Object.entries(provider.models)) {
-          if (modelId.includes("codex")) continue
-          if (allowedModels.has(model.api.id)) continue
-          delete provider.models[modelId]
-        }
-
         // Zero out costs for Codex (included with ChatGPT subscription)
         for (const model of Object.values(provider.models)) {
           model.cost = {
@@ -478,7 +461,7 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
       },
       methods: [
         {
-          label: "ChatGPT Pro/Plus (browser)",
+          label: "Codex via ChatGPT Pro/Plus (browser)",
           type: "oauth",
           authorize: async () => {
             const { redirectUri } = await startOAuthServer()
@@ -490,7 +473,7 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
 
             return {
               url: authUrl,
-              instructions: "Complete authorization in your browser. This window will close automatically.",
+              instructions: "Complete Codex authorization in your browser. This window will close automatically.",
               method: "auto" as const,
               callback: async () => {
                 const tokens = await callbackPromise
@@ -508,7 +491,7 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
           },
         },
         {
-          label: "ChatGPT Pro/Plus (headless)",
+          label: "Codex via ChatGPT Pro/Plus (headless)",
           type: "oauth",
           authorize: async () => {
             const deviceResponse = await fetch(`${ISSUER}/api/accounts/deviceauth/usercode`, {
