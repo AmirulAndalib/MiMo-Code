@@ -69,6 +69,118 @@ export const Failed = NamedError.create(
 
 type MCPClient = Client
 
+export const TURN_LIFECYCLE_CAPABILITY = "com.xiaomi.mimo/turn-lifecycle"
+export const TURN_LIFECYCLE_NOTIFICATION = `notifications/${TURN_LIFECYCLE_CAPABILITY}`
+export const TURN_LIFECYCLE_NOTIFICATION_TIMEOUT = 1_000
+
+interface PendingTurnLifecycleNotification {
+  readonly promise: Promise<void>
+  readonly waiters: Set<() => void>
+}
+
+const pendingTurnLifecycleNotifications = new WeakMap<MCPClient, PendingTurnLifecycleNotification>()
+
+export interface TurnContext {
+  [key: string]: unknown
+  sessionId: string
+  turnId: string
+  actorId?: string
+}
+
+export type TurnStatus = "completed" | "cancelled" | "error"
+
+function supportsTurnLifecycle(client: MCPClient) {
+  const capability = client.getServerCapabilities()?.experimental?.[TURN_LIFECYCLE_CAPABILITY]
+  return typeof capability === "object" && capability !== null && "version" in capability && capability.version === 1
+}
+
+function startTurnLifecycleNotification(client: MCPClient, context: TurnContext, status: TurnStatus) {
+  if (pendingTurnLifecycleNotifications.has(client)) return undefined
+  const promise = Promise.resolve().then(() =>
+    client.notification({
+      method: TURN_LIFECYCLE_NOTIFICATION,
+      params: { ...context, status },
+    } as Parameters<MCPClient["notification"]>[0]),
+  )
+  const notification: PendingTurnLifecycleNotification = { promise, waiters: new Set() }
+  pendingTurnLifecycleNotifications.set(client, notification)
+  const clear = () => {
+    if (pendingTurnLifecycleNotifications.get(client) === notification) {
+      pendingTurnLifecycleNotifications.delete(client)
+    }
+    const waiters = [...notification.waiters]
+    notification.waiters.clear()
+    for (const waiter of waiters) waiter()
+  }
+  void promise.then(clear, clear)
+  return notification
+}
+
+function waitForTurnLifecycleNotification(client: MCPClient, notification: PendingTurnLifecycleNotification) {
+  return Effect.tryPromise({
+    try: (signal) =>
+      new Promise<void>((resolve, reject) => {
+        let done = false
+        const cleanup = () => {
+          notification.waiters.delete(onSettled)
+          signal.removeEventListener("abort", onAbort)
+        }
+        const finish = (complete: () => void) => {
+          if (done) return
+          done = true
+          cleanup()
+          complete()
+        }
+        const onSettled = () => finish(resolve)
+        const onAbort = () =>
+          finish(() => reject(signal.reason instanceof Error ? signal.reason : new Error("Lifecycle wait aborted")))
+
+        notification.waiters.add(onSettled)
+        signal.addEventListener("abort", onAbort, { once: true })
+
+        if (signal.aborted) onAbort()
+        else if (pendingTurnLifecycleNotifications.get(client) !== notification) onSettled()
+      }),
+    catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+  })
+}
+
+function sendTurnLifecycleNotification(client: MCPClient, context: TurnContext, status: TurnStatus) {
+  return Effect.gen(function* () {
+    while (true) {
+      const pending = pendingTurnLifecycleNotifications.get(client)
+      if (pending) {
+        yield* waitForTurnLifecycleNotification(client, pending)
+        continue
+      }
+
+      const notification = startTurnLifecycleNotification(client, context, status)
+      if (!notification) continue
+      return yield* Effect.tryPromise({
+        try: () => notification.promise,
+        catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+      })
+    }
+  })
+}
+
+export function notifyTurnLifecycle(clients: Record<string, MCPClient>, context: TurnContext, status: TurnStatus) {
+  return Effect.forEach(
+    Object.entries(clients),
+    ([clientName, client]) => {
+      if (!supportsTurnLifecycle(client)) return Effect.void
+      return sendTurnLifecycleNotification(client, context, status).pipe(
+        Effect.timeout(TURN_LIFECYCLE_NOTIFICATION_TIMEOUT),
+        Effect.tapError((error) =>
+          Effect.sync(() => log.warn("failed to notify MCP turn lifecycle", { clientName, status, error })),
+        ),
+        Effect.ignore,
+      )
+    },
+    { concurrency: "unbounded", discard: true },
+  )
+}
+
 export const Status = z
   .discriminatedUnion("status", [
     z
@@ -137,7 +249,7 @@ function isMcpConfigured(entry: McpEntry): entry is ConfigMCP.Info {
 const sanitize = (s: string) => s.replace(/[^a-zA-Z0-9_-]/g, "_")
 
 // Convert MCP tool definition to AI SDK Tool type
-function convertMcpTool(mcpTool: MCPToolDef, client: MCPClient, timeout?: number): Tool {
+function convertMcpTool(mcpTool: MCPToolDef, client: MCPClient, timeout?: number, context?: TurnContext): Tool {
   const inputSchema = mcpTool.inputSchema
 
   // Spread first, then override type to ensure it's always "object"
@@ -152,10 +264,13 @@ function convertMcpTool(mcpTool: MCPToolDef, client: MCPClient, timeout?: number
     description: mcpTool.description ?? "",
     inputSchema: jsonSchema(schema),
     execute: async (args: unknown) => {
+      const metadata =
+        context && supportsTurnLifecycle(client) ? { _meta: { [TURN_LIFECYCLE_CAPABILITY]: context } } : {}
       return client.callTool(
         {
           name: mcpTool.name,
           arguments: (args || {}) as Record<string, unknown>,
+          ...metadata,
         },
         CallToolResultSchema,
         {
@@ -228,7 +343,7 @@ interface State {
 export interface Interface {
   readonly status: () => Effect.Effect<Record<string, Status>>
   readonly clients: () => Effect.Effect<Record<string, MCPClient>>
-  readonly tools: () => Effect.Effect<Record<string, Tool>>
+  readonly tools: (context?: TurnContext) => Effect.Effect<Record<string, Tool>>
   readonly prompts: () => Effect.Effect<Record<string, PromptInfo & { client: string }>>
   readonly resources: () => Effect.Effect<Record<string, ResourceInfo & { client: string }>>
   readonly add: (name: string, mcp: ConfigMCP.Info) => Effect.Effect<{ status: Record<string, Status> | Status }>
@@ -637,7 +752,7 @@ export const layer = Layer.effect(
       s.status[name] = { status: "disabled" }
     })
 
-    const tools = Effect.fn("MCP.tools")(function* () {
+    const tools = Effect.fn("MCP.tools")(function* (context?: TurnContext) {
       const result: Record<string, Tool> = {}
       const s = yield* InstanceState.get(state)
 
@@ -664,7 +779,12 @@ export const layer = Layer.effect(
 
             const timeout = entry?.timeout ?? defaultTimeout
             for (const mcpTool of listed) {
-              result[sanitize(clientName) + "_" + sanitize(mcpTool.name)] = convertMcpTool(mcpTool, client, timeout)
+              result[sanitize(clientName) + "_" + sanitize(mcpTool.name)] = convertMcpTool(
+                mcpTool,
+                client,
+                timeout,
+                context,
+              )
             }
           }),
         { concurrency: "unbounded" },

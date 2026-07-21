@@ -1,5 +1,5 @@
 import { test, expect, mock, beforeEach } from "bun:test"
-import { Effect } from "effect"
+import { Effect, Fiber } from "effect"
 import type { MCP as MCPNS } from "../../src/mcp/index"
 
 // --- Mock infrastructure ---
@@ -16,6 +16,15 @@ interface MockClientState {
   resources: Array<{ name: string; uri: string; description?: string }>
   closed: boolean
   notificationHandlers: Map<unknown, (...args: any[]) => any>
+  serverCapabilities: Record<string, unknown>
+  toolCalls: Array<Record<string, unknown>>
+  notifications: Array<Record<string, unknown>>
+  notificationCalls: number
+  notificationInFlight: number
+  notificationMaxInFlight: number
+  notificationResolvers: Array<() => void>
+  notificationError?: string
+  notificationHangs?: boolean
 }
 
 const clientStates = new Map<string, MockClientState>()
@@ -43,6 +52,13 @@ function getOrCreateClientState(name?: string): MockClientState {
       resources: [],
       closed: false,
       notificationHandlers: new Map(),
+      serverCapabilities: {},
+      toolCalls: [],
+      notifications: [],
+      notificationCalls: 0,
+      notificationInFlight: 0,
+      notificationMaxInFlight: 0,
+      notificationResolvers: [],
     }
     clientStates.set(key, state)
   }
@@ -128,6 +144,34 @@ void mock.module("@modelcontextprotocol/sdk/client/index.js", () => ({
 
     setNotificationHandler(schema: unknown, handler: (...args: any[]) => any) {
       this._state?.notificationHandlers.set(schema, handler)
+    }
+
+    getServerCapabilities() {
+      return this._state?.serverCapabilities
+    }
+
+    async callTool(params: Record<string, unknown>) {
+      this._state?.toolCalls.push(params)
+      return { content: [{ type: "text", text: "ok" }] }
+    }
+
+    async notification(notification: Record<string, unknown>) {
+      if (!this._state) return
+      this._state.notificationCalls++
+      this._state.notificationInFlight++
+      this._state.notificationMaxInFlight = Math.max(
+        this._state.notificationMaxInFlight,
+        this._state.notificationInFlight,
+      )
+      try {
+        if (this._state.notificationError) throw new Error(this._state.notificationError)
+        if (this._state.notificationHangs) {
+          await new Promise<void>((resolve) => this._state.notificationResolvers.push(resolve))
+        }
+        this._state.notifications.push(notification)
+      } finally {
+        this._state.notificationInFlight--
+      }
     }
 
     async listTools() {
@@ -231,6 +275,331 @@ test(
       expect(Object.keys(toolsA).length).toBeGreaterThan(0)
       expect(Object.keys(toolsB).length).toBeGreaterThan(0)
       expect(serverState.listToolsCalls).toBe(1)
+    }),
+  ),
+)
+
+test(
+  "turn metadata is omitted unless the server advertises lifecycle v1",
+  withInstance({}, (mcp) =>
+    Effect.gen(function* () {
+      lastCreatedClientName = "legacy-server"
+      const serverState = getOrCreateClientState("legacy-server")
+      yield* mcp.add("legacy-server", {
+        type: "local",
+        command: ["echo", "test"],
+      })
+
+      const tools = yield* mcp.tools({ sessionId: "ses_1", turnId: "turn_1", actorId: "main" })
+      const execute = tools["legacy-server_test_tool"]?.execute
+      expect(execute).toBeDefined()
+      yield* Effect.promise(() =>
+        Promise.resolve(
+          execute?.({}, { toolCallId: "call_1", messages: [], abortSignal: new AbortController().signal }),
+        ),
+      )
+
+      expect(serverState.toolCalls).toEqual([{ name: "test_tool", arguments: {} }])
+    }),
+  ),
+)
+
+test(
+  "turn metadata is stable across calls to a lifecycle-aware server",
+  withInstance({}, (mcp) =>
+    Effect.gen(function* () {
+      lastCreatedClientName = "lifecycle-server"
+      const serverState = getOrCreateClientState("lifecycle-server")
+      serverState.serverCapabilities = {
+        experimental: { "com.xiaomi.mimo/turn-lifecycle": { version: 1 } },
+      }
+      yield* mcp.add("lifecycle-server", {
+        type: "local",
+        command: ["echo", "test"],
+      })
+
+      const context = { sessionId: "ses_1", turnId: "turn_1", actorId: "main" }
+      const tools = yield* mcp.tools(context)
+      const execute = tools["lifecycle-server_test_tool"]?.execute
+      expect(execute).toBeDefined()
+      yield* Effect.promise(() =>
+        Promise.all([
+          Promise.resolve(
+            execute?.({ index: 1 }, { toolCallId: "call_1", messages: [], abortSignal: new AbortController().signal }),
+          ),
+          Promise.resolve(
+            execute?.({ index: 2 }, { toolCallId: "call_2", messages: [], abortSignal: new AbortController().signal }),
+          ),
+        ]),
+      )
+
+      expect(serverState.toolCalls).toEqual([
+        {
+          name: "test_tool",
+          arguments: { index: 1 },
+          _meta: { "com.xiaomi.mimo/turn-lifecycle": context },
+        },
+        {
+          name: "test_tool",
+          arguments: { index: 2 },
+          _meta: { "com.xiaomi.mimo/turn-lifecycle": context },
+        },
+      ])
+    }),
+  ),
+)
+
+test(
+  "turn lifecycle notifications carry each terminal status only for v1 servers",
+  withInstance({}, (mcp) =>
+    Effect.gen(function* () {
+      lastCreatedClientName = "lifecycle-server"
+      const serverState = getOrCreateClientState("lifecycle-server")
+      serverState.serverCapabilities = {
+        experimental: { "com.xiaomi.mimo/turn-lifecycle": { version: 1 } },
+      }
+      yield* mcp.add("lifecycle-server", {
+        type: "local",
+        command: ["echo", "test"],
+      })
+
+      const context = { sessionId: "ses_1", turnId: "turn_1", actorId: "main" }
+      const clients = yield* mcp.clients()
+      yield* MCP.notifyTurnLifecycle(clients, context, "completed")
+      yield* MCP.notifyTurnLifecycle(clients, context, "cancelled")
+      yield* MCP.notifyTurnLifecycle(clients, context, "error")
+
+      expect(serverState.notifications).toEqual(
+        ["completed", "cancelled", "error"].map((status) => ({
+          method: "notifications/com.xiaomi.mimo/turn-lifecycle",
+          params: { ...context, status },
+        })),
+      )
+    }),
+  ),
+)
+
+test(
+  "turn lifecycle ignores unsupported and non-numeric capability versions",
+  withInstance({}, (mcp) =>
+    Effect.gen(function* () {
+      lastCreatedClientName = "legacy-server"
+      const serverState = getOrCreateClientState("legacy-server")
+      serverState.serverCapabilities = {
+        experimental: { "com.xiaomi.mimo/turn-lifecycle": { version: "1" } },
+      }
+      yield* mcp.add("legacy-server", {
+        type: "local",
+        command: ["echo", "test"],
+      })
+
+      yield* MCP.notifyTurnLifecycle(yield* mcp.clients(), { sessionId: "ses_1", turnId: "turn_1" }, "completed")
+
+      expect(serverState.notifications).toEqual([])
+    }),
+  ),
+)
+
+test(
+  "turn lifecycle notification failures are best effort and do not block other servers",
+  withInstance({}, (mcp) =>
+    Effect.gen(function* () {
+      lastCreatedClientName = "failing-server"
+      const failingState = getOrCreateClientState("failing-server")
+      failingState.serverCapabilities = {
+        experimental: { "com.xiaomi.mimo/turn-lifecycle": { version: 1 } },
+      }
+      failingState.notificationError = "closed"
+      yield* mcp.add("failing-server", { type: "local", command: ["echo", "test"] })
+
+      lastCreatedClientName = "healthy-server"
+      const healthyState = getOrCreateClientState("healthy-server")
+      healthyState.serverCapabilities = {
+        experimental: { "com.xiaomi.mimo/turn-lifecycle": { version: 1 } },
+      }
+      yield* mcp.add("healthy-server", { type: "local", command: ["echo", "test"] })
+
+      yield* MCP.notifyTurnLifecycle(yield* mcp.clients(), { sessionId: "ses_1", turnId: "turn_1" }, "completed")
+
+      expect(failingState.notifications).toEqual([])
+      expect(healthyState.notifications).toHaveLength(1)
+    }),
+  ),
+)
+
+test(
+  "turn lifecycle serializes overlapping healthy notifications without dropping turns",
+  withInstance({}, (mcp) =>
+    Effect.gen(function* () {
+      lastCreatedClientName = "lifecycle-server"
+      const serverState = getOrCreateClientState("lifecycle-server")
+      serverState.serverCapabilities = {
+        experimental: { "com.xiaomi.mimo/turn-lifecycle": { version: 1 } },
+      }
+      serverState.notificationHangs = true
+      yield* mcp.add("lifecycle-server", { type: "local", command: ["echo", "test"] })
+
+      const clients = yield* mcp.clients()
+      const first = yield* MCP.notifyTurnLifecycle(clients, { sessionId: "ses_1", turnId: "turn_1" }, "completed").pipe(
+        Effect.forkChild,
+      )
+      yield* Effect.sleep(25)
+      expect(serverState.notificationCalls).toBe(1)
+
+      const second = yield* MCP.notifyTurnLifecycle(
+        clients,
+        { sessionId: "ses_2", turnId: "turn_2" },
+        "completed",
+      ).pipe(Effect.forkChild)
+      yield* Effect.sleep(25)
+      expect(serverState.notificationCalls).toBe(1)
+      expect(serverState.notificationInFlight).toBe(1)
+
+      serverState.notificationHangs = false
+      serverState.notificationResolvers.shift()?.()
+      yield* Fiber.join(first)
+      yield* Fiber.join(second)
+
+      expect(serverState.notificationCalls).toBe(2)
+      expect(serverState.notificationMaxInFlight).toBe(1)
+      expect(serverState.notifications.map((notification) => notification.params)).toEqual([
+        { sessionId: "ses_1", turnId: "turn_1", status: "completed" },
+        { sessionId: "ses_2", turnId: "turn_2", status: "completed" },
+      ])
+    }),
+  ),
+)
+
+test(
+  "turn lifecycle times out hanging waiters without retaining or starting their sends",
+  withInstance({}, (mcp) =>
+    Effect.gen(function* () {
+      lastCreatedClientName = "hanging-server"
+      const hangingState = getOrCreateClientState("hanging-server")
+      hangingState.serverCapabilities = {
+        experimental: { "com.xiaomi.mimo/turn-lifecycle": { version: 1 } },
+      }
+      hangingState.notificationHangs = true
+      yield* mcp.add("hanging-server", { type: "local", command: ["echo", "test"] })
+
+      lastCreatedClientName = "healthy-server"
+      const healthyState = getOrCreateClientState("healthy-server")
+      healthyState.serverCapabilities = {
+        experimental: { "com.xiaomi.mimo/turn-lifecycle": { version: 1 } },
+      }
+      yield* mcp.add("healthy-server", { type: "local", command: ["echo", "test"] })
+
+      const started = Date.now()
+      const clients = yield* mcp.clients()
+      const first = yield* MCP.notifyTurnLifecycle(clients, { sessionId: "ses_1", turnId: "turn_1" }, "completed").pipe(
+        Effect.forkChild,
+      )
+
+      yield* Effect.sleep(50)
+      expect(healthyState.notifications).toHaveLength(1)
+      const second = yield* MCP.notifyTurnLifecycle(
+        clients,
+        { sessionId: "ses_1", turnId: "turn_2" },
+        "completed",
+      ).pipe(Effect.forkChild)
+      const third = yield* MCP.notifyTurnLifecycle(clients, { sessionId: "ses_1", turnId: "turn_3" }, "completed").pipe(
+        Effect.forkChild,
+      )
+      yield* Fiber.join(first)
+      yield* Fiber.join(second)
+      yield* Fiber.join(third)
+      expect(Date.now() - started).toBeLessThan(2_000)
+
+      expect(hangingState.notificationCalls).toBe(1)
+      expect(hangingState.notificationInFlight).toBe(1)
+      expect(hangingState.notificationMaxInFlight).toBe(1)
+      expect(healthyState.notifications).toHaveLength(3)
+
+      hangingState.notificationHangs = false
+      hangingState.notificationResolvers.shift()?.()
+      yield* Effect.sleep(25)
+      expect(hangingState.notificationCalls).toBe(1)
+      expect(hangingState.notifications.map((notification) => notification.params)).toEqual([
+        { sessionId: "ses_1", turnId: "turn_1", status: "completed" },
+      ])
+
+      yield* MCP.notifyTurnLifecycle(clients, { sessionId: "ses_1", turnId: "turn_4" }, "completed")
+
+      expect(hangingState.notificationCalls).toBe(2)
+      expect(hangingState.notificationInFlight).toBe(0)
+      expect(hangingState.notificationMaxInFlight).toBe(1)
+      expect(hangingState.notifications.map((notification) => notification.params)).toEqual([
+        { sessionId: "ses_1", turnId: "turn_1", status: "completed" },
+        { sessionId: "ses_1", turnId: "turn_4", status: "completed" },
+      ])
+      expect(healthyState.notifications).toHaveLength(4)
+    }),
+  ),
+)
+
+test(
+  "turn lifecycle resumes after a notification rejects",
+  withInstance({}, (mcp) =>
+    Effect.gen(function* () {
+      lastCreatedClientName = "lifecycle-server"
+      const serverState = getOrCreateClientState("lifecycle-server")
+      serverState.serverCapabilities = {
+        experimental: { "com.xiaomi.mimo/turn-lifecycle": { version: 1 } },
+      }
+      serverState.notificationError = "closed"
+      yield* mcp.add("lifecycle-server", { type: "local", command: ["echo", "test"] })
+
+      const clients = yield* mcp.clients()
+      yield* MCP.notifyTurnLifecycle(clients, { sessionId: "ses_1", turnId: "turn_1" }, "completed")
+      serverState.notificationError = undefined
+      yield* MCP.notifyTurnLifecycle(clients, { sessionId: "ses_1", turnId: "turn_2" }, "completed")
+
+      expect(serverState.notificationCalls).toBe(2)
+      expect(serverState.notificationMaxInFlight).toBe(1)
+      expect(serverState.notifications.map((notification) => notification.params)).toEqual([
+        { sessionId: "ses_1", turnId: "turn_2", status: "completed" },
+      ])
+    }),
+  ),
+)
+
+test(
+  "replacement clients are not blocked by an old pending notification",
+  withInstance({}, (mcp) =>
+    Effect.gen(function* () {
+      lastCreatedClientName = "replacement-old"
+      const oldState = getOrCreateClientState("replacement-old")
+      oldState.serverCapabilities = {
+        experimental: { "com.xiaomi.mimo/turn-lifecycle": { version: 1 } },
+      }
+      oldState.notificationHangs = true
+      yield* mcp.add("replace-server", { type: "local", command: ["echo", "test"] })
+
+      const oldNotification = yield* MCP.notifyTurnLifecycle(
+        yield* mcp.clients(),
+        { sessionId: "ses_1", turnId: "turn_1" },
+        "completed",
+      ).pipe(Effect.forkChild)
+      yield* Effect.sleep(25)
+      expect(oldState.notificationCalls).toBe(1)
+
+      lastCreatedClientName = "replacement-new"
+      const newState = getOrCreateClientState("replacement-new")
+      newState.serverCapabilities = {
+        experimental: { "com.xiaomi.mimo/turn-lifecycle": { version: 1 } },
+      }
+      yield* mcp.add("replace-server", { type: "local", command: ["echo", "test"] })
+      yield* MCP.notifyTurnLifecycle(yield* mcp.clients(), { sessionId: "ses_2", turnId: "turn_2" }, "completed")
+
+      expect(oldState.notificationCalls).toBe(1)
+      expect(newState.notificationCalls).toBe(1)
+      expect(newState.notifications.map((notification) => notification.params)).toEqual([
+        { sessionId: "ses_2", turnId: "turn_2", status: "completed" },
+      ])
+
+      oldState.notificationHangs = false
+      oldState.notificationResolvers.shift()?.()
+      yield* Fiber.join(oldNotification)
     }),
   ),
 )
