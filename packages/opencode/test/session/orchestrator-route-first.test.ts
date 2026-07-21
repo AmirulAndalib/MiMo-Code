@@ -124,6 +124,49 @@ describe("orchestrator prompt — session lifecycle safety", () => {
   })
 })
 
+describe("orchestrator prompt — child git-ownership (#6 / #1822)", () => {
+  test("child operates only on its own branch — never rebases/merges/checkouts another", () => {
+    // A child MUST NOT rebase/merge/checkout any branch it does not own, because
+    // all worktrees share one .git/ ref store and a cross-branch op can move the
+    // main checkout's HEAD.
+    expect(PROMPT_ORCHESTRATOR).toMatch(/never rebase.*own|only.*own branch|MUST NEVER rebase/i)
+    expect(PROMPT_ORCHESTRATOR).toMatch(/share.*one .*\.git\/.* ref store|shared refs|shared.*ref store/i)
+  })
+
+  test("all cross-branch integration is the orchestrator's job, not the child's", () => {
+    expect(PROMPT_ORCHESTRATOR).toMatch(/integration.*ORCHESTRATOR|ORCHESTRATOR.*job|never delegate it to a child/i)
+    // Child's only safe git verbs are commit + push on its own branch.
+    expect(PROMPT_ORCHESTRATOR).toMatch(/git commit.*git push.*own|commit.*push.*ITS OWN/i)
+  })
+})
+
+describe("orchestrator prompt — topic recognition + reuse (#8)", () => {
+  test("recognizes the topic of incoming work and reuses the standing session for it", () => {
+    expect(PROMPT_ORCHESTRATOR).toMatch(/recognize.*topic|identify the theme\/topic/i)
+    expect(PROMPT_ORCHESTRATOR).toMatch(/reuse.*standing.*session/i)
+  })
+
+  test("uses --topic find-or-reuse rather than always creating a new child", () => {
+    expect(PROMPT_ORCHESTRATOR).toMatch(/--topic.*reuse|reuse.*--topic|--topic <label>.*find-or-reuse|find-or-reuse.*standing/i)
+    // Explicitly ties topic recognition to reuse-by-topic, create only as fallback.
+    expect(PROMPT_ORCHESTRATOR).toMatch(/recognize topic → reuse the standing session by topic|reuse the standing session by topic/i)
+  })
+})
+
+describe("orchestrator prompt — proactively drive to terminal (#9)", () => {
+  test("drives every non-human-review task to its terminal/done state", () => {
+    expect(PROMPT_ORCHESTRATOR).toMatch(/drive.*to.*(terminal|done|completion)|proactively drive/i)
+    // Concrete operational examples: rerun flaky CI, fix builds, push PR to mergeable.
+    expect(PROMPT_ORCHESTRATOR).toMatch(/rerun.*flaky|flaky.*rerun|rerun the failing shard/i)
+  })
+
+  test("human review is the ONLY thing it waits for", () => {
+    expect(PROMPT_ORCHESTRATOR).toMatch(/human review is the ONLY|only.*require.*human review.*wait|Only.*human-review tasks WAIT/i)
+    // Distinguishes the wait-set (irreversible / merge / credential / ambiguous).
+    expect(PROMPT_ORCHESTRATOR).toMatch(/irreversible|credential rotation|ambiguous product/i)
+  })
+})
+
 describe("orchestrator prompt — safety invariants", () => {
   test("never blocks on real work", () => {
     expect(PROMPT_ORCHESTRATOR).toMatch(/MUST NEVER block/)
