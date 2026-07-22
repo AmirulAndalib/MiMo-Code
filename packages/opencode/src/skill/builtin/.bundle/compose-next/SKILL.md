@@ -166,7 +166,7 @@ After review passes, before finishing the branch, finalize the feature document:
 **Journey log** — at most 5 entries that help future work: dead ends, pivots, or transferable lessons. Preserve useful prior entries and append new ones.
 ```
 
-Update a design section only when it contradicts the delivered behavior. Commit the finalized document on the feature branch before finishing.
+Update a design section only when it contradicts the delivered behavior. Commit the finalized document on the feature branch before finishing. This documentation-only commit sits outside the recorded reviewed range by construction; it does not restart verification or review, and CI re-running on it is expected.
 
 ## Finish
 
