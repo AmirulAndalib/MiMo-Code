@@ -4142,15 +4142,41 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       //   2. No usable checkpoint → start a writer and wait for it, then rebuild.
       //   3. Checkpoint exists + writer in-flight → wait (with timeout), rebuild
       //      with the fresher checkpoint if it arrives, else fall back to existing.
+      //
+      // Manual /rebuild mirrors the AUTO rebuild/compaction path exactly: it
+      // inserts the legitimate rebuild BOUNDARY (a role:"user" message carrying
+      // a `checkpoint` part, via rebuildFromCheckpoint → insertRebuildBoundary)
+      // and then lets the session settle — WITHOUT fabricating a second,
+      // standalone user turn. The auto path (~prompt.ts:3205/3778) `continue`s
+      // the runLoop because it has a PENDING user message to answer; a manual
+      // /rebuild is a user-initiated maintenance action with NO pending
+      // question, so after inserting the boundary it simply returns to idle
+      // (no model turn, no auto-reply).
+      //
+      // The outcome ("context rebuilt" / "no checkpoint available yet") is
+      // surfaced to the user through the SessionStatus / Bus status channel —
+      // the same busy-status mechanism that drives "Rebuilding context…" /
+      // "Writing checkpoint…" — NOT through a persisted synthetic user message.
       // The busy status is set BEFORE any work so the TUI spinner lights up
-      // immediately; the Runner's onIdle callback clears it after the runLoop
-      // completes. For the no-checkpoint case (no work to do), we return a
-      // synthetic message without entering the runLoop, and clear idle in a
-      // finally block.
+      // immediately; because the runLoop is never entered, its onIdle won't
+      // clear busy status, so every return path clears idle explicitly.
       if (input.command === Command.Default.REBUILD) {
         const msgs = yield* sessions.messages({ sessionID: input.sessionID, agentID: "main" })
         const lastUser = msgs.findLast((m) => m.info.role === "user")
         const model = yield* lastModel(input.sessionID)
+
+        // Emit the terminal outcome on the status channel, then return to idle.
+        // Returns the message the handler should hand back (never a fabricated
+        // user turn): the freshly-inserted boundary on success, else the
+        // existing last user message so callers still receive a WithParts.
+        const settle = Effect.fn("SessionPrompt.rebuild.settle")(function* (message: string) {
+          yield* status.set(input.sessionID, { type: "busy", message }).pipe(Effect.catch(() => Effect.void))
+          yield* status.set(input.sessionID, { type: "idle" }).pipe(Effect.catch(() => Effect.void))
+        })
+        const noCheckpointMsg =
+          "No checkpoint is available to rebuild from yet — continue the conversation and a checkpoint will be written automatically."
+        const rebuiltMsg =
+          "Context rebuilt from the latest checkpoint. Recent messages are preserved; earlier context is now summarized."
 
         // Set busy status so the TUI shows a spinner while we wait on the
         // writer (cases 2/3) or assemble context (case 1).
@@ -4185,7 +4211,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           // safety bound (checkpoint.ts:985). On "success" the checkpoint file
           // is on disk and the watermark is advanced; on "failure" or
           // "no-writer" we fall through and let rebuildFromCheckpoint try
-          // whatever exists (or show the no-checkpoint message).
+          // whatever exists (or surface the no-checkpoint outcome).
           yield* status
             .set(input.sessionID, { type: "busy", message: "Writing checkpoint\u2026" })
             .pipe(Effect.catch(() => Effect.void))
@@ -4193,23 +4219,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             .waitForWriter(input.sessionID)
             .pipe(Effect.catch(() => Effect.succeed<"success" | "failure" | "no-writer">("failure")))
           if (writerOutcome !== "success") {
-            // Writer failed or wasn't running — tell the user. noReply since
-            // there's nothing for the model to respond to.
-            const result = yield* prompt({
-              sessionID: input.sessionID,
-              messageID: input.messageID,
-              agent: agentName,
-              parts: [
-                {
-                  type: "text",
-                  text: "No checkpoint is available to rebuild from yet — continue the conversation and a checkpoint will be written automatically.",
-                  synthetic: true,
-                },
-              ],
-              noReply: true,
-            })
-            yield* status.set(input.sessionID, { type: "idle" }).pipe(Effect.catch(() => Effect.void))
-            return result
+            // Writer failed or wasn't running — surface the outcome on the
+            // status channel and return to idle. No boundary was inserted and
+            // NO synthetic user turn is fabricated.
+            yield* settle(noCheckpointMsg)
+            return lastUser ?? msgs[msgs.length - 1]!
           }
           // Writer succeeded — fall through to rebuildFromCheckpoint which
           // will now find the freshly-written checkpoint and insert the
@@ -4227,49 +4241,24 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         if (!inserted) {
           // Defensive: writer succeeded but boundary insertion still failed
           // (e.g. renderRebuildContext returned empty — degraded state).
-          // Fall back to the no-checkpoint message.
-          const result = yield* prompt({
-            sessionID: input.sessionID,
-            messageID: input.messageID,
-            agent: agentName,
-            parts: [
-              {
-                type: "text",
-                text: "No checkpoint is available to rebuild from yet — continue the conversation and a checkpoint will be written automatically.",
-                synthetic: true,
-              },
-            ],
-            noReply: true,
-          })
-          yield* status.set(input.sessionID, { type: "idle" }).pipe(Effect.catch(() => Effect.void))
-          return result
+          // Surface the no-checkpoint outcome and return to idle.
+          yield* settle(noCheckpointMsg)
+          return lastUser ?? msgs[msgs.length - 1]!
         }
 
-        // Checkpoint was inserted. A MANUAL /rebuild is a user action whose
-        // whole intent is to free/rebuild the context — the user asked no
-        // question, so the model must NOT produce a reply. Return the synthetic
-        // note via noReply:true so the boundary is recorded and the waiting UI
-        // shown, but the runLoop is never entered (no spurious "reply to
-        // nothing" turn). The AUTO-triggered rebuild path (runLoop, prompt.ts
-        // ~3188/3761) is unaffected: it rebuilds mid-turn and `continue`s to
-        // answer the pending user message, which is correct there.
-        // Because the runLoop doesn't run, its onIdle won't clear busy status,
-        // so clear it explicitly here (mirrors the no-checkpoint paths above).
-        const result = yield* prompt({
-          sessionID: input.sessionID,
-          messageID: input.messageID,
-          agent: agentName,
-          parts: [
-            {
-              type: "text",
-              text: "Context rebuilt from the latest checkpoint. Recent messages are preserved; earlier context is now summarized.",
-              synthetic: true,
-            },
-          ],
-          noReply: true,
-        })
-        yield* status.set(input.sessionID, { type: "idle" }).pipe(Effect.catch(() => Effect.void))
-        return result
+        // Boundary inserted (Step A — the shared, correct mechanism). A MANUAL
+        // /rebuild is a user action whose whole intent is to free/rebuild the
+        // context: the user asked no question, so the model must NOT reply and
+        // NO second user turn is fabricated. We surface the "context rebuilt"
+        // outcome on the status channel and return the boundary message itself
+        // (the newest role:"user" message carrying a checkpoint part), then go
+        // idle. The runLoop is never entered — mirroring the transparent
+        // boundary insertion the auto/compaction paths perform, minus their
+        // pending-message `continue`.
+        yield* settle(rebuiltMsg)
+        const after = yield* sessions.messages({ sessionID: input.sessionID, agentID: "main" })
+        const boundaryMessage = after.findLast((m) => m.parts.some((p) => p.type === "checkpoint"))
+        return boundaryMessage ?? lastUser ?? after[after.length - 1]!
       }
 
       const raw = input.arguments.match(argsRegex) ?? []

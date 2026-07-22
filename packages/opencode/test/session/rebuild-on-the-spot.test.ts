@@ -200,11 +200,30 @@ async function seedUserMessage(sessionID: SessionID, text: string) {
 // status events published on the Bus. They intentionally avoid grepping
 // prompt.ts source text (which verifies nothing and breaks on refactors) per
 // AGENTS.md: "Test actual implementation, do not duplicate logic into tests".
+//
+// The core invariant they enforce is the real fix for #1752: a manual
+// /rebuild inserts the legitimate rebuild BOUNDARY (a role:"user" message
+// carrying a `checkpoint` part) and NOTHING ELSE — it must NOT fabricate a
+// second, standalone "Context rebuilt…" user turn (the band-aid the earlier
+// noReply approach left persisted), and it must NOT produce an assistant
+// reply. Exactly ONE new message (the boundary) lands, mirroring the
+// transparent boundary insertion the auto/compaction paths perform. The
+// outcome is surfaced on the SessionStatus / Bus status channel, not as a
+// persisted user message.
 describe("Manual /rebuild: on-the-spot rebuild driven through SessionPrompt.command", () => {
   test(
-    "case 1: checkpoint on disk + no writer → handler inserts a boundary and enters the runLoop",
+    "case 1: checkpoint on disk + no writer → inserts EXACTLY the boundary (no fabricated user turn, no reply)",
     async () => {
       const llm = startLLM("rebuilt-reply-from-model")
+      const seen: Array<string | undefined> = []
+      const onEvent = (e: {
+        payload?: { type?: string; properties?: { status?: { type?: string; message?: string } } }
+      }) => {
+        if (e?.payload?.type === "session.status" && e.payload.properties?.status?.type === "busy") {
+          seen.push(e.payload.properties.status.message)
+        }
+      }
+      GlobalBus.on("event", onEvent)
       try {
         await using tmp = await tmpdir({
           git: true,
@@ -249,7 +268,7 @@ describe("Manual /rebuild: on-the-spot rebuild driven through SessionPrompt.comm
                 )
 
                 const before = yield* sessions.messages({ sessionID: info.id })
-                const userCountBefore = before.filter((m) => m.info.role === "user").length
+                const countBefore = before.length
 
                 // Drive the real handler.
                 const result = yield* prompt.command({
@@ -259,49 +278,60 @@ describe("Manual /rebuild: on-the-spot rebuild driven through SessionPrompt.comm
                   agent: "build",
                 })
 
-                // A MANUAL /rebuild must NOT enter the runLoop: it inserts the
-                // boundary and returns the synthetic note WITHOUT producing a
-                // model reply (the user asked no question). So the returned
-                // message is the synthetic rebuild note (role "user", not an
-                // assistant turn), and the LLM was never called — no spurious
-                // "reply to nothing" turn.
+                // A MANUAL /rebuild must NOT enter the runLoop: the user asked
+                // no question, so the LLM was never called.
                 expect(result.info.role).not.toBe("assistant")
-                expect(
-                  result.parts.some(
-                    (p) => p.type === "text" && p.text.includes("Context rebuilt from the latest checkpoint"),
-                  ),
-                ).toBe(true)
-                expect(
-                  result.parts.some((p) => p.type === "text" && p.text.includes("rebuilt-reply-from-model")),
-                ).toBe(false)
                 expect(llm.calls).toBe(0)
 
-                // And no assistant reply carrying the scripted text landed in the DB.
-                const replied = (yield* sessions.messages({ sessionID: info.id })).some((m) =>
+                const after = yield* sessions.messages({ sessionID: info.id })
+
+                // EXACTLY ONE new message landed — the rebuild boundary — and
+                // nothing else. This is the crux of the #1752 fix: no fabricated
+                // second "Context rebuilt…" user turn.
+                expect(after.length).toBe(countBefore + 1)
+
+                // That one new message IS the boundary: role "user" carrying a
+                // `checkpoint` part (the shared, correct mechanism).
+                const boundaries = after.filter((m) => m.parts.some((p) => p.type === "checkpoint"))
+                expect(boundaries.length).toBe(1)
+                expect(boundaries[0]!.info.role).toBe("user")
+
+                // The handler returns the boundary message itself, not a
+                // fabricated note.
+                expect(result.parts.some((p) => p.type === "checkpoint")).toBe(true)
+
+                // No fabricated standalone "Context rebuilt…" user turn is
+                // persisted anywhere (the band-aid the old path left behind).
+                const fabricated = after.some(
+                  (m) =>
+                    !m.parts.some((p) => p.type === "checkpoint") &&
+                    m.parts.some(
+                      (p) => p.type === "text" && p.text.includes("Context rebuilt from the latest checkpoint"),
+                    ),
+                )
+                expect(fabricated).toBe(false)
+
+                // No assistant reply carrying the scripted text landed in the DB.
+                const replied = after.some((m) =>
                   m.parts.some((p) => p.type === "text" && p.text.includes("rebuilt-reply-from-model")),
                 )
                 expect(replied).toBe(false)
 
-                // A checkpoint boundary message was actually inserted into the DB.
-                const after = yield* sessions.messages({ sessionID: info.id })
-                const boundaries = after.filter((m) => m.parts.some((p) => p.type === "checkpoint"))
-                expect(boundaries.length).toBe(1)
-
-                // The rebuild-success synthetic prose is present on the boundary run.
-                const rebuiltNote = after.some((m) =>
-                  m.parts.some(
-                    (p) => p.type === "text" && p.text.includes("Context rebuilt from the latest checkpoint"),
-                  ),
-                )
-                expect(rebuiltNote).toBe(true)
-
                 // Original conversation preserved (3 seeded users still there).
+                const userCountBefore = before.filter((m) => m.info.role === "user").length
                 const userCountAfter = after.filter((m) => m.info.role === "user").length
                 expect(userCountAfter).toBeGreaterThanOrEqual(userCountBefore)
+
+                // Outcome surfaced on the status channel (not a persisted user
+                // message): the terminal "context rebuilt" message was emitted.
+                expect(
+                  seen.some((m) => m?.includes("Context rebuilt from the latest checkpoint")),
+                ).toBe(true)
               }),
             ),
         })
       } finally {
+        GlobalBus.off("event", onEvent)
         await llm.stop()
       }
     },
@@ -309,12 +339,21 @@ describe("Manual /rebuild: on-the-spot rebuild driven through SessionPrompt.comm
   )
 
   test(
-    "case 2: no checkpoint → handler spawns a writer, waits for it, then rebuilds from the fresh checkpoint",
+    "case 2: no checkpoint → spawns a writer, waits, then inserts EXACTLY the fresh boundary (no fabricated turn, no reply)",
     async () => {
       const llm = startLLM("case2-model-reply")
       // The writer stub writes a real checkpoint on spawn and reports success,
       // exercising the handler's spawn→wait→rebuild path for real.
       const writer = writerThatWritesCheckpoint("CASE2_FRESH_CHECKPOINT_BODY")
+      const seen: Array<string | undefined> = []
+      const onEvent = (e: {
+        payload?: { type?: string; properties?: { status?: { type?: string; message?: string } } }
+      }) => {
+        if (e?.payload?.type === "session.status" && e.payload.properties?.status?.type === "busy") {
+          seen.push(e.payload.properties.status.message)
+        }
+      }
+      GlobalBus.on("event", onEvent)
       try {
         await using tmp = await tmpdir({
           git: true,
@@ -333,6 +372,9 @@ describe("Manual /rebuild: on-the-spot rebuild driven through SessionPrompt.comm
                   yield* Effect.promise(() => seedUserMessage(info.id, "cold session, no checkpoint yet"))
                   yield* Effect.promise(() => seedUserMessage(info.id, "second turn on the cold session"))
 
+                  const before = yield* sessions.messages({ sessionID: info.id })
+                  const countBefore = before.length
+
                   // Cold session: no checkpoint file exists up front.
                   const result = yield* prompt.command({
                     sessionID: info.id,
@@ -341,36 +383,47 @@ describe("Manual /rebuild: on-the-spot rebuild driven through SessionPrompt.comm
                     agent: "build",
                   })
 
-                  // The writer wrote a checkpoint and the handler rebuilt from
-                  // it, but a MANUAL /rebuild must NOT reply: it returns the
-                  // synthetic rebuild note via noReply and never enters the
-                  // runLoop, so the LLM is not called.
-                  expect(
-                    result.parts.some(
-                      (p) => p.type === "text" && p.text.includes("Context rebuilt from the latest checkpoint"),
-                    ),
-                  ).toBe(true)
-                  expect(
-                    result.parts.some((p) => p.type === "text" && p.text.includes("case2-model-reply")),
-                  ).toBe(false)
+                  // A MANUAL /rebuild must NOT reply: the LLM is not called.
+                  expect(result.info.role).not.toBe("assistant")
                   expect(llm.calls).toBe(0)
 
-                  // A rebuild boundary was inserted from the freshly-written checkpoint.
-                  const msgs = yield* sessions.messages({ sessionID: info.id })
-                  const boundaries = msgs.filter((m) => m.parts.some((p) => p.type === "checkpoint"))
+                  const after = yield* sessions.messages({ sessionID: info.id })
+
+                  // EXACTLY ONE new message: the boundary rebuilt from the
+                  // freshly-written checkpoint. No fabricated "Context rebuilt…"
+                  // user turn.
+                  expect(after.length).toBe(countBefore + 1)
+
+                  const boundaries = after.filter((m) => m.parts.some((p) => p.type === "checkpoint"))
                   expect(boundaries.length).toBe(1)
-                  expect(
-                    msgs.some((m) =>
+                  expect(boundaries[0]!.info.role).toBe("user")
+                  expect(result.parts.some((p) => p.type === "checkpoint")).toBe(true)
+
+                  const fabricated = after.some(
+                    (m) =>
+                      !m.parts.some((p) => p.type === "checkpoint") &&
                       m.parts.some(
                         (p) => p.type === "text" && p.text.includes("Context rebuilt from the latest checkpoint"),
                       ),
-                    ),
+                  )
+                  expect(fabricated).toBe(false)
+
+                  const replied = after.some((m) =>
+                    m.parts.some((p) => p.type === "text" && p.text.includes("case2-model-reply")),
+                  )
+                  expect(replied).toBe(false)
+
+                  // Outcome surfaced on the status channel, not a persisted user
+                  // message.
+                  expect(
+                    seen.some((m) => m?.includes("Context rebuilt from the latest checkpoint")),
                   ).toBe(true)
                 }),
               ),
           }),
         )
       } finally {
+        GlobalBus.off("event", onEvent)
         await llm.stop()
       }
     },
@@ -378,9 +431,18 @@ describe("Manual /rebuild: on-the-spot rebuild driven through SessionPrompt.comm
   )
 
   test(
-    "case 2 fallback: no checkpoint + no spawnable writer → surfaces the no-checkpoint message without a model reply",
+    "case 2 fallback: no checkpoint + no spawnable writer → surfaces the no-checkpoint outcome on the status channel, persists nothing",
     async () => {
       const llm = startLLM("should-not-be-used-as-a-reply")
+      const seen: Array<string | undefined> = []
+      const onEvent = (e: {
+        payload?: { type?: string; properties?: { status?: { type?: string; message?: string } } }
+      }) => {
+        if (e?.payload?.type === "session.status" && e.payload.properties?.status?.type === "busy") {
+          seen.push(e.payload.properties.status.message)
+        }
+      }
+      GlobalBus.on("event", onEvent)
       try {
         await using tmp = await tmpdir({
           git: true,
@@ -389,7 +451,8 @@ describe("Manual /rebuild: on-the-spot rebuild driven through SessionPrompt.comm
 
         // Force NO writer: with spawnRef unset, tryStartCheckpointWriter cannot
         // spawn and waitForWriter resolves "no-writer" → the handler must fall
-        // through to the no-checkpoint outcome (noReply, no runLoop).
+        // through to the no-checkpoint outcome (status channel, no runLoop, no
+        // persisted message).
         await withSpawnRef(undefined, () =>
           Instance.provide({
             directory: tmp.path,
@@ -401,6 +464,9 @@ describe("Manual /rebuild: on-the-spot rebuild driven through SessionPrompt.comm
                   const info = yield* sessions.create({ title: "rebuild-case-2-fallback" })
                   yield* Effect.promise(() => seedUserMessage(info.id, "cold session, no checkpoint yet"))
 
+                  const before = yield* sessions.messages({ sessionID: info.id })
+                  const countBefore = before.length
+
                   const result = yield* prompt.command({
                     sessionID: info.id,
                     command: Command.Default.REBUILD,
@@ -408,29 +474,40 @@ describe("Manual /rebuild: on-the-spot rebuild driven through SessionPrompt.comm
                     agent: "build",
                   })
 
-                  // Handler surfaces the no-checkpoint message to the user…
-                  expect(
-                    result.parts.some(
+                  // Did NOT enter the runLoop (no reply produced).
+                  expect(result.info.role).not.toBe("assistant")
+
+                  const after = yield* sessions.messages({ sessionID: info.id })
+
+                  // NOTHING was persisted: no boundary (nothing to rebuild from)
+                  // and no fabricated "No checkpoint…" user turn. The message
+                  // count is unchanged.
+                  expect(after.length).toBe(countBefore)
+                  const boundaries = after.filter((m) => m.parts.some((p) => p.type === "checkpoint"))
+                  expect(boundaries.length).toBe(0)
+                  const fabricated = after.some((m) =>
+                    m.parts.some(
                       (p) => p.type === "text" && p.text.includes("No checkpoint is available to rebuild from yet"),
                     ),
-                  ).toBe(true)
+                  )
+                  expect(fabricated).toBe(false)
 
-                  // …and did NOT enter the runLoop (noReply), so no assistant
-                  // reply carrying the scripted text was produced.
-                  const msgs = yield* sessions.messages({ sessionID: info.id })
-                  const modelReplied = msgs.some((m) =>
+                  // No assistant reply carrying the scripted text was produced.
+                  const modelReplied = after.some((m) =>
                     m.parts.some((p) => p.type === "text" && p.text.includes("should-not-be-used-as-a-reply")),
                   )
                   expect(modelReplied).toBe(false)
 
-                  // No rebuild boundary was inserted (nothing usable to rebuild from).
-                  const boundaries = msgs.filter((m) => m.parts.some((p) => p.type === "checkpoint"))
-                  expect(boundaries.length).toBe(0)
+                  // The outcome IS surfaced — on the status channel.
+                  expect(
+                    seen.some((m) => m?.includes("No checkpoint is available to rebuild from yet")),
+                  ).toBe(true)
                 }),
               ),
           }),
         )
       } finally {
+        GlobalBus.off("event", onEvent)
         await llm.stop()
       }
     },
