@@ -30,6 +30,8 @@ If the task mixes several of these, do them in this order:
 
 ## One-time environment setup
 
+> **Bundled runtime:** when the `MIMO_PYTHON` environment variable is set, skip `uv`/pip installs — run every Python command below with `uv run` replaced by `"$MIMO_PYTHON"` (python-pptx/Pillow/lxml preinstalled; pip console scripts unavailable, use `"$MIMO_PYTHON" -m <module>`). A bundled LibreOffice is exposed as `MIMO_SOFFICE` (picked up automatically by `soffice_bridge.py`/`render_pdf.py`), and slide rasterisation automatically falls back to pypdfium2 in that interpreter when Poppler (`pdftoppm`) is absent. For the PptxGenJS authoring path, bundled Node.js is exposed as `MIMO_NODE`, with pptxgenjs/react/react-dom/sharp/react-icons/mathjax-full preinstalled in `MIMO_NODE_MODULES` — run scripts as `NODE_PATH="$MIMO_NODE_MODULES" "$MIMO_NODE" <script.js>` instead of `npm install`.
+
 ### Prerequisites
 
 If `uv` or `bun` are not yet installed:
