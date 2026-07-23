@@ -319,6 +319,8 @@ export const dict: Record<string, string> = {
   "tui.dialog.agreement.title": "Terms & Privacy",
   "tui.dialog.agreement.message": "Please review and agree to continue.",
   "tui.dialog.agreement.confirm": "Agree & Continue",
+  "tui.dialog.free_api_sunset.title": "MiMoCode free API is no longer available",
+  "tui.dialog.free_api_sunset.message": "Run /login to sign in, or configure a third-party API before using MiMoCode again.",
   "tui.command.consent.revoke.title": "Revoke free-model agreement",
   "tui.consent.revoked": "Free-model agreement revoked — you'll be asked to agree again",
   "tui.dialog.select.placeholder": "Search",

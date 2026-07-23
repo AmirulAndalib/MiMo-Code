@@ -340,6 +340,8 @@ export const dict = {
   "tui.dialog.agreement.title": "服務協議與隱私政策",
   "tui.dialog.agreement.message": "請閱讀並同意後繼續使用。",
   "tui.dialog.agreement.confirm": "同意並繼續",
+  "tui.dialog.free_api_sunset.title": "MiMoCode 免費 API 已下線",
+  "tui.dialog.free_api_sunset.message": "請使用 /login 登入，或配置第三方 API 後再使用 MiMoCode。",
   "tui.command.consent.revoke.title": "撤銷免費模型協議",
   "tui.consent.revoked": "已撤銷免費模型協議 — 下次使用時將再次請求同意",
   "tui.dialog.select.placeholder": "搜尋",

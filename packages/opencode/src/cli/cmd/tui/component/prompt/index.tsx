@@ -48,6 +48,11 @@ import { DialogWorkspaceUnavailable } from "../dialog-workspace-unavailable"
 import { DialogAgreement, FREE_AGREEMENT_KEY, FREE_MODEL_IDS } from "../dialog-agreement"
 import { useArgs } from "@tui/context/args"
 import { resolveSkillSlash } from "@tui/i18n/skill"
+import {
+  classifyPromptSubmission,
+  isModelBackedPromptSubmission,
+  shouldBlockFreeApiRequest,
+} from "@tui/util/free-api-sunset"
 
 export type PromptProps = {
   sessionID?: string
@@ -1005,6 +1010,30 @@ export function Prompt(props: PromptProps) {
   // deferred onSubmit). This lock prevents the deferred call from re-entering
   // while a dialog or async session-creation is in progress.
   let submitLock = false
+
+  function finishSubmission(mode: "normal" | "shell", sessionID?: string) {
+    history.append({
+      ...store.prompt,
+      mode,
+    })
+    input.extmarks.clear()
+    setStore("prompt", {
+      input: "",
+      parts: [],
+    })
+    setStore("extmarkToPartIndex", new Map())
+    props.onSubmit?.()
+
+    if (!props.sessionID && sessionID)
+      setTimeout(() => {
+        route.navigate({
+          type: "session",
+          sessionID,
+        })
+      }, 50)
+    input.clear()
+  }
+
   async function submit() {
     if (submitLock) return false
     setGhost("")
@@ -1018,23 +1047,57 @@ export function Prompt(props: PromptProps) {
     if (props.disabled) return false
     if (autocomplete?.visible) return false
     if (!store.prompt.input) return false
-    const agent = local.agent.current()
-    if (!agent) return false
     const trimmed = store.prompt.input.trim()
     if (trimmed === "exit" || trimmed === "quit" || trimmed === ":q") {
       void exit()
       return true
     }
+
+    // Classify without creating a session or touching prompt state. Local
+    // commands must remain available even when the selected model cannot send.
+    const marks = input.extmarks
+      .getAllForTypeId(promptPartTypeId)
+      .flatMap((extmark: { id: number; start: number; end: number }) => {
+        const partIndex = store.extmarkToPartIndex.get(extmark.id)
+        if (partIndex === undefined) return []
+        const part = store.prompt.parts[partIndex]
+        if (part?.type !== "text" || !part.text) return []
+        return [{ start: extmark.start, end: extmark.end, text: part.text }]
+      })
+    const inputText = expandPlaceholders(store.prompt.input, marks)
+    const clientSlash = inputText.startsWith("/")
+      ? command.slashes().find((slash) => slash.display === inputText.trim())
+      : undefined
+    const request = classifyPromptSubmission({
+      input: inputText,
+      mode: store.mode,
+      clientSlash: !!clientSlash,
+    })
+    const currentMode = store.mode
+
+    if (request === "client-slash") {
+      clientSlash?.onSelect?.()
+      finishSubmission(currentMode)
+      return true
+    }
+
+    const agent = local.agent.current()
+    if (!agent) return false
     const selectedModel = local.model.current()
     if (!selectedModel) {
       void promptModelWarning()
       return false
     }
 
+    if (shouldBlockFreeApiRequest(selectedModel, { request })) {
+      void DialogAlert.show(dialog, t("tui.dialog.free_api_sunset.title"), t("tui.dialog.free_api_sunset.message"))
+      return false
+    }
+
     // Free models require a one-time acknowledgment of the terms and privacy
     // policy. Gate submission until the user accepts; the flag is stored in KV.
     const isFreeModel = FREE_MODEL_IDS.has(selectedModel.modelID)
-    if (isFreeModel && !kv.get(FREE_AGREEMENT_KEY)) {
+    if (isModelBackedPromptSubmission(request) && isFreeModel && !kv.get(FREE_AGREEMENT_KEY)) {
       submitLock = true
       DialogAgreement.show(dialog, {
         onConfirm: () => {
@@ -1116,30 +1179,11 @@ export function Prompt(props: PromptProps) {
 
     const messageID = MessageID.ascending()
 
-    // Expand pasted text inline before submitting. Extmark offsets are
-    // display-width based while plainText is UTF-16, so expandPlaceholders
-    // bridges the two coordinate systems (otherwise CJK content desyncs them).
-    const marks = input.extmarks
-      .getAllForTypeId(promptPartTypeId)
-      .flatMap((extmark: { id: number; start: number; end: number }) => {
-        const partIndex = store.extmarkToPartIndex.get(extmark.id)
-        if (partIndex === undefined) return []
-        const part = store.prompt.parts[partIndex]
-        if (part?.type !== "text" || !part.text) return []
-        return [{ start: extmark.start, end: extmark.end, text: part.text }]
-      })
-    const inputText = expandPlaceholders(store.prompt.input, marks)
-
     // Filter out text parts (pasted content) since they're now expanded inline
     const nonTextParts = store.prompt.parts.filter((part) => part.type !== "text")
 
-    // Capture mode before it gets reset
-    const currentMode = store.mode
     const variant = local.model.variant.current()
 
-    const clientSlash = inputText.startsWith("/")
-      ? command.slashes().find((s) => s.display === inputText.trim())
-      : undefined
     const serverSlash = inputText.startsWith("/")
       ? iife(() => {
           const name = inputText.split("\n")[0].split(" ")[0].slice(1)
@@ -1238,27 +1282,7 @@ export function Prompt(props: PromptProps) {
           })
         })
     }
-    history.append({
-      ...store.prompt,
-      mode: currentMode,
-    })
-    input.extmarks.clear()
-    setStore("prompt", {
-      input: "",
-      parts: [],
-    })
-    setStore("extmarkToPartIndex", new Map())
-    props.onSubmit?.()
-
-    // temporary hack to make sure the message is sent
-    if (!props.sessionID)
-      setTimeout(() => {
-        route.navigate({
-          type: "session",
-          sessionID,
-        })
-      }, 50)
-    input.clear()
+    finishSubmission(currentMode, sessionID)
     return true
 
     } finally {

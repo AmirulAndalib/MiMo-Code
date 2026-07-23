@@ -373,6 +373,8 @@ export const dict = {
   "tui.dialog.agreement.title": "Conditions et confidentialité",
   "tui.dialog.agreement.message": "Veuillez les lire et les accepter pour continuer.",
   "tui.dialog.agreement.confirm": "Accepter et continuer",
+  "tui.dialog.free_api_sunset.title": "L’API gratuite de MiMoCode n’est plus disponible",
+  "tui.dialog.free_api_sunset.message": "Exécutez /login pour vous connecter ou configurez une API tierce avant de réutiliser MiMoCode.",
   "tui.command.consent.revoke.title": "Révoquer l'accord du modèle gratuit",
   "tui.consent.revoked": "Accord du modèle gratuit révoqué — vous devrez l'accepter à nouveau",
   "tui.dialog.select.placeholder": "Rechercher",

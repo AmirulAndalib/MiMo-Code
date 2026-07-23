@@ -388,6 +388,8 @@ export const dict = {
   "tui.dialog.agreement.title": "Условия и конфиденциальность",
   "tui.dialog.agreement.message": "Ознакомьтесь и примите их, чтобы продолжить.",
   "tui.dialog.agreement.confirm": "Принять и продолжить",
+  "tui.dialog.free_api_sunset.title": "Бесплатный API MiMoCode больше недоступен",
+  "tui.dialog.free_api_sunset.message": "Выполните /login для входа или настройте сторонний API, прежде чем снова использовать MiMoCode.",
   "tui.command.consent.revoke.title": "Отозвать согласие на бесплатную модель",
   "tui.consent.revoked": "Согласие на бесплатную модель отозвано — потребуется принять снова",
   "tui.dialog.select.placeholder": "Поиск",
