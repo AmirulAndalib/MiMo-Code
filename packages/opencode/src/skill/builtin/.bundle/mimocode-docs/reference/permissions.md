@@ -68,8 +68,11 @@ For trusted, disposable environments (containers, sandboxes, CI) you can auto-ap
 | Surface | How |
 |---------|-----|
 | TUI (`mimo`) | `mimo --dangerously-skip-permissions` |
+| TUI at runtime | `/skip-permissions` — toggle mid-session, instance-wide, inherited by subagents |
 | Headless (`mimo run`) | `mimo run --dangerously-skip-permissions "<prompt>"` |
 | Any surface (env) | `MIMOCODE_PERMISSION='"allow"'` or `MIMOCODE_DANGEROUSLY_SKIP_PERMISSIONS=1` |
+
+The `/skip-permissions` toggle auto-allows permission asks but keeps `deny` rules in force; forced-ask operations (e.g. destructive bash) still prompt and auto-reject after 60s (`MIMOCODE_SKIP_ALL_FORCED_ASK_TIMEOUT_MS`) with feedback the model can act on, so unattended runs don't hang.
 
 Semantics: an **allow-all base is injected UNDER your config**, so a tool with *no* rule auto-approves. Because the injected `*: allow` sits before your rules and the last matching rule wins, **any explicit rule you wrote still takes precedence** — a `deny` blocks, and a leftover `ask` will still prompt. Two consequences worth knowing:
 

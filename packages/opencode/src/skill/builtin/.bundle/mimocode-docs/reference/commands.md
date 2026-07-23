@@ -42,12 +42,15 @@ Notable TUI flags: `--continue`/`-c` (resume last session), `--session`/`-s`, `-
 | `/loop` | `[interval] <prompt>` — schedule a repeating prompt (also runs once now); maps the interval to a cron job |
 | `/loops` | List scheduled cron/loop jobs; `/loops cancel <id>` stops one |
 | `/rebuild` | Rebuild the conversation context now from the latest checkpoint — frees context on demand instead of waiting for the automatic overflow trigger. Keeps recent messages verbatim; earlier context collapses to the checkpoint summary. Waits (bounded) for an in-flight checkpoint writer first |
-| `/connect` | Sign in to a provider (e.g. OpenRouter) |
-| `/<skill-name>` | Invoke any available skill directly by name |
+| `/connect` | Sign in to a provider (e.g. OpenRouter; OAuth logins include Xiaomi MiMo, Codex/ChatGPT, xAI/Grok) |
+| `/modalities` | Configure a custom model's input modalities (image/audio/video/pdf) via multi-select dialog; persists to `provider.<id>.models.<id>.modalities` in global config |
+| `/skip-permissions` | Toggle auto-allow for permission asks at runtime (instance-wide, inherited by subagents). `deny` rules still block; forced-ask operations (destructive bash etc.) auto-reject after 60s with actionable feedback instead of hanging |
+| `/compose-next` | Recommended spec→ship feature delivery skill; hidden from model auto-discovery — invoke explicitly |
+| `/<skill-name>` | Invoke any available skill directly by name. Mentioning 2+ skills in one message auto-loads them (up to 3) and injects a multi-skill orchestration plan |
 
 ## Keybindings
 
-- `Tab` — cycle primary agents (build → plan → compose).
+- `Tab` — cycle primary agents (build → plan → compose). After the first message the mode locks: Build and Plan can still switch between each other, but Compose is isolated — it can't be entered mid-session, and a session started in Compose stays there. (Many models ignore tools injected mid-conversation; a fixed skill/tool set from session start improves tool-call reliability.)
 - Other keybinds are configurable; the keybinds config module governs them.
 
 ## Notes

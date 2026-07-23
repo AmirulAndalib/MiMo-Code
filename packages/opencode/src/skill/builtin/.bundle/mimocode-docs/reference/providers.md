@@ -2,6 +2,14 @@
 
 Read this reference whenever a request involves a provider, model, API key, base URL, authentication, or an OpenAI-/Anthropic-compatible endpoint.
 
+## Sign-in options (TUI login dialog / `/connect`)
+
+- **Xiaomi MiMo Platform** — OAuth device flow (recommended).
+- **Codex (ChatGPT Pro/Plus)** — OpenAI OAuth login.
+- **Import from Claude Code** — reads API keys from `~/.claude/settings*.json`.
+- **xAI (Grok)** — OAuth login, provider id `xai`.
+- **Other catalog providers** — API-key entry (e.g. OpenRouter), plus **+ Custom provider** for any OpenAI-compatible endpoint.
+
 ## Choose the target config
 
 - Use `.mimocode/mimocode.jsonc` or `.mimocode/mimocode.json` only when the user explicitly wants project-local behavior.
@@ -96,6 +104,8 @@ Provider options, including credentials and base URL, are shared by every model 
 The model's display name is enough to register it. Do not guess `limit.context`, `limit.output`, `reasoning`, `tool_call`, `modalities`, cost, or other capabilities from the model name. Internal routers often expose aliases whose behavior differs from similarly named public models.
 
 Add optional metadata only when the user supplied it or a current authoritative source verifies it. If limits are important but unknown, omit them and state that they remain unspecified; MiMoCode will apply its runtime fallback and log a warning for an unknown context window.
+
+For input modalities specifically, the user can set them in the TUI with `/modalities` (multi-select image/audio/video/pdf; persists to `provider.<id>.models.<id>.modalities` in global config) — prefer pointing them there over hand-editing.
 
 ## Credential handling
 

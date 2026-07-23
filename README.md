@@ -41,7 +41,9 @@ mimo
 The first launch guides you through configuration automatically. Supported options:
 - **MiMo Auto (free for a limited time)** — anonymous channel, zero configuration
 - **Xiaomi MiMo Platform** — OAuth login
+- **Codex (ChatGPT Pro/Plus)** — OpenAI OAuth login
 - **Import from Claude Code** — migrate existing authentication in one step
+- **Provider list** — connect catalog providers by API key, or OAuth where supported (e.g. xAI/Grok)
 - **Custom Provider** — add any OpenAI-compatible API in the TUI
 
 <details>
@@ -90,7 +92,9 @@ Beyond MiMoCode, Xiaomi MiMo models also work in other agents and coding tools l
 | **plan** | Read-only analysis mode for code exploration and solution design |
 | **compose** | Orchestration mode for specs-driven development and skill-driven workflows |
 
-Press `Tab` to switch between primary agents. Subagents are created by the system as needed.
+Press `Tab` to switch between primary agents. Subagents are created by the system as needed. After the first message the mode locks: Build and Plan can still switch between each other, but Compose is isolated once entered — keeping the skill/tool set fixed from session start significantly improves tool-call reliability.
+
+For frontier models (Fable/Sol-class), the recommended way to run compose-style work is the **build** agent with the `/compose-next` skill — see [Compose Mode](#compose-mode).
 
 ### Persistent Memory
 
@@ -123,7 +127,11 @@ The `/goal` command sets a stopping condition for a session. When the agent trie
 
 ### Compose Mode
 
-Compose mode provides a structured workflow for specs-driven development. It includes built-in skills for planning, execution, code review, TDD, debugging, verification, and merging — orchestrating the full lifecycle from spec to shipped code.
+Compose is MiMoCode's structured workflow for specs-driven development, orchestrating the full lifecycle from spec to shipped code.
+
+The recommended way to use it is the **`/compose-next`** skill on the **build** agent: a single self-contained contract covering grill → spec → workspace → implement → verify → review → finalize → finish, with feature documents at `docs/compose/spec/<feature>.md`. It is designed for frontier models (Fable/Sol-class), which internalize most of the workflow and work best from one compact contract.
+
+The legacy path is the dedicated **compose agent** (switch with `Tab`), which orchestrates fourteen built-in skills for planning, execution, code review, TDD, debugging, verification, and merging — a step-by-step curriculum that remains useful for weaker models.
 
 ### Workflows
 
@@ -138,13 +146,13 @@ MiMoCode ships with four built-in workflows:
 | `fact-check` | Plan → Search → Extract → Group → Crosscheck → Report | Adversarial fact verification. Runs parallel web searches, extracts checkable facts, groups duplicates, then cross-checks each with a 3-juror adversarial vote. Best for precise claims ("Is X true?"). |
 | `research-experiment` | Baseline → Loop → Audit → Report | Autonomous optimization loop for a mechanically verifiable metric. Establishes a baseline, iterates through hypothesize → implement → evaluate → keep/revert, audits for metric gaming, and produces a reproducible result log. Requires a fixed-budget evaluation command and an explicit editable-file scope. |
 
-The compose workflow complements the compose agent: use the **workflow** when requirements are clear and tasks split cleanly (deterministic, parallel, non-interactive); use the **agent** when you need to redirect mid-flow or inject judgment between steps (conversational, interactive).
+The compose workflow complements the interactive path: use the **workflow** when requirements are clear and tasks split cleanly (deterministic, parallel, non-interactive); use the **build** agent with `/compose-next` (or the legacy compose agent) when you need to redirect mid-flow or inject judgment between steps (conversational, interactive).
 
 **Custom workflows:** Place a `.js` file in `.mimocode/workflows/` or `.claude/workflows/` to define your own, or override a built-in by using the same name (e.g. `.mimocode/workflows/compose.js`).
 
 ### Builtin Skills
 
-Skills are reusable instruction sets that teach agents how to handle specific tasks (e.g. generating PDFs, writing academic papers, searching arXiv). For a new task, MiMoCode searches available non-Compose skills by exact name, localized alias, and BM25 relevance. High-confidence matches are loaded automatically; uncertain matches are ranked for the agent to assess. In the TUI, type `/` to browse the autocomplete list or invoke a skill directly with `/<skill-name>`.
+Skills are reusable instruction sets that teach agents how to handle specific tasks (e.g. generating PDFs, writing academic papers, searching arXiv). For a new task, MiMoCode searches available non-Compose skills by exact name, localized alias, and BM25 relevance. High-confidence matches are loaded automatically; uncertain matches are ranked for the agent to assess. In the TUI, type `/` to browse the autocomplete list or invoke a skill directly with `/<skill-name>` — mentioning two or more skills in a single message auto-loads them and injects a multi-skill orchestration plan.
 
 MiMoCode bundles the following builtin skills:
 
@@ -153,6 +161,7 @@ MiMoCode bundles the following builtin skills:
 | `arxiv` | Search, read, cite, and analyze arXiv papers |
 | `claude-code` | Delegate coding, testing, review, and Git tasks to the Claude Code CLI |
 | `codex` | Run and troubleshoot the Codex CLI in headless automation, CI, containers, and remote environments |
+| `compose-next` | Recommended spec→ship feature delivery workflow (grill → spec → implement → verify → review → finish); invoke explicitly with `/compose-next` |
 | `data-analytics` | Analyze product and business data through reusable workflows for data quality, KPIs, dashboards, reports, notebooks, and market sizing |
 | `deep-research` | Produce cited, multi-source research reports with parallel subagents and built-in web tools |
 | `design-blueprint` | Produce a design blueprint (DESIGN.md + Decision Trace) before mocking up visuals |
@@ -359,6 +368,8 @@ If your provider is not in the built-in model catalog, configure it directly wit
 
 Put user-wide settings in `~/.config/mimocode/mimocode.jsonc` (or `mimocode.json` in the same directory), or project-only settings in `.mimocode/mimocode.jsonc` (or `.json`), and merge them with any existing configuration. Because `apiKey` is stored as plaintext, keep the file readable only by your user and never commit it. Run `mimo models` or use the TUI model picker to verify the configured model.
 
+To declare which input modalities a custom model supports (image, audio, video, PDF), run `/modalities` in the TUI — a multi-select dialog that persists the setting to config without hand-editing.
+
 ### Key Options
 
 - Provider and model selection
@@ -428,6 +439,10 @@ prompt is skipped when there is no TTY, so in CI it activates with no confirmati
 **This is dangerous.** With permissions bypassed, a malicious prompt, file, or plugin can
 run arbitrary shell commands and read, modify, or exfiltrate your data without any
 confirmation. Only use it where you fully trust the workspace.
+
+For a lighter-weight option, the `/skip-permissions` command toggles auto-allow at runtime
+inside the TUI: `deny` rules still block, and forced-ask operations (e.g. destructive bash)
+auto-reject after 60 seconds with feedback the model can act on instead of hanging.
 
 </details>
 
