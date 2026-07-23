@@ -685,6 +685,18 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
       },
     },
     {
+      title: t("tui.command.agent.force.title"),
+      value: "agent.force",
+      keybind: "agent_force",
+      category: "agent",
+      slash: {
+        name: "force-agent",
+      },
+      onSelect: () => {
+        dialog.replace(() => <DialogAgent force />)
+      },
+    },
+    {
       title: t("tui.command.modalities.title"),
       value: "model.modalities",
       category: "agent",

@@ -265,6 +265,7 @@ export const dict: Record<string, string> = {
   "tui.command.model.cycle_favorite.title": "Favorite cycle",
   "tui.command.model.cycle_favorite_reverse.title": "Favorite cycle reverse",
   "tui.command.agent.list.title": "Switch agent",
+  "tui.command.agent.force.title": "Force switch mode (bypass mid-session lock)",
   "tui.command.modalities.title": "Configure input modalities",
   "tui.modalities.title": "Input modalities — {{model}}",
   "tui.modalities.saved": "Input modalities updated: {{modalities}}",

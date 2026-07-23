@@ -286,6 +286,7 @@ export const dict = {
   "tui.command.model.cycle_favorite.title": "循环切换收藏模型",
   "tui.command.model.cycle_favorite_reverse.title": "反向循环切换收藏模型",
   "tui.command.agent.list.title": "切换智能体",
+  "tui.command.agent.force.title": "强制切换模式（绕过会话中锁定）",
   "tui.command.modalities.title": "配置输入模态",
   "tui.modalities.title": "输入模态 — {{model}}",
   "tui.modalities.saved": "输入模态已更新：{{modalities}}",

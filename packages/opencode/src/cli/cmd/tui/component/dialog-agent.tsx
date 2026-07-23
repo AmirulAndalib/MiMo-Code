@@ -3,7 +3,7 @@ import { useLocal } from "@tui/context/local"
 import { DialogSelect } from "@tui/ui/dialog-select"
 import { useDialog } from "@tui/ui/dialog"
 
-export function DialogAgent() {
+export function DialogAgent(props: { force?: boolean }) {
   const local = useLocal()
   const dialog = useDialog()
 
@@ -19,11 +19,15 @@ export function DialogAgent() {
 
   return (
     <DialogSelect
-      title="Select agent"
+      title={props.force ? "Force switch mode" : "Select agent"}
+      hint={props.force ? "Bypasses the mid-session lock — switch to any available mode" : undefined}
       current={local.agent.current()?.name}
       options={options()}
       onSelect={(option) => {
-        local.agent.userSwitch(option.value)
+        // force-switch bypasses the mid-session lock so any available primary
+        // agent is reachable; the normal picker respects it.
+        if (props.force) local.agent.forceSwitch(option.value)
+        else local.agent.userSwitch(option.value)
         dialog.clear()
       }}
     />
