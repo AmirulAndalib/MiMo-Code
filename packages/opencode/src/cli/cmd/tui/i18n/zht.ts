@@ -345,6 +345,7 @@ export const dict = {
   "tui.dialog.select.placeholder": "搜尋",
   "tui.dialog.model.login_hint": "提示：先 /login 登入再切換模型",
   "tui.model.mimo_auto.name": "MiMo Auto（MiMo-V2.5 限免中）",
+  "tui.model.mimo_auto.sunset_name": "MiMo Auto（MiMo-V2.5）",
   "tui.dialog.token_plan.title": "訂閱token plan或排隊等待",
   "tui.dialog.token_plan.line1": "免費模式下目前需要排隊等待，若想穩定取得高品質服務，",
   "tui.dialog.token_plan.subscribe": "歡迎訂閱 ",

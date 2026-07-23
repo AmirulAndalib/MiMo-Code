@@ -14,6 +14,7 @@ import { RGBA } from "@opentui/core"
 import { Filesystem } from "@/util"
 import * as Model from "../util/model"
 import { useLanguage } from "@tui/context/language"
+import { createFreeApiSunsetSignal, freeApiModelNameKey } from "@tui/util/free-api-sunset"
 
 export function parseModel(model: string) {
   const [providerID, ...rest] = model.split("/")
@@ -30,6 +31,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
     const sdk = useSDK()
     const toast = useToast()
     const t = useLanguage().t
+    const freeApiSunset = createFreeApiSunsetSignal()
 
     function isModelValid(model: { providerID: string; modelID: string }) {
       const provider = sync.data.provider.find((x) => x.id === model.providerID)
@@ -262,8 +264,14 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         )
       })
 
+      function modelName(providerID: string, modelID: string) {
+        if (modelID === "mimo-auto") return t(freeApiModelNameKey(freeApiSunset()))
+        return Model.name(sync.data.provider, providerID, modelID)
+      }
+
       return {
         current: currentModel,
+        name: modelName,
         get ready() {
           return modelStore.ready
         },
@@ -286,10 +294,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           const info = provider?.models[value.modelID]
           return {
             provider: provider?.name || value.providerID,
-            model:
-              value.modelID === "mimo-auto"
-                ? t("tui.model.mimo_auto.name")
-                : Model.name(sync.data.provider, value.providerID, value.modelID),
+            model: modelName(value.providerID, value.modelID),
             reasoning: info?.capabilities?.reasoning ?? false,
           }
         }),

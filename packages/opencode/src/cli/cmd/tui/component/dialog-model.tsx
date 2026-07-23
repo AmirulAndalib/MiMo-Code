@@ -12,7 +12,6 @@ import { useSDK } from "../context/sdk"
 import { useToast, type ToastContext } from "../ui/toast"
 import { DialogPrompt } from "../ui/dialog-prompt"
 import { useLanguage } from "@tui/context/language"
-import * as Model from "../util/model"
 import { PROVIDER_PRIORITY } from "@/util/provider-priority"
 import * as fuzzysort from "fuzzysort"
 
@@ -37,8 +36,6 @@ export function DialogModel(props: { providerID?: string }) {
   const connected = useConnected()
   const providers = createDialogProviderOptions()
   const t = useLanguage().t
-  const modelName = (providerID: string, modelID: string) =>
-    modelID === "mimo-auto" ? t("tui.model.mimo_auto.name") : Model.name(sync.data.provider, providerID, modelID)
 
   const showExtra = createMemo(() => connected() && !props.providerID)
 
@@ -64,7 +61,7 @@ export function DialogModel(props: { providerID?: string }) {
           {
             key: item,
             value: { providerID: provider.id, modelID: model.id },
-            title: modelName(provider.id, model.id),
+            title: local.model.name(provider.id, model.id),
             // Hide provider name for mimo-auto to avoid redundancy
             description: item.modelID === "mimo-auto" ? undefined : provider.name,
             category,
@@ -100,7 +97,7 @@ export function DialogModel(props: { providerID?: string }) {
             ? [
                 {
                   value: { providerID: "mimo", modelID: "mimo-auto" },
-                  title: modelName("mimo", "mimo-auto"),
+                  title: local.model.name("mimo", "mimo-auto"),
                   description: undefined as string | undefined,
                   category: pinnedCategory,
                   disabled: false,

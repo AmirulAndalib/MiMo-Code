@@ -321,6 +321,7 @@ export const dict = {
   "tui.dialog.select.placeholder": "検索",
   "tui.dialog.model.login_hint": "ヒント：モデルを切り替える前に /login でログインしてください",
   "tui.model.mimo_auto.name": "MiMo Auto（MiMo-V2.5 期間限定無料）",
+  "tui.model.mimo_auto.sunset_name": "MiMo Auto（MiMo-V2.5）",
   "tui.dialog.token_plan.title": "Token Plan を購読するか順番待ち",
   "tui.dialog.token_plan.line1":
     "無料モードでは現在順番待ちが必要です。安定した高品質なサービスをご利用いただくには、",

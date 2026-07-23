@@ -8,6 +8,13 @@ import {
   isFreeApiSunset,
   shouldBlockFreeApiRequest,
 } from "../../../../src/cli/cmd/tui/util/free-api-sunset"
+import { dict as en } from "../../../../src/cli/cmd/tui/i18n/en"
+import { dict as es } from "../../../../src/cli/cmd/tui/i18n/es"
+import { dict as fr } from "../../../../src/cli/cmd/tui/i18n/fr"
+import { dict as ja } from "../../../../src/cli/cmd/tui/i18n/ja"
+import { dict as ru } from "../../../../src/cli/cmd/tui/i18n/ru"
+import { dict as zh } from "../../../../src/cli/cmd/tui/i18n/zh"
+import { dict as zht } from "../../../../src/cli/cmd/tui/i18n/zht"
 
 describe("free API sunset", () => {
   test("uses the exact UTC threshold", () => {
@@ -37,8 +44,21 @@ describe("free API sunset", () => {
   })
 
   test("switches the model display key at sunset", () => {
-    expect(freeApiModelNameKey(false)).toBe("tui.model.mimo_auto.name")
-    expect(freeApiModelNameKey(true)).toBe("tui.model.mimo_auto.sunset_name")
+    expect(freeApiModelNameKey(isFreeApiSunset(FREE_API_SUNSET_AT - 1))).toBe("tui.model.mimo_auto.name")
+    expect(freeApiModelNameKey(isFreeApiSunset(FREE_API_SUNSET_AT))).toBe("tui.model.mimo_auto.sunset_name")
+    expect(freeApiModelNameKey(isFreeApiSunset(FREE_API_SUNSET_AT + 1))).toBe("tui.model.mimo_auto.sunset_name")
+  })
+
+  test("all TUI locales define the post-sunset model name", () => {
+    expect([en, es, fr, ja, ru, zh, zht].map((locale) => locale["tui.model.mimo_auto.sunset_name"])).toEqual([
+      "MiMo Auto (MiMo-V2.5)",
+      "MiMo Auto (MiMo-V2.5)",
+      "MiMo Auto (MiMo-V2.5)",
+      "MiMo Auto（MiMo-V2.5）",
+      "MiMo Auto (MiMo-V2.5)",
+      "MiMo Auto（MiMo-V2.5）",
+      "MiMo Auto（MiMo-V2.5）",
+    ])
   })
 
   test("schedules one reactive switch before the threshold", () => {

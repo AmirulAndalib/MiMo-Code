@@ -378,6 +378,7 @@ export const dict = {
   "tui.dialog.select.placeholder": "Rechercher",
   "tui.dialog.model.login_hint": "Astuce : exécutez /login pour vous connecter avant de changer de modèle",
   "tui.model.mimo_auto.name": "MiMo Auto (MiMo-V2.5, gratuit pour une durée limitée)",
+  "tui.model.mimo_auto.sunset_name": "MiMo Auto (MiMo-V2.5)",
   "tui.dialog.token_plan.title": "Abonnez-vous à un Token Plan ou patientez dans la file",
   "tui.dialog.token_plan.line1":
     "En mode gratuit, les requêtes sont mises en file d'attente. Pour un service stable et de qualité,",
