@@ -888,7 +888,6 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
   const id = model.id.toLowerCase()
   const adaptiveEfforts = anthropicAdaptiveEfforts(model.api.id)
   if (
-    id.includes("deepseek") ||
     id.includes("minimax") ||
     id.includes("glm") ||
     id.includes("mistral") ||
@@ -898,6 +897,15 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
     id.includes("big-pickle")
   )
     return {}
+
+  // DeepSeek V4 supports reasoning_effort: "high" (default) and "max"
+  // low/medium map to high, xhigh maps to max per DeepSeek docs
+  if (id.includes("deepseek")) {
+    return {
+      high: { reasoningEffort: "high" },
+      max: { reasoningEffort: "max" },
+    }
+  }
 
   // see: https://docs.x.ai/docs/guides/reasoning#control-how-hard-the-model-thinks
   if (id.includes("grok") && id.includes("grok-3-mini")) {
