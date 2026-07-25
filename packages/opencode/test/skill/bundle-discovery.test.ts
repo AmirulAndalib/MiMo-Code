@@ -23,6 +23,7 @@ describe("bundled skill discovery", () => {
           const names = new Set(list.map((item) => item.name))
 
           expect(names.has("data-analytics")).toBe(true)
+          expect(names.has("grok-build")).toBe(true)
           expect(names.has("product-design")).toBe(true)
           expect(names.has("sales")).toBe(true)
           expect(
