@@ -934,9 +934,8 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
   )
     return {}
 
-  // DeepSeek V4 supports reasoning_effort: "high" (default) and "max"
-  // low/medium map to high, xhigh maps to max per DeepSeek docs
   if (id.includes("deepseek")) {
+    if (model.providerID !== "deepseek" || model.api.npm !== "@ai-sdk/openai-compatible") return {}
     return {
       high: { reasoningEffort: "high" },
       max: { reasoningEffort: "max" },
