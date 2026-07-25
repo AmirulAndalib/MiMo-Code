@@ -468,6 +468,41 @@ function normalizeContentArray(msgs: ModelMessage[]): ModelMessage[] {
   })
 }
 
+function record(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
+  return value as Record<string, unknown>
+}
+
+// Anthropic's SDK discards historical reasoning without a signature or redacted
+// data. The opt-in compatibility mode supplies an empty placeholder signature,
+// making unsigned reasoning follow the same native thinking-block serializer
+// branch as signed reasoning. Compatible endpoints may intentionally accept it;
+// the official Anthropic API can still reject an unverifiable signature.
+function forceAnthropicReasoningContent(msgs: ModelMessage[], model: Provider.Model): ModelMessage[] {
+  if (!Flag.MIMOCODE_FORCE_ANTHROPIC_REASONING_CONTENT) return msgs
+  if (!["@ai-sdk/anthropic", "@ai-sdk/google-vertex/anthropic"].includes(model.api.npm)) return msgs
+
+  return msgs.map((msg) => {
+    if (msg.role !== "assistant" || !Array.isArray(msg.content)) return msg
+    return {
+      ...msg,
+      content: msg.content.map((part) => {
+        if (part.type !== "reasoning") return part
+        const metadata = record(part.providerOptions?.anthropic ?? part.providerOptions?.[model.providerID])
+        if (typeof metadata?.signature === "string" || typeof metadata?.redactedData === "string") return part
+        const key = part.providerOptions?.anthropic ? "anthropic" : model.providerID
+        return {
+          ...part,
+          providerOptions: {
+            ...part.providerOptions,
+            [key]: { ...metadata, signature: "" },
+          },
+        }
+      }),
+    }
+  })
+}
+
 function unsupportedParts(msgs: ModelMessage[], model: Provider.Model): ModelMessage[] {
   return msgs.map((msg) => {
     if (msg.role !== "user" || !Array.isArray(msg.content)) return msg
@@ -774,6 +809,7 @@ export function message(msgs: ModelMessage[], model: Provider.Model, options: Re
   msgs = unsupportedParts(msgs, model)
   msgs = limitImages(msgs, model)
   msgs = normalizeMessages(msgs, model, options)
+  msgs = forceAnthropicReasoningContent(msgs, model)
   // SAFE prefill guard: never let the request end with an assistant (prefill)
   // message a provider (e.g. Bedrock) would reject, without deleting a completed
   // reply. Drops only empty residue; appends a continuation user turn otherwise.
