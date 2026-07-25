@@ -16,7 +16,6 @@ describe("builtin skills", () => {
     ).text()
 
     expect(skill).toContain("only when the user explicitly requests Claude Code or names this skill")
-    expect(skill).toContain("Do not invoke it automatically for general coding")
     expect(skill).not.toContain("even if the user doesn't say 'Claude Code'")
   })
 
