@@ -1,5 +1,6 @@
 import { NodeFileSystem } from "@effect/platform-node"
 import { beforeEach, expect } from "bun:test"
+import { dynamicTool, jsonSchema } from "ai"
 import { Cause, Effect, Exit, Fiber, Layer } from "effect"
 import path from "path"
 import type { Agent } from "../../src/agent/agent"
@@ -231,6 +232,74 @@ it.live("session.processor effect tests capture llm input cleanly", () =>
         expect(value).toBe("continue")
         expect(calls).toBe(1)
         expect(parts.some((part) => part.type === "text" && part.text === "hello")).toBe(true)
+      }),
+    { git: true, config: (url) => providerCfg(url) },
+  ),
+)
+
+it.live("session.processor persists client Tool Search output as structured JSON", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        const providerOutput = {
+          tools: [
+            {
+              type: "function",
+              name: "calendar_create_event",
+              description: "Create a calendar event",
+              deferLoading: true,
+              parameters: { type: "object", properties: {} },
+            },
+          ],
+        }
+        yield* llm.tool("tool_search", { query: "calendar" })
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "find a calendar tool")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({
+          assistantMessage: msg,
+          sessionID: chat.id,
+          model: mdl,
+        })
+
+        yield* handle.process({
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies MessageV2.User,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "find a calendar tool" }],
+          tools: {
+            tool_search: dynamicTool({
+              description: "Search tools",
+              inputSchema: jsonSchema({
+                type: "object",
+                properties: { query: { type: "string" } },
+                required: ["query"],
+                additionalProperties: false,
+              }),
+              execute: async () => providerOutput,
+            }),
+          },
+        })
+
+        const part = MessageV2.parts(msg.id).find(
+          (item): item is MessageV2.ToolPart => item.type === "tool" && item.tool === "tool_search",
+        )
+        expect(part?.state.status).toBe("completed")
+        if (part?.state.status !== "completed") return
+        expect(part.state.providerOutput).toEqual(providerOutput)
+        expect(part.state.output).toContain("calendar_create_event")
       }),
     { git: true, config: (url) => providerCfg(url) },
   ),

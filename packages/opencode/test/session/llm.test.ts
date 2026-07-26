@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test"
 import path from "path"
-import { tool, type ModelMessage } from "ai"
+import { dynamicTool, jsonSchema, tool, type ModelMessage } from "ai"
 import { Cause, Effect, Exit, Stream } from "effect"
 import z from "zod"
 import { makeRuntime } from "../../src/effect/run-service"
@@ -16,6 +16,7 @@ import type { Agent } from "../../src/agent/agent"
 import { MessageV2 } from "../../src/session/message-v2"
 import { SessionID, MessageID } from "../../src/session/schema"
 import { AppRuntime } from "../../src/effect/app-runtime"
+import { createMcpToolSearch } from "../../src/tool/mcp-tool-search"
 
 async function getModel(providerID: ProviderID, modelID: ModelID) {
   return AppRuntime.runPromise(
@@ -671,6 +672,172 @@ describe("session.llm.stream", () => {
 
         const maxTokens = body.max_output_tokens as number | undefined
         expect(maxTokens).toBe(undefined) // match codex cli behavior
+      },
+    })
+  })
+
+  test("serializes client Tool Search and defers only marked MCP tools", async () => {
+    const server = state.server
+    if (!server) throw new Error("Server not initialized")
+
+    const source = await loadFixture("openai", "gpt-5.2")
+    const request = waitRequest(
+      "/responses",
+      createEventResponse(
+        [
+          {
+            type: "response.created",
+            response: {
+              id: "resp-tool-search",
+              created_at: Math.floor(Date.now() / 1000),
+              model: source.model.id,
+              service_tier: null,
+            },
+          },
+          {
+            type: "response.completed",
+            response: {
+              incomplete_details: null,
+              usage: {
+                input_tokens: 1,
+                input_tokens_details: null,
+                output_tokens: 1,
+                output_tokens_details: null,
+              },
+              service_tier: null,
+            },
+          },
+        ],
+        true,
+      ),
+    )
+
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(
+          path.join(dir, "mimocode.json"),
+          JSON.stringify({
+            enabled_providers: ["openai"],
+            provider: {
+              openai: {
+                npm: "@ai-sdk/openai",
+                models: { [source.model.id]: source.model },
+                options: { apiKey: "test-openai-key", baseURL: `${server.url.origin}/v1` },
+              },
+            },
+          }),
+        )
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const resolved = await getModel(ProviderID.openai, ModelID.make(source.model.id))
+        const sessionID = SessionID.make("session-tool-search-wire")
+        const agent = {
+          name: "test",
+          mode: "primary",
+          options: {},
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+        const user = {
+          id: MessageID.make("user-tool-search-wire"),
+          sessionID,
+          role: "user",
+          time: { created: Date.now() },
+          agent: agent.name,
+          model: { providerID: ProviderID.openai, modelID: resolved.id },
+        } satisfies MessageV2.User
+        const parameters = {
+          type: "object" as const,
+          properties: { query: { type: "string" as const } },
+          required: ["query"],
+          additionalProperties: false,
+        }
+        const loaded = {
+          type: "function",
+          name: "calendar_find",
+          description: "Find calendar events",
+          deferLoading: true,
+          parameters,
+        }
+
+        await drain({
+          user,
+          sessionID,
+          model: resolved,
+          agent,
+          system: [],
+          messages: [
+            { role: "user", content: "find a calendar tool" },
+            {
+              role: "assistant",
+              content: [
+                {
+                  type: "tool-call",
+                  toolCallId: "call-search",
+                  toolName: "tool_search",
+                  input: { arguments: { query: "calendar" }, call_id: "call-search" },
+                },
+              ],
+            },
+            {
+              role: "tool",
+              content: [
+                {
+                  type: "tool-result",
+                  toolCallId: "call-search",
+                  toolName: "tool_search",
+                  output: { type: "json", value: { tools: [loaded] } },
+                },
+              ],
+            },
+            { role: "user", content: "continue" },
+          ],
+          tools: {
+            tool_search: createMcpToolSearch([
+              { name: "calendar_find", description: "Find calendar events", parameters },
+            ]),
+            calendar_find: dynamicTool({
+              description: "Find calendar events",
+              inputSchema: jsonSchema(parameters),
+              providerOptions: { openai: { deferLoading: true } },
+              execute: async () => ({ events: [] }),
+            }),
+            direct_tool: tool({
+              description: "A directly exposed non-MCP tool",
+              inputSchema: z.object({}),
+              execute: async () => "ok",
+            }),
+          },
+        })
+
+        const body = (await request).body
+        const tools = body.tools as Array<Record<string, unknown>>
+        expect(tools).toContainEqual(expect.objectContaining({ type: "tool_search", execution: "client" }))
+        expect(tools).toContainEqual(
+          expect.objectContaining({ type: "function", name: "calendar_find", defer_loading: true }),
+        )
+        expect(tools).toContainEqual(expect.objectContaining({ type: "function", name: "direct_tool" }))
+        expect(tools.find((item) => item.name === "direct_tool")).not.toHaveProperty("defer_loading")
+        const input = body.input as Array<Record<string, unknown>>
+        expect(input).toContainEqual(
+          expect.objectContaining({
+            type: "tool_search_call",
+            execution: "client",
+            call_id: "call-search",
+            arguments: { query: "calendar" },
+          }),
+        )
+        expect(input).toContainEqual(
+          expect.objectContaining({
+            type: "tool_search_output",
+            execution: "client",
+            call_id: "call-search",
+            tools: [loaded],
+          }),
+        )
       },
     })
   })

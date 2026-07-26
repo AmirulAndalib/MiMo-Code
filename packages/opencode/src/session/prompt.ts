@@ -24,7 +24,7 @@ import {
   wrapLanguageModel,
 } from "ai"
 import { InstallationVersion } from "@/installation/version"
-import type { JSONSchema7 } from "@ai-sdk/provider"
+import type { JSONObject, JSONSchema7 } from "@ai-sdk/provider"
 import { SessionPrune } from "./prune"
 import { SessionCheckpoint } from "./checkpoint"
 import { SessionCompaction } from "./compaction"
@@ -115,6 +115,8 @@ import { resolveInvocationStyle, type ToolStyleConfig } from "../tool/invocation
 import { ToolResultError } from "../tool/result-error"
 import { shouldAutoDream, shouldAutoDistill, DREAM_TASK, DISTILL_TASK, AUTO_DREAM_TITLE, AUTO_DISTILL_TITLE } from "./auto-dream"
 import { skillSearchReminderForSession } from "./skill-search-reminder"
+import { createMcpToolSearch, type McpToolSearchEntry } from "@/tool/mcp-tool-search"
+import { isGPTModel } from "@/tool/gpt"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -1142,6 +1144,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         })
       }
 
+      const deferMcp = isGPTModel(input.model.id, input.model.api.id, input.model.family)
+      const mcpSearchEntries: McpToolSearchEntry[] = []
       for (const [key, item] of Object.entries(yield* mcp.tools())) {
         const execute = item.execute
         if (!execute) continue
@@ -1149,6 +1153,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         const schema = yield* Effect.promise(() => Promise.resolve(asSchema(item.inputSchema).jsonSchema))
         const transformed = ProviderTransform.schema(input.model, schema)
         item.inputSchema = jsonSchema(transformed)
+        if (deferMcp) {
+          item.providerOptions = {
+            ...item.providerOptions,
+            openai: { ...item.providerOptions?.openai, deferLoading: true },
+          }
+          mcpSearchEntries.push({
+            name: key,
+            description: item.description ?? "",
+            parameters: transformed as unknown as JSONObject,
+          })
+        }
         item.execute = (args, opts) =>
           run.promise(
             Effect.gen(function* () {
@@ -1273,6 +1288,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           )
         tools[key] = item
       }
+      if (mcpSearchEntries.length > 0) tools.tool_search = createMcpToolSearch(mcpSearchEntries)
 
       return tools
     })

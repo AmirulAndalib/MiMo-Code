@@ -388,6 +388,51 @@ function mediaProviderCfg(url: string) {
   }
 }
 
+function gptProviderCfg(url: string) {
+  return {
+    checkpoint: { thresholds: [] as string[] },
+    provider: {
+      openai: {
+        name: "OpenAI",
+        env: [],
+        npm: "@ai-sdk/openai",
+        models: {
+          "gpt-5.2": {
+            id: "gpt-5.2",
+            name: "GPT 5.2",
+            attachment: false,
+            reasoning: true,
+            temperature: false,
+            tool_call: true,
+            release_date: "2025-01-01",
+            limit: { context: 100000, output: 10000 },
+            cost: { input: 0, output: 0 },
+            options: {},
+          },
+        },
+        options: { apiKey: "test-key", baseURL: url },
+      },
+    },
+  }
+}
+
+function gatewayGptProviderCfg(url: string) {
+  const config = providerCfg(url)
+  return {
+    ...config,
+    provider: {
+      ...config.provider,
+      test: {
+        ...config.provider.test,
+        models: {
+          ...config.provider.test.models,
+          "test-model": { ...config.provider.test.models["test-model"], id: "gpt-5.2" },
+        },
+      },
+    },
+  }
+}
+
 const user = Effect.fn("test.user")(function* (sessionID: SessionID, text: string) {
   const session = yield* Session.Service
   const msg = yield* session.updateMessage({
@@ -798,6 +843,122 @@ mcpIt.live("MCP structuredContent is persisted and reaches the model alongside t
     }),
     { git: true, config: providerCfg },
   ),
+)
+
+mcpIt.live(
+  "GPT defers MCP tools behind client Tool Search",
+  () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const prompt = yield* SessionPrompt.Service
+        const sessions = yield* Session.Service
+        const session = yield* sessions.create({
+          title: "GPT Tool Search",
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        })
+
+        yield* prompt.prompt({
+          sessionID: session.id,
+          agent: "build",
+          model: { providerID: ProviderID.openai, modelID: ModelID.make("gpt-5.2") },
+          noReply: true,
+          parts: [{ type: "text", text: "find a calendar tool" }],
+        })
+        yield* llm.text("done")
+        yield* prompt.loop({ sessionID: session.id })
+
+        const request = (yield* llm.inputs)[0]
+        const tools = request.tools as Array<Record<string, unknown>>
+        expect(tools).toContainEqual(expect.objectContaining({ type: "tool_search", execution: "client" }))
+        expect(tools).toContainEqual(
+          expect.objectContaining({ type: "function", name: "mcp_success", defer_loading: true }),
+        )
+        expect(tools).toContainEqual(
+          expect.objectContaining({ type: "function", name: "mcp_result", defer_loading: true }),
+        )
+        expect(tools.find((item) => item.name === "apply_patch")).not.toHaveProperty("defer_loading")
+      }),
+      { git: true, config: gptProviderCfg },
+    ),
+  30_000,
+)
+
+mcpIt.live("non-GPT models keep MCP tools directly exposed", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* ({ llm }) {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({
+        title: "Direct MCP",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+
+      yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: "inspect the window" }],
+      })
+      yield* llm.text("done")
+      yield* prompt.loop({ sessionID: session.id })
+
+      const tools = (yield* llm.inputs)[0].tools as Array<Record<string, unknown>>
+      expect(tools.some((item) => item.type === "tool_search")).toBe(false)
+      expect(tools.find((item) => item.name === "mcp_success")).not.toHaveProperty("defer_loading")
+    }),
+    { git: true, config: providerCfg },
+  ),
+)
+
+mcpIt.live("GPT compatibility gateways fall back to direct MCP exposure", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* ({ llm }) {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({ title: "Gateway GPT" })
+
+      yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: "inspect the window" }],
+      })
+      yield* llm.text("done")
+      yield* prompt.loop({ sessionID: session.id })
+
+      const tools = (yield* llm.inputs)[0].tools as Array<Record<string, unknown>>
+      expect(tools.some((item) => item.type === "tool_search")).toBe(false)
+      expect(tools.find((item) => item.name === "mcp_success")).not.toHaveProperty("defer_loading")
+    }),
+    { git: true, config: gatewayGptProviderCfg },
+  ),
+)
+
+it.live(
+  "GPT omits Tool Search when no MCP tools are available",
+  () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const prompt = yield* SessionPrompt.Service
+        const sessions = yield* Session.Service
+        const session = yield* sessions.create({ title: "No MCP" })
+
+        yield* prompt.prompt({
+          sessionID: session.id,
+          agent: "build",
+          model: { providerID: ProviderID.openai, modelID: ModelID.make("gpt-5.2") },
+          noReply: true,
+          parts: [{ type: "text", text: "hello" }],
+        })
+        yield* llm.text("done")
+        yield* prompt.loop({ sessionID: session.id })
+
+        const tools = (yield* llm.inputs)[0].tools as Array<Record<string, unknown>>
+        expect(tools.some((item) => item.type === "tool_search")).toBe(false)
+      }),
+      { git: true, config: gptProviderCfg },
+    ),
+  30_000,
 )
 
 it.live("glob tool keeps instance context during prompt runs", () =>
