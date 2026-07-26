@@ -50,3 +50,4 @@ experiment/last-outcome.json
 temp/
 __pycache__
 Thumbs.db
+.playwright-cli/
