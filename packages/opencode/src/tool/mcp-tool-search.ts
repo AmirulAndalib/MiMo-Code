@@ -1,7 +1,13 @@
-import { openai } from "@ai-sdk/openai"
 import type { JSONObject } from "@ai-sdk/provider"
+import { Effect } from "effect"
+import z from "zod"
+import * as Tool from "./tool"
 
-const DEFAULT_LIMIT = 8
+export const MCP_TOOL_SEARCH_ID = "mcp_tool_search"
+export const MCP_TOOL_SEARCH_DEFAULT_LIMIT = 8
+export const MCP_TOOL_SEARCH_MAX_LIMIT = 20
+export const MCP_TOOL_SEARCH_MAX_LOADED = 32
+
 const BM25_K1 = 1.2
 const BM25_LENGTH_NORMALIZATION = 0.75
 
@@ -11,17 +17,25 @@ export type McpToolSearchEntry = {
   parameters: JSONObject
 }
 
-type LoadableMcpTool = {
-  type: "function"
+export type McpToolSearchCatalog = {
+  key: string
+  entries: McpToolSearchEntry[]
+}
+
+export type McpToolSearchMetadata = {
+  catalogKey: string
+  matchedTools: string[]
+}
+
+type SearchResult = {
   name: string
   description: string
-  deferLoading: true
-  parameters: JSONObject
+  score: number
 }
 
 type SearchIndex = {
   key: string
-  entries: LoadableMcpTool[]
+  entries: McpToolSearchEntry[]
   documents: string[][]
   frequencies: Map<string, number>[]
   documentFrequency: Map<string, number>
@@ -74,6 +88,7 @@ function index(entries: McpToolSearchEntry[]) {
   )
   cached = {
     key,
+    entries,
     documents,
     frequencies,
     documentFrequency: frequencies.reduce((result, frequency) => {
@@ -81,23 +96,25 @@ function index(entries: McpToolSearchEntry[]) {
       return result
     }, new Map<string, number>()),
     averageLength: documents.reduce((sum, document) => sum + document.length, 0) / documents.length || 1,
-    entries: entries.map((entry) => ({
-      type: "function",
-      name: entry.name,
-      description: entry.description,
-      deferLoading: true,
-      parameters: entry.parameters,
-    })),
   }
   return cached
 }
 
-export function searchMcpTools(entries: McpToolSearchEntry[], input: { query: string; limit?: number }) {
+export function createMcpToolSearchCatalog(entries: McpToolSearchEntry[]): McpToolSearchCatalog {
+  return {
+    key: new Bun.CryptoHasher("sha256").update(JSON.stringify(entries)).digest("hex"),
+    entries,
+  }
+}
+
+export function searchMcpTools(entries: McpToolSearchEntry[], input: { query: string; limit?: number }): SearchResult[] {
   const query = input.query.trim()
   if (!query) throw new Error("query must not be empty")
 
-  const limit = input.limit ?? DEFAULT_LIMIT
-  if (limit <= 0) throw new Error("limit must be greater than zero")
+  const limit = input.limit ?? MCP_TOOL_SEARCH_DEFAULT_LIMIT
+  if (!Number.isInteger(limit) || limit <= 0 || limit > MCP_TOOL_SEARCH_MAX_LIMIT) {
+    throw new Error(`limit must be an integer between 1 and ${MCP_TOOL_SEARCH_MAX_LIMIT}`)
+  }
   if (entries.length === 0) return []
 
   const search = index(entries)
@@ -129,36 +146,51 @@ export function searchMcpTools(entries: McpToolSearchEntry[], input: { query: st
       (a, b) =>
         b.score - a.score || search.entries[a.documentIndex].name.localeCompare(search.entries[b.documentIndex].name),
     )
-    .slice(0, Math.floor(limit))
-    .map((result) => search.entries[result.documentIndex])
+    .slice(0, limit)
+    .map((result) => ({
+      name: search.entries[result.documentIndex].name,
+      description: search.entries[result.documentIndex].description,
+      score: result.score,
+    }))
 }
 
-export function createMcpToolSearch(entries: McpToolSearchEntry[]) {
-  return openai.tools.toolSearch({
-    execution: "client",
-    description: [
-      "# Tool discovery",
-      "",
-      "Searches over deferred MCP tool metadata with BM25 and exposes matching tools for the next model call.",
-      "Some MCP tools are not provided upfront; use `tool_search` to discover the tools needed for the task.",
-    ].join("\n"),
-    parameters: {
-      type: "object",
-      properties: {
-        query: { type: "string", description: "Search query for deferred MCP tools." },
-        limit: { type: "number", description: `Maximum number of tools to return. Defaults to ${DEFAULT_LIMIT}.` },
-      },
-      required: ["query"],
-      additionalProperties: false,
-    },
-    execute: async (input) => {
-      const args =
-        typeof input.arguments === "string"
-          ? JSON.parse(input.arguments)
-          : (input.arguments as { query?: unknown; limit?: unknown } | undefined)
-      if (!args || typeof args.query !== "string") throw new Error("query must be a string")
-      if (args.limit !== undefined && typeof args.limit !== "number") throw new Error("limit must be a number")
-      return { tools: searchMcpTools(entries, { query: args.query, limit: args.limit }) }
-    },
-  })
+function catalog(input: unknown): McpToolSearchCatalog | undefined {
+  if (!input || typeof input !== "object") return
+  if (!("key" in input) || typeof input.key !== "string") return
+  if (!("entries" in input) || !Array.isArray(input.entries)) return
+  return input as McpToolSearchCatalog
 }
+
+const Parameters = z.object({
+  query: z.string().describe("Search query describing the MCP capability needed for the current task."),
+  limit: z.number().int().min(1).max(MCP_TOOL_SEARCH_MAX_LIMIT).optional(),
+})
+
+export const McpToolSearchTool = Tool.define(
+  MCP_TOOL_SEARCH_ID,
+  Effect.succeed({
+    description: [
+      "Search locally available MCP tools and load only the matching capabilities for the current user request.",
+      "Use this before attempting an MCP operation. Matching tools become callable on the next step.",
+    ].join("\n"),
+    parameters: Parameters,
+    execute: (params: z.infer<typeof Parameters>, ctx: Tool.Context<McpToolSearchMetadata>) =>
+      Effect.sync(() => {
+        const available = catalog(ctx.extra?.mcpToolSearch)
+        if (!available || available.entries.length === 0) {
+          return {
+            title: "No MCP tools available",
+            output: JSON.stringify({ status: "no_match", results: [] }, null, 2),
+            metadata: { catalogKey: available?.key ?? "", matchedTools: [] },
+          }
+        }
+
+        const results = searchMcpTools(available.entries, params)
+        return {
+          title: results.length > 0 ? `Loaded ${results.length} MCP tool${results.length === 1 ? "" : "s"}` : "No matching MCP tools",
+          output: JSON.stringify({ status: results.length > 0 ? "matched" : "no_match", results }, null, 2),
+          metadata: { catalogKey: available.key, matchedTools: results.map((result) => result.name) },
+        }
+      }),
+  }),
+)

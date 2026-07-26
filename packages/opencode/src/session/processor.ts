@@ -347,7 +347,7 @@ export const layer: Layer.Layer<
         const match = yield* readToolCall(toolCallID)
         if (!match || match.part.state.status !== "running") return
         const result = isToolExecutionResult(output) ? output : undefined
-        const structured = !result && (match.part.tool === "tool_search" || match.part.metadata?.providerExecuted)
+        const structured = !result && match.part.metadata?.providerExecuted
         const part = yield* session.updatePart({
           ...match.part,
           state: {

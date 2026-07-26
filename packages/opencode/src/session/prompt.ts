@@ -65,7 +65,6 @@ import { builtinSkillRoot, matchDocumentSkills } from "@/skill/builtin/extract"
 import { ToolRegistry } from "../tool"
 import { MCP } from "../mcp"
 import { normalizeToolResult } from "../mcp/tool-result"
-import { toolScriptMcp } from "../tool/tool-script-ref"
 import { LSP } from "../lsp"
 import { Flag } from "../flag/flag"
 import { ulid } from "ulid"
@@ -113,10 +112,16 @@ import { ActorRegistry } from "@/actor/registry"
 import { Metrics } from "@/metrics"
 import { resolveInvocationStyle, type ToolStyleConfig } from "../tool/invocation-style"
 import { ToolResultError } from "../tool/result-error"
+import { RecoverableError } from "../tool/recoverable"
 import { shouldAutoDream, shouldAutoDistill, DREAM_TASK, DISTILL_TASK, AUTO_DREAM_TITLE, AUTO_DISTILL_TITLE } from "./auto-dream"
 import { skillSearchReminderForSession } from "./skill-search-reminder"
-import { createMcpToolSearch, type McpToolSearchEntry } from "@/tool/mcp-tool-search"
-import { isGPTModel } from "@/tool/gpt"
+import {
+  createMcpToolSearchCatalog,
+  MCP_TOOL_SEARCH_ID,
+  MCP_TOOL_SEARCH_MAX_LOADED,
+  type McpToolSearchEntry,
+  type McpToolSearchMetadata,
+} from "@/tool/mcp-tool-search"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -307,12 +312,6 @@ export const layer = Layer.effect(
     const llm = yield* LLM.Service
     const actorRegistry = yield* ActorRegistry.Service
     const inbox = yield* Inbox.Service
-
-    // Late-bound ref (see tool-script-ref.ts): exec dispatches MCP tools
-    // through the same live client set the agent sees. Populated here (not in
-    // ToolRegistry) because MCP's layer lives in this graph — the registry
-    // providing MCP.defaultLayer itself would duplicate client connections.
-    toolScriptMcp.current = () => mcp.tools()
 
     // Track sessions that have already shown the "loaded instructions" toast so we
     // surface it once per primary session rather than on every run-loop turn.
@@ -940,6 +939,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     }) {
       using _ = log.time("resolveTools")
       const tools: Record<string, AITool> = {}
+      const activeTools = new Set<string>()
+      const loadedMcpTools = new Set<string>()
+      const mcpSearchEntries: McpToolSearchEntry[] = []
+      const mcpCatalog = { current: createMcpToolSearchCatalog([]) }
       const run = yield* runner()
       const promptOps = yield* ops()
 
@@ -1002,6 +1005,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           bypassAgentCheck: input.bypassAgentCheck,
           promptOps,
           ...(whitelist ? { toolWhitelist: [...whitelist] } : {}),
+          mcpToolSearch: mcpCatalog.current,
         },
         agent: input.agent.name,
         actorID: input.agentID,
@@ -1061,7 +1065,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   sessionID: input.session.id,
                 })
                 const ctx = context(args, options)
-                if (whitelist && !whitelist.has(item.id)) {
+                if (whitelist && !whitelist.has(item.id) && item.id !== MCP_TOOL_SEARCH_ID) {
                   const output = rejectionFor(item.id)
                   log.debug("tool execute rejected", {
                     tool: item.id,
@@ -1142,22 +1146,34 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             )
           },
         })
+        if (item.id !== MCP_TOOL_SEARCH_ID) activeTools.add(item.id)
       }
 
-      const deferMcp = isGPTModel(input.model.id, input.model.api.id, input.model.family)
-      const mcpSearchEntries: McpToolSearchEntry[] = []
-      for (const [key, item] of Object.entries(yield* mcp.tools())) {
+      const localToolNames = new Set(Object.keys(tools))
+      const mcpTools = Object.entries(yield* mcp.tools())
+      const agentToolAllowlist = input.agent.toolAllowlist ? new Set(input.agent.toolAllowlist) : undefined
+      const disabledMcpTools = Permission.disabled(
+        mcpTools.map(([key]) => key),
+        Agent.runtimePermission(input.agent, input.session.permission),
+      )
+      for (const [key, item] of mcpTools) {
         const execute = item.execute
         if (!execute) continue
+
+        if (localToolNames.has(key)) {
+          log.warn("MCP tool conflicts with a local tool and was ignored", { tool: key })
+          continue
+        }
 
         const schema = yield* Effect.promise(() => Promise.resolve(asSchema(item.inputSchema).jsonSchema))
         const transformed = ProviderTransform.schema(input.model, schema)
         item.inputSchema = jsonSchema(transformed)
-        if (deferMcp) {
-          item.providerOptions = {
-            ...item.providerOptions,
-            openai: { ...item.providerOptions?.openai, deferLoading: true },
-          }
+        if (
+          input.tools?.[key] !== false &&
+          !disabledMcpTools.has(key) &&
+          (!agentToolAllowlist || agentToolAllowlist.has(key)) &&
+          (!whitelist || whitelist.has(key))
+        ) {
           mcpSearchEntries.push({
             name: key,
             description: item.description ?? "",
@@ -1175,6 +1191,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 sessionID: input.session.id,
               })
               const ctx = context(args, opts)
+              if (!loadedMcpTools.has(key)) {
+                return yield* Effect.fail(
+                  new RecoverableError(
+                    `The MCP tool "${key}" is not loaded for this request. Call ${MCP_TOOL_SEARCH_ID} first, then retry on the next step.`,
+                  ),
+                )
+              }
               if (whitelist && !whitelist.has(key)) {
                 const rejection = rejectionFor(key)
                 const output = {
@@ -1288,9 +1311,42 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           )
         tools[key] = item
       }
-      if (mcpSearchEntries.length > 0) tools.tool_search = createMcpToolSearch(mcpSearchEntries)
+      mcpCatalog.current = createMcpToolSearchCatalog(
+        mcpSearchEntries.toSorted((a, b) => a.name.localeCompare(b.name)),
+      )
+      const searchable = new Set(mcpCatalog.current.entries.map((entry) => entry.name))
+      const currentUser = input.messages.findLast((message) => message.info.role === "user")
+      if (currentUser) {
+        for (const message of input.messages) {
+          if (message.info.role !== "assistant" || message.info.parentID !== currentUser.info.id) continue
+          for (const part of message.parts) {
+            if (part.type !== "tool" || part.tool !== MCP_TOOL_SEARCH_ID || part.state.status !== "completed") continue
+            const metadata = part.state.metadata as Partial<McpToolSearchMetadata>
+            if (metadata.catalogKey !== mcpCatalog.current.key || !Array.isArray(metadata.matchedTools)) continue
+            for (const name of metadata.matchedTools) {
+              if (typeof name !== "string" || !searchable.has(name)) continue
+              loadedMcpTools.add(name)
+              if (loadedMcpTools.size >= MCP_TOOL_SEARCH_MAX_LOADED) break
+            }
+            if (loadedMcpTools.size >= MCP_TOOL_SEARCH_MAX_LOADED) break
+          }
+          if (loadedMcpTools.size >= MCP_TOOL_SEARCH_MAX_LOADED) break
+        }
+      }
 
-      return tools
+      if (
+        input.model.capabilities.toolcall &&
+        mcpCatalog.current.entries.length > 0 &&
+        tools[MCP_TOOL_SEARCH_ID]
+      ) {
+        activeTools.add(MCP_TOOL_SEARCH_ID)
+      }
+      loadedMcpTools.forEach((name) => activeTools.add(name))
+
+      return {
+        tools,
+        activeTools: [...activeTools].filter((name) => tools[name]),
+      }
     })
 
     const handleSubtask = Effect.fn("SessionPrompt.handleSubtask")(function* (input: {
@@ -3311,7 +3367,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
             const bypassAgentCheck = lastUserMsg?.parts.some((p) => p.type === "agent") ?? false
 
-            const tools = yield* resolveTools({
+            const resolvedTools = yield* resolveTools({
               agent,
               session,
               model,
@@ -3322,6 +3378,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               agentID: lastUser.agentID,
               task_id,
             })
+            const tools = resolvedTools.tools
+            const activeTools = resolvedTools.activeTools
 
             if (lastUser.format?.type === "json_schema") {
               tools["StructuredOutput"] = createStructuredOutputTool({
@@ -3330,6 +3388,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   structured = output
                 },
               })
+              activeTools.push("StructuredOutput")
             }
 
             if (step === 1)
@@ -3469,6 +3528,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   prebuiltSystem,
                   messages: [...modelMsgs, ...(isLastStep ? [{ role: "user" as const, content: MAX_STEPS }] : [])],
                   tools,
+                  activeTools,
                   model,
                   toolChoice: isLastStep ? "none" : format.type === "json_schema" ? "required" : undefined,
                   agentID: lastUser.agentID,
@@ -3642,6 +3702,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               prebuiltSystem,
               messages: [...modelMsgs, ...(isLastStep ? [{ role: "user" as const, content: MAX_STEPS }] : [])],
               tools,
+              activeTools,
               model,
               toolChoice: isLastStep ? ("none" as const) : format.type === "json_schema" ? ("required" as const) : undefined,
               agentID: lastUser.agentID,

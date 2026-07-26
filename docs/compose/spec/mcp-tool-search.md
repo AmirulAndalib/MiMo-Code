@@ -1,68 +1,58 @@
 ---
 feature: mcp-tool-search
-status: delivered
+status: in-progress
 updated: 2026-07-26
 branch: feature/mcp-tool-search
-commits: c946f4c215aaf326036342a8c3dec6ad12d8772a..fc74c5391eb8e38306e043b8fac56abccd373575
+commits: c946f4c215aaf326036342a8c3dec6ad12d8772a..working-tree
 ---
 
-# MCP Tool Search
-
-## Report
-
-**What was built** — MiMoCode now exposes a codebase-owned, client-executed `tool_search` for every resolved GPT model when MCP tools are available. Only MCP function definitions are marked for deferred OpenAI loading; built-in and custom tools remain direct, the existing MCP execution closures and permission/hook/metrics path remain intact, and non-GPT models are unchanged. GPT routes whose provider does not implement the OpenAI provider tool safely keep MCP tools directly exposed.
-
-The search tool maintains a cached BM25 index over MCP names, descriptions, and recursive parameter metadata, returning exact loadable function definitions. Structured Tool Search outputs are persisted alongside display text and reconstructed as JSON so later OpenAI Responses requests can reproduce `tool_search_call` and `tool_search_output` history.
-
-**Verification** — `bun test --timeout 30000 test/tool/mcp-tool-search.test.ts test/tool/gpt.test.ts test/session/message-v2.test.ts` passed 34 tests; the focused processor structured-output test passed 1 test; the OpenAI wire-shape/history test passed 1 test; the four GPT/non-GPT/no-MCP/gateway prompt tests passed. `bun typecheck` and `git diff --check` passed. A separate isolated MiMoCode reviewer found S2–S6 compliant and no critical or P1 defects. The unrelated `shell completion resumes queued loop callers` timeout reproduced on unchanged `main`; oxlint could not start because the pre-existing root config repeats `options.typeAware`.
-
-**Journey log**
-
-- The reference implementation clarified that this must be client-executed Tool Search with a local BM25 index, not OpenAI hosted search.
-- Deferred tools must remain in the AI SDK tool map so discovered MCP calls still reach their original execute closures.
-- Tool Search output must be retained as JSON; converting it to display text prevents Responses history reconstruction.
-- OpenAI-compatible gateways drop the provider tool and ignore `deferLoading`, which preserves direct MCP availability as the intended fallback.
-- Built-in actor review repeatedly failed with a runtime `UnknownError`; an isolated headless MiMoCode session completed the independent review instead.
+# MCP Tool Skillization
 
 ## [S1] Problem
 
-Every enabled MCP tool is currently sent to the model with its full input schema on every turn. Large MCP catalogs consume context, reduce prompt-cache stability, and make tool selection less focused even when the current request needs only a few MCP capabilities.
+Sending every MCP function definition to the model exposes the complete catalog and consumes context before the task needs any MCP capability. OpenAI `defer_loading` does not solve this for individual functions because their names and descriptions remain visible, and the provider-specific protocol cannot generalize to Claude, Gemini, DeepSeek, MiMo, or compatibility gateways.
 
-## [S2] GPT Eligibility And Provider Fallback
+## [S2] Private Catalog And Generic Discovery
 
-MCP Tool Search is enabled for every resolved GPT model, without a model-version restriction. Detection considers the configured model ID, resolved API model ID, and model family so aliases do not accidentally disable the feature. Claude and every non-GPT model remain unchanged.
+MiMoCode keeps every MCP name, description, transformed schema, and execute closure in a local registry. None of that MCP metadata is model-visible on the first request. When at least one effective MCP tool exists and the selected model supports function calling, the request exposes one ordinary function named `mcp_tool_search`.
 
-The codebase supplies the OpenAI client-executed Tool Search provider tool for GPT requests regardless of the selected gateway. Native OpenAI Responses providers serialize and execute that protocol. Providers that do not understand the OpenAI provider tool may omit it and ignore the OpenAI deferred-loading option; on those routes MCP definitions remain directly exposed by the provider, preserving existing availability as the compatibility fallback.
+`mcp_tool_search` uses a cached local BM25 index over callable names, descriptions, and recursive parameter names/descriptions. It returns only matched names, descriptions, and scores in its visible output; schemas remain private until activation. The literal name `tool_search` is intentionally avoided because OpenAI Responses adapters reserve it for the native provider protocol.
 
-## [S3] MCP-Only Deferred Exposure
+## [S3] Request-Scoped Loading
 
-For a GPT request with at least one available MCP tool, add the OpenAI client-executed `tool_search` provider tool and mark only MCP function tools with `providerOptions.openai.deferLoading = true`. Built-in, plugin, custom, skill, task, and all other non-MCP tools remain directly exposed and searchable MCP metadata never includes those tools. If no MCP tool is available, do not add `tool_search`.
+A successful search persists a catalog fingerprint and validated matched callable names in ordinary tool-result metadata. On the next existing Session outer-loop step, MiMoCode scans only completed searches parented to the current user message, unions valid matches, and exposes those MCP definitions through the AI SDK `activeTools` subset.
 
-Deferred MCP tools remain in the AI SDK tool map with their existing execute closures. Tool Search changes model visibility only; after discovery, execution continues through the existing MCP permission, plugin-hook, metrics, normalization, truncation, attachment, and client-call path.
+Loaded tools accumulate across searches for the current user request, up to a bounded total. A new user message starts with all MCP functions hidden again. A catalog change invalidates earlier matches. Model-visible output is never trusted as activation state.
 
-## [S4] Local MCP Search
+## [S4] Execution Safety
 
-The codebase builds a cached BM25 index over the current MCP tool catalog. Each document includes the callable tool name, a space-expanded form of the name, the tool description, and recursively collected parameter names and descriptions from object properties, arrays, and union branches. Searches trim the query, reject an empty query, default to eight results, reject a non-positive limit, and return results in BM25 relevance order with a stable tool-name tie break.
+All MCP executors remain in the full local tool map so existing permission checks, actor whitelists, plugin hooks, metrics, result normalization, truncation, attachments, cancellation, and MCP client dispatch are preserved. Before any side effect, the MCP wrapper rejects a call not loaded for the current request and instructs the model to use `mcp_tool_search`.
 
-Each result is an OpenAI loadable function definition containing the exact callable name, description, input parameters, and `deferLoading: true`. The cache is reused while the searchable metadata is unchanged and rebuilt when the MCP catalog or schema metadata changes. Search results are computed independently and are not persisted as global loaded state.
+This guard covers hallucinated calls, stale history, repair mistakes, Max Mode replay, and same-step parallel search plus MCP calls. Search matches become callable only on the next outer-loop step. Local tools win on callable-name collisions, and conflicting MCP entries are not advertised.
 
-## [S5] Provider Tool History
+## [S5] Provider And ToolScript Behavior
 
-Client-executed Tool Search calls and their JSON outputs must round-trip through session persistence without converting the loaded tool definitions to text or dropping them. Completed provider tools retain a display-safe textual output plus their original structured output. Model-message reconstruction uses the structured output and provider metadata so the OpenAI Responses provider can recreate `tool_search_call` and `tool_search_output` history on later turns.
+The mechanism uses an ordinary function tool and applies to every resolved model with `capabilities.toolcall = true`; it does not depend on model-family detection, OpenAI provider tools, or `defer_loading`. Models without function calling receive neither MCP discovery nor MCP definitions.
 
-Existing locally executed tool result persistence and UI output remain unchanged. Structured provider output is preserved across ordinary history reconstruction; if surrounding context is later compacted, the protocol data required to reconstruct a surviving provider tool call is not replaced with an invalid textual result.
+The GPT ToolScript/`exec` surface no longer embeds or dispatches MCP tools. This prevents ToolScript descriptions and sandbox declarations from leaking the private catalog or bypassing request-scoped activation. Loaded MCP capabilities are invoked through their ordinary direct tool definitions.
 
 ## [S6] Testing Boundaries
 
-Focused tests cover all-GPT eligibility, rejection of non-GPT models, BM25 matching over names, descriptions, and nested parameter metadata, query validation, cache invalidation, MCP-only deferred markers, absence of Tool Search without MCP tools, and lossless provider JSON result round-tripping. Request-shape coverage verifies client-executed `tool_search`, MCP `defer_loading`, and unchanged direct exposure for non-MCP tools.
+Focused coverage must prove that initial GPT and non-GPT requests contain `mcp_tool_search` but no MCP name, description, or schema; only search matches appear on the next request; unmatched tools remain hidden; multiple searches accumulate; new user messages reset loading; non-tool-call models omit discovery; inactive calls fail recoverably; and ordinary MCP success/error normalization remains unchanged.
+
+Tests also cover BM25 ranking and cache invalidation, active tool wire serialization, ToolScript isolation, reserved search-tool collisions, limits, catalog fingerprints, and package type safety.
 
 ## [S7] Out Of Scope
 
-This change does not enable Tool Search for Claude or any non-GPT model, change MCP naming or execution, defer non-MCP tools, add namespace grouping or world-state summaries, guarantee that third-party gateways implement OpenAI's Tool Search protocol, or alter MCP configuration and connection lifecycle.
+This change does not add semantic embeddings, persist loaded tools across user requests, expose MCP server summaries, change MCP connection lifecycle, redesign MCP naming, or make non-function-calling models capable of tool use.
+
+## Report
+
+Pending final verification and independent review.
 
 ## Tasks
 
-- [x] T1: Implement the cached MCP BM25 index and client Tool Search definition — acceptance: valid searches return ranked loadable MCP definitions, invalid inputs return actionable errors, and metadata changes rebuild the index (covers: S4)
-- [x] T2: Add all-GPT Tool Search eligibility and MCP-only deferred tool assembly — acceptance: GPT requests with MCP tools contain one client Tool Search tool, only MCP functions carry deferred loading, non-GPT requests remain unchanged, and no empty search tool is exposed (covers: S2, S3; depends: T1)
-- [x] T3: Preserve structured provider-tool outputs through persistence and model reconstruction — acceptance: a Tool Search JSON result survives storage and reconstructs as structured JSON rather than text (covers: S5)
-- [x] T4: Add search, request-shape, fallback, and history regression tests and run package verification — acceptance: all S6 cases pass from `packages/opencode`, package typecheck succeeds, and the complete diff passes independent review (covers: S6; depends: T1, T2, T3)
+- [x] T1: Replace provider-native Tool Search with ordinary `mcp_tool_search` and cached local BM25 discovery.
+- [x] T2: Separate registered executors from model-visible `activeTools` and activate only request-scoped matches.
+- [x] T3: Preserve MCP execution safety while removing ToolScript catalog leakage and inactive-call bypasses.
+- [ ] T4: Complete focused/broad verification, independent review, and delivery report.

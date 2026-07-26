@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test"
-import { createMcpToolSearch, searchMcpTools, type McpToolSearchEntry } from "../../src/tool/mcp-tool-search"
+import {
+  createMcpToolSearchCatalog,
+  MCP_TOOL_SEARCH_DEFAULT_LIMIT,
+  MCP_TOOL_SEARCH_MAX_LIMIT,
+  searchMcpTools,
+  type McpToolSearchEntry,
+} from "../../src/tool/mcp-tool-search"
 
 const entries: McpToolSearchEntry[] = [
   {
@@ -49,64 +55,53 @@ const entries: McpToolSearchEntry[] = [
 
 describe("MCP Tool Search", () => {
   test("ranks names, descriptions, and nested schema metadata with BM25", () => {
-    expect(
-      searchMcpTools(entries, { query: "search Google Drive documents", limit: 2 }).map((tool) => tool.name),
-    ).toEqual(["drive_lookup"])
-    expect(searchMcpTools(entries, { query: "invite people by email", limit: 2 }).map((tool) => tool.name)).toEqual([
+    expect(searchMcpTools(entries, { query: "search Google Drive documents" }).map((tool) => tool.name)).toEqual([
+      "drive_lookup",
+    ])
+    expect(searchMcpTools(entries, { query: "invite people by email" }).map((tool) => tool.name)).toEqual([
       "calendar_create_event",
     ])
-    expect(searchMcpTools(entries, { query: "slack send", limit: 2 }).map((tool) => tool.name)).toEqual([
+    expect(searchMcpTools(entries, { query: "slack send" }).map((tool) => tool.name)).toEqual([
       "slack_send_message",
     ])
   })
 
-  test("returns loadable definitions and honors the default and explicit limits", () => {
-    const many = Array.from({ length: 10 }, (_, index) => ({
+  test("returns only model-safe result metadata and honors limits", () => {
+    const many = Array.from({ length: MCP_TOOL_SEARCH_DEFAULT_LIMIT + 2 }, (_, index) => ({
       name: `search_${index}`,
       description: `Search catalog ${index}`,
       parameters: { type: "object" },
     })) satisfies McpToolSearchEntry[]
 
-    expect(searchMcpTools(many, { query: "search catalog" })).toHaveLength(8)
+    expect(searchMcpTools(many, { query: "search catalog" })).toHaveLength(MCP_TOOL_SEARCH_DEFAULT_LIMIT)
     expect(searchMcpTools(many, { query: "search catalog", limit: 3 })).toHaveLength(3)
     expect(searchMcpTools(entries, { query: "Google Drive" })[0]).toEqual({
-      type: "function",
       name: "drive_lookup",
       description: "Search files and documents in Google Drive.",
-      deferLoading: true,
-      parameters: entries[0].parameters,
+      score: expect.any(Number),
     })
+    expect(searchMcpTools(entries, { query: "Google Drive" })[0]).not.toHaveProperty("parameters")
   })
 
-  test("rejects empty queries and non-positive limits", () => {
+  test("rejects invalid queries and limits", () => {
     expect(() => searchMcpTools(entries, { query: "  " })).toThrow("query must not be empty")
-    expect(() => searchMcpTools(entries, { query: "drive", limit: 0 })).toThrow("limit must be greater than zero")
+    expect(() => searchMcpTools(entries, { query: "drive", limit: 0 })).toThrow("limit must be an integer")
+    expect(() => searchMcpTools(entries, { query: "drive", limit: 1.5 })).toThrow("limit must be an integer")
+    expect(() => searchMcpTools(entries, { query: "drive", limit: MCP_TOOL_SEARCH_MAX_LIMIT + 1 })).toThrow(
+      "limit must be an integer",
+    )
   })
 
-  test("rebuilds cached search metadata when an entry changes", () => {
+  test("rebuilds cached metadata and changes catalog fingerprints", () => {
+    const catalog = createMcpToolSearchCatalog(entries)
+    const changed = entries.map((entry) =>
+      entry.name === "drive_lookup" ? { ...entry, description: `${entry.description} Search spreadsheets.` } : entry,
+    )
+
     expect(searchMcpTools(entries, { query: "spreadsheets" })).toEqual([])
-    expect(
-      searchMcpTools(
-        entries.map((entry) =>
-          entry.name === "drive_lookup"
-            ? { ...entry, description: `${entry.description} Search spreadsheets.` }
-            : entry,
-        ),
-        { query: "spreadsheets" },
-      ).map((tool) => tool.name),
-    ).toEqual(["drive_lookup"])
-  })
-
-  test("creates a client-executed OpenAI provider tool", async () => {
-    const tool = createMcpToolSearch(entries)
-
-    expect((tool as { type: string }).type).toBe("provider")
-    expect((tool as { id: string }).id).toBe("openai.tool_search")
-    expect((tool as unknown as { args: { execution: string } }).args.execution).toBe("client")
-    expect(
-      await tool.execute?.({ arguments: { query: "calendar event", limit: 1 }, call_id: "call_1" }, {} as never),
-    ).toEqual({
-      tools: [expect.objectContaining({ name: "calendar_create_event", deferLoading: true })],
-    })
+    expect(searchMcpTools(changed, { query: "spreadsheets" }).map((tool) => tool.name)).toEqual(["drive_lookup"])
+    expect(createMcpToolSearchCatalog(changed).key).not.toBe(catalog.key)
+    expect(catalog.key).toHaveLength(64)
+    expect(catalog.key).not.toContain("drive_lookup")
   })
 })

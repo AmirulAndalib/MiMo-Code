@@ -3,15 +3,12 @@ import os from "os"
 import fs from "fs"
 import path from "path"
 import { Effect } from "effect"
-import { asSchema, type Tool as AiTool } from "ai"
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js"
 import { EffectBridge, InstanceState } from "@/effect"
 import { Log, Filesystem } from "@/util"
 import { Agent } from "@/agent/agent"
 import type { ModelID, ProviderID } from "../provider/schema"
-import { normalizeToolResult } from "../mcp/tool-result"
 import { evalScript, type HostFn } from "../workflow/sandbox"
-import { toolScriptRegistry, toolScriptMcp, TOOL_SCRIPT_ALIASES, TOOL_SCRIPT_EXCLUDED } from "./tool-script-ref"
+import { toolScriptRegistry, TOOL_SCRIPT_ALIASES, TOOL_SCRIPT_EXCLUDED } from "./tool-script-ref"
 import DESCRIPTION from "./tool-script.txt"
 import * as Tool from "./tool"
 import * as Truncate from "./truncate"
@@ -67,7 +64,7 @@ function schemaToTs(schema: any): string {
 }
 
 /** Render the `tools` API declaration block appended to the tool description. */
-export function renderToolScriptDeclarations(defs: Tool.Def[], mcp: Record<string, AiTool> = {}): string {
+export function renderToolScriptDeclarations(defs: Tool.Def[]): string {
   const aliases = new Set(Object.keys(TOOL_SCRIPT_ALIASES))
   const lines = defs
     .filter((def) => !TOOL_SCRIPT_EXCLUDED.has(def.id) && !aliases.has(def.id))
@@ -83,18 +80,12 @@ export function renderToolScriptDeclarations(defs: Tool.Def[], mcp: Record<strin
     const input = schemaToTs(z.toJSONSchema(def.parameters))
     return [`  /** Alias for ${target}. ${summary.trim().slice(0, 180)} */\n  ${alias}(input: ${input}): Promise<ToolResult>`]
   })
-  const mcpLines = Object.entries(mcp).map(([id, tool]) => {
-    const summary = (tool.description ?? "").split("\n").find((l) => l.trim()) ?? ""
-    const input = schemaToTs(asSchema(tool.inputSchema).jsonSchema)
-    return `  /** [MCP] ${summary.trim().slice(0, 200)} */\n  ${id}(input: ${input}): Promise<ToolResult>`
-  })
   return [
     "```ts",
     "type ToolResult = { title: string; output: string; metadata: Record<string, unknown> }",
     "declare const tools: {",
     ...lines,
     ...aliasLines,
-    ...mcpLines,
     "}",
     "// Raw file IO for machine-to-machine data (pipelines across executions).",
     "declare const files: {",
@@ -359,12 +350,6 @@ export const ToolScriptTool = Tool.define(
             )
           ).filter((def) => !TOOL_SCRIPT_EXCLUDED.has(def.id) && (!whitelist || whitelist.has(def.id)))
           const byId = new Map(defs.map((def) => [def.id, def]))
-          // MCP tools (late-bound ref, populated by SessionPrompt). Builtin ids
-          // win on collision — an MCP server must not shadow `read`/`grep`.
-          const mcpTools = toolScriptMcp.current ? yield* toolScriptMcp.current() : {}
-          const mcpById = new Map(
-            Object.entries(mcpTools).filter(([id]) => !byId.has(id) && (!whitelist || whitelist.has(id))),
-          )
           // Non-git projects report worktree === "/" (see Instance.containsPath) —
           // "/" as a jail root would allow EVERYTHING. Fall back to the project
           // directory in that case. Relative guest paths resolve against roots[0].
@@ -437,8 +422,7 @@ export const ToolScriptTool = Tool.define(
             const id = String(name)
             const alias = TOOL_SCRIPT_ALIASES[id as keyof typeof TOOL_SCRIPT_ALIASES]
             const def = byId.get(alias ?? id)
-            const mcpDef = def || alias ? undefined : mcpById.get(id)
-            if (!def && !mcpDef) return Promise.reject(new Error(`unknown tool: ${id}`))
+            if (!def) return Promise.reject(new Error(`unknown tool: ${id}`))
             calls++
             if (calls > maxToolCalls)
               return Promise.reject(new Error(`tool call budget exceeded (${maxToolCalls} per execution)`))
@@ -451,43 +435,9 @@ export const ToolScriptTool = Tool.define(
               // title in the UI — swallow it; the trace covers observability.
               metadata: () => Effect.void,
             }
-            // MCP path: same permission gate as the direct SessionPrompt MCP
-            // wrapper (ask per tool name), then normalizeToolResult folds the
-            // content blocks to text. Non-text blocks (images, audio, blobs)
-            // cannot cross the sandbox string boundary — note them so the
-            // script (and the model reading the aggregate) knows data was
-            // dropped rather than absent.
-            const executeMcp = (tool: AiTool) =>
-              Effect.gen(function* () {
-                yield* ctx.ask({ permission: id, metadata: {}, patterns: ["*"], always: ["*"] })
-                const result = (yield* Effect.promise(() =>
-                  Promise.resolve(
-                    tool.execute!(args ?? {}, {
-                      toolCallId: subCtx.callID,
-                      messages: [],
-                      abortSignal: ctx.abort,
-                    }),
-                  ),
-                )) as CallToolResult
-                const normalized = normalizeToolResult(result)
-                if (normalized.isError) return yield* Effect.fail(new Error(normalized.output || "MCP tool execution failed"))
-                const dropped = normalized.attachments.length
-                  ? `\n[note: ${normalized.attachments.length} non-text attachment(s) dropped — binary content cannot cross the exec sandbox]`
-                  : ""
-                const truncated = yield* truncate.output(normalized.output + dropped, {}, agentInfo)
-                return {
-                  title: id,
-                  output: truncated.content,
-                  metadata: {
-                    ...normalized.metadata,
-                    truncated: truncated.truncated,
-                    ...(truncated.truncated && { outputPath: truncated.outputPath }),
-                  },
-                } satisfies Tool.ExecuteResult
-              })
             return withSlot(() =>
               bridge
-                .promise(def ? def.execute(args, subCtx) : executeMcp(mcpDef!))
+                .promise(def.execute(args, subCtx))
                 .then(
                   (result) => {
                     trace.push({ name: id, status: "success", durationMs: Date.now() - start })

@@ -130,25 +130,15 @@ function basePart(messageID: string, id: string) {
 }
 
 describe("session.message-v2.toModelMessage", () => {
-  test("preserves client Tool Search structured outputs", async () => {
+  test("preserves structured provider-executed outputs", async () => {
     const userID = "m-provider-user"
     const assistantID = "m-provider-assistant"
-    const providerOutput = {
-      tools: [
-        {
-          type: "function",
-          name: "calendar_create_event",
-          description: "Create a calendar event",
-          deferLoading: true,
-          parameters: { type: "object", properties: {} },
-        },
-      ],
-    }
+    const providerOutput = { results: [{ title: "Result", url: "https://example.com" }] }
     const messages = await MessageV2.toModelMessages(
       [
         {
           info: userInfo(userID),
-          parts: [{ ...basePart(userID, "u-provider"), type: "text", text: "create an event" }],
+          parts: [{ ...basePart(userID, "u-provider"), type: "text", text: "search" }],
         },
         {
           info: assistantInfo(assistantID, userID),
@@ -156,15 +146,15 @@ describe("session.message-v2.toModelMessage", () => {
             {
               ...basePart(assistantID, "a-provider"),
               type: "tool",
-              tool: "tool_search",
-              callID: "call-search",
-              metadata: { openai: { itemId: "search-call" } },
+              tool: "web_search",
+              callID: "provider-call",
+              metadata: { providerExecuted: true, test: { itemId: "call-item" } },
               state: {
                 status: "completed",
-                input: { arguments: { query: "calendar" }, call_id: "call-search" },
+                input: { query: "example" },
                 output: JSON.stringify(providerOutput),
                 providerOutput,
-                providerMetadata: { openai: { itemId: "search-output" } },
+                providerMetadata: { test: { itemId: "result-item" } },
                 title: "",
                 metadata: {},
                 time: { start: 0, end: 1 },
@@ -181,21 +171,15 @@ describe("session.message-v2.toModelMessage", () => {
       content: [
         {
           type: "tool-call",
-          toolCallId: "call-search",
-          toolName: "tool_search",
-          providerOptions: { openai: { itemId: "search-call" } },
+          toolName: "web_search",
+          providerExecuted: true,
+          providerOptions: { test: { itemId: "call-item" } },
         },
-      ],
-    })
-    expect(messages[2]).toMatchObject({
-      role: "tool",
-      content: [
         {
           type: "tool-result",
-          toolCallId: "call-search",
-          toolName: "tool_search",
+          toolName: "web_search",
           output: { type: "json", value: providerOutput },
-          providerOptions: { openai: { itemId: "search-call" } },
+          providerOptions: { test: { itemId: "result-item" } },
         },
       ],
     })

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test"
 import path from "path"
-import { dynamicTool, jsonSchema, tool, type ModelMessage } from "ai"
+import { tool, type ModelMessage } from "ai"
 import { Cause, Effect, Exit, Stream } from "effect"
 import z from "zod"
 import { makeRuntime } from "../../src/effect/run-service"
@@ -16,7 +16,6 @@ import type { Agent } from "../../src/agent/agent"
 import { MessageV2 } from "../../src/session/message-v2"
 import { SessionID, MessageID } from "../../src/session/schema"
 import { AppRuntime } from "../../src/effect/app-runtime"
-import { createMcpToolSearch } from "../../src/tool/mcp-tool-search"
 
 async function getModel(providerID: ProviderID, modelID: ModelID) {
   return AppRuntime.runPromise(
@@ -676,7 +675,7 @@ describe("session.llm.stream", () => {
     })
   })
 
-  test("serializes client Tool Search and defers only marked MCP tools", async () => {
+  test("serializes only active tools while retaining inactive executors", async () => {
     const server = state.server
     if (!server) throw new Error("Server not initialized")
 
@@ -688,7 +687,7 @@ describe("session.llm.stream", () => {
           {
             type: "response.created",
             response: {
-              id: "resp-tool-search",
+              id: "resp-active-tools",
               created_at: Math.floor(Date.now() / 1000),
               model: source.model.id,
               service_tier: null,
@@ -734,7 +733,7 @@ describe("session.llm.stream", () => {
       directory: tmp.path,
       fn: async () => {
         const resolved = await getModel(ProviderID.openai, ModelID.make(source.model.id))
-        const sessionID = SessionID.make("session-tool-search-wire")
+        const sessionID = SessionID.make("session-active-tools-wire")
         const agent = {
           name: "test",
           mode: "primary",
@@ -742,26 +741,13 @@ describe("session.llm.stream", () => {
           permission: [{ permission: "*", pattern: "*", action: "allow" }],
         } satisfies Agent.Info
         const user = {
-          id: MessageID.make("user-tool-search-wire"),
+          id: MessageID.make("user-active-tools-wire"),
           sessionID,
           role: "user",
           time: { created: Date.now() },
           agent: agent.name,
           model: { providerID: ProviderID.openai, modelID: resolved.id },
         } satisfies MessageV2.User
-        const parameters = {
-          type: "object" as const,
-          properties: { query: { type: "string" as const } },
-          required: ["query"],
-          additionalProperties: false,
-        }
-        const loaded = {
-          type: "function",
-          name: "calendar_find",
-          description: "Find calendar events",
-          deferLoading: true,
-          parameters,
-        }
 
         await drain({
           user,
@@ -769,75 +755,32 @@ describe("session.llm.stream", () => {
           model: resolved,
           agent,
           system: [],
-          messages: [
-            { role: "user", content: "find a calendar tool" },
-            {
-              role: "assistant",
-              content: [
-                {
-                  type: "tool-call",
-                  toolCallId: "call-search",
-                  toolName: "tool_search",
-                  input: { arguments: { query: "calendar" }, call_id: "call-search" },
-                },
-              ],
-            },
-            {
-              role: "tool",
-              content: [
-                {
-                  type: "tool-result",
-                  toolCallId: "call-search",
-                  toolName: "tool_search",
-                  output: { type: "json", value: { tools: [loaded] } },
-                },
-              ],
-            },
-            { role: "user", content: "continue" },
-          ],
+          messages: [{ role: "user", content: "find a calendar tool" }],
           tools: {
-            tool_search: createMcpToolSearch([
-              { name: "calendar_find", description: "Find calendar events", parameters },
-            ]),
-            calendar_find: dynamicTool({
-              description: "Find calendar events",
-              inputSchema: jsonSchema(parameters),
-              providerOptions: { openai: { deferLoading: true } },
-              execute: async () => ({ events: [] }),
+            mcp_tool_search: tool({
+              description: "Search MCP tools",
+              inputSchema: z.object({ query: z.string() }),
+              execute: async () => ({ title: "", output: "", metadata: {} }),
+            }),
+            calendar_hidden: tool({
+              description: "Secret calendar MCP description",
+              inputSchema: z.object({ private_field: z.string() }),
+              execute: async () => ({ title: "", output: "", metadata: {} }),
             }),
             direct_tool: tool({
               description: "A directly exposed non-MCP tool",
               inputSchema: z.object({}),
-              execute: async () => "ok",
+              execute: async () => ({ title: "", output: "", metadata: {} }),
             }),
           },
+          activeTools: ["mcp_tool_search", "direct_tool"],
         })
 
-        const body = (await request).body
-        const tools = body.tools as Array<Record<string, unknown>>
-        expect(tools).toContainEqual(expect.objectContaining({ type: "tool_search", execution: "client" }))
-        expect(tools).toContainEqual(
-          expect.objectContaining({ type: "function", name: "calendar_find", defer_loading: true }),
-        )
-        expect(tools).toContainEqual(expect.objectContaining({ type: "function", name: "direct_tool" }))
-        expect(tools.find((item) => item.name === "direct_tool")).not.toHaveProperty("defer_loading")
-        const input = body.input as Array<Record<string, unknown>>
-        expect(input).toContainEqual(
-          expect.objectContaining({
-            type: "tool_search_call",
-            execution: "client",
-            call_id: "call-search",
-            arguments: { query: "calendar" },
-          }),
-        )
-        expect(input).toContainEqual(
-          expect.objectContaining({
-            type: "tool_search_output",
-            execution: "client",
-            call_id: "call-search",
-            tools: [loaded],
-          }),
-        )
+        const tools = (await request).body.tools as Array<Record<string, unknown>>
+        expect(tools.map((item) => item.name)).toEqual(expect.arrayContaining(["mcp_tool_search", "direct_tool"]))
+        expect(tools.map((item) => item.name)).not.toContain("calendar_hidden")
+        expect(JSON.stringify(tools)).not.toContain("Secret calendar MCP description")
+        expect(JSON.stringify(tools)).not.toContain("private_field")
       },
     })
   })
