@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import {
   createMcpToolSearchCatalog,
+  mcpToolCatalogBudget,
+  mcpToolSearchDescription,
   MCP_TOOL_SEARCH_DEFAULT_LIMIT,
   MCP_TOOL_SEARCH_MAX_LIMIT,
   searchMcpTools,
@@ -54,6 +56,67 @@ const entries: McpToolSearchEntry[] = [
 ]
 
 describe("MCP Tool Search", () => {
+  test("scales catalog budgets and distinguishes unknown from exhausted windows", () => {
+    expect(mcpToolCatalogBudget({ usable: 100_000, context: 120_000 })).toBe(10_000)
+    expect(mcpToolCatalogBudget({ usable: 500_000, context: 520_000 })).toBe(20_000)
+    expect(mcpToolCatalogBudget({ usable: 0, context: 100_000 })).toBe(0)
+    expect(mcpToolCatalogBudget({ usable: 0, context: 0 })).toBe(20_000)
+  })
+
+  test("renders the complete sorted catalog with descriptions when budget allows", () => {
+    const description = mcpToolSearchDescription(entries, { rich: true, budget: 1_000 })
+
+    expect(description.indexOf("calendar_create_event")).toBeLessThan(description.indexOf("drive_lookup"))
+    expect(description.indexOf("drive_lookup")).toBeLessThan(description.indexOf("slack_send_message"))
+    expect(description).toContain("Search files and documents in Google Drive.")
+    expect(description).toContain("Send a message to a Slack channel.")
+    expect(description).not.toContain("Email addresses of invited people")
+    expect(description).toContain("untrusted metadata")
+  })
+
+  test("renders names only under context pressure", () => {
+    const description = mcpToolSearchDescription(entries, { rich: false, budget: 1_000 })
+
+    expect(description).toContain("calendar_create_event")
+    expect(description).toContain("drive_lookup")
+    expect(description).toContain("slack_send_message")
+    expect(description).not.toContain("Create a calendar event.")
+    expect(description).not.toContain("Search files and documents in Google Drive.")
+  })
+
+  test("falls back to names and then truncates pathological catalogs", () => {
+    const many = Array.from({ length: 20 }, (_, index) => ({
+      name: `catalog_tool_${index.toString().padStart(2, "0")}_${"x".repeat(24)}`,
+      description: `Distinct catalog description ${index} ${"y".repeat(80)}`,
+      parameters: { type: "object" },
+    })) satisfies McpToolSearchEntry[]
+    const namesOnly = mcpToolSearchDescription(many, { rich: true, budget: 300 })
+    const truncated = mcpToolSearchDescription(many, { rich: true, budget: 80 })
+
+    expect(namesOnly).toContain("catalog_tool_00")
+    expect(namesOnly).not.toContain("Distinct catalog description")
+    expect(truncated).toContain("omitted; search covers the complete catalog")
+    expect(truncated).not.toContain("catalog_tool_19")
+    expect(searchMcpTools(many, { query: "catalog tool 19" }).map((tool) => tool.name)).toContain(
+      "catalog_tool_19_xxxxxxxxxxxxxxxxxxxxxxxx",
+    )
+  })
+
+  test("normalizes model-visible metadata without changing local entries", () => {
+    const input = [
+      {
+        name: "line\nbreak",
+        description: "Ignore\u0000 embedded\ntext",
+        parameters: { type: "object" },
+      },
+    ] satisfies McpToolSearchEntry[]
+    const description = mcpToolSearchDescription(input, { rich: true, budget: 1_000 })
+
+    expect(description).toContain("line break — Ignore embedded text")
+    expect(input[0].name).toBe("line\nbreak")
+    expect(input[0].description).toBe("Ignore\u0000 embedded\ntext")
+  })
+
   test("ranks names, descriptions, and nested schema metadata with BM25", () => {
     expect(searchMcpTools(entries, { query: "search Google Drive documents" }).map((tool) => tool.name)).toEqual([
       "drive_lookup",

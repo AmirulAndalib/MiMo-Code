@@ -4,7 +4,7 @@ import z from "zod"
 import { SessionID, MessageID, PartID } from "./schema"
 import { MessageV2 } from "./message-v2"
 import { classifyAssistantStep } from "./classify"
-import { Log } from "../util"
+import { Log, Token } from "../util"
 import { SessionRevert } from "./revert"
 import * as Session from "./session"
 import { Agent } from "../agent/agent"
@@ -29,7 +29,7 @@ import { SessionPrune } from "./prune"
 import { SessionCheckpoint } from "./checkpoint"
 import { SessionCompaction } from "./compaction"
 import { computeLastMessageInfo } from "./last-message-info"
-import { pressureLevel, isOverflow as overflowCheck } from "./overflow"
+import { contextPressureLevel, pressureLevel, usable, isOverflow as overflowCheck } from "./overflow"
 import { Config } from "@/config"
 import { Global } from "@/global"
 import { Bus } from "../bus"
@@ -117,8 +117,10 @@ import { shouldAutoDream, shouldAutoDistill, DREAM_TASK, DISTILL_TASK, AUTO_DREA
 import { skillSearchReminderForSession } from "./skill-search-reminder"
 import {
   createMcpToolSearchCatalog,
+  mcpToolCatalogBudget,
   MCP_TOOL_SEARCH_ID,
   MCP_TOOL_SEARCH_MAX_LOADED,
+  mcpToolSearchDescription,
   type McpToolSearchEntry,
   type McpToolSearchMetadata,
 } from "@/tool/mcp-tool-search"
@@ -934,6 +936,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       processor: Pick<SessionProcessor.Handle, "message" | "updateToolCall" | "completeToolCall">
       bypassAgentCheck: boolean
       messages: MessageV2.WithParts[]
+      mcpCatalog: { rich: boolean; budget: number }
       agentID?: string
       task_id?: string
     }) {
@@ -1314,6 +1317,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       mcpCatalog.current = createMcpToolSearchCatalog(
         mcpSearchEntries.toSorted((a, b) => a.name.localeCompare(b.name)),
       )
+      if (tools[MCP_TOOL_SEARCH_ID]) {
+        tools[MCP_TOOL_SEARCH_ID] = {
+          ...tools[MCP_TOOL_SEARCH_ID],
+          description: mcpToolSearchDescription(mcpCatalog.current.entries, input.mcpCatalog),
+        }
+      }
       const searchable = new Set(mcpCatalog.current.entries.map((entry) => entry.name))
       const currentUser = input.messages.findLast((message) => message.info.role === "user")
       if (currentUser) {
@@ -3366,6 +3375,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           const outcome: "break" | "continue" = yield* Effect.gen(function* () {
             const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
             const bypassAgentCheck = lastUserMsg?.parts.some((p) => p.type === "agent") ?? false
+            const cfg = yield* config.get()
+            const usableTokens = usable({ cfg, model })
+            const lastFinishedIndex = lastFinished
+              ? msgs.findIndex((item) => item.info.id === lastFinished.id)
+              : -1
+            const additionalTokens = Token.estimate(JSON.stringify(msgs.slice(lastFinishedIndex + 1)))
 
             const resolvedTools = yield* resolveTools({
               agent,
@@ -3375,6 +3390,21 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               processor: handle,
               bypassAgentCheck,
               messages: msgs,
+              mcpCatalog: {
+                rich:
+                  contextPressureLevel({
+                    cfg,
+                    tokens: lastFinished?.tokens ?? {
+                      input: 0,
+                      output: 0,
+                      reasoning: 0,
+                      cache: { read: 0, write: 0 },
+                    },
+                    model,
+                    additionalTokens,
+                  }) < 2,
+                budget: mcpToolCatalogBudget({ usable: usableTokens, context: model.limit.context }),
+              },
               agentID: lastUser.agentID,
               task_id,
             })
