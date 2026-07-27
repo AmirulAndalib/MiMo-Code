@@ -14,7 +14,8 @@ Examples:
 {"operation":{"action":"wait","actor_id":"<existing>"}}
 {"operation":{"action":"cancel","actor_id":"<existing>"}}
 {"operation":{"action":"send","to_actor_id":"<existing>","content":"<message>"}}
-{"operation":{"action":"run","subagent_type":"explore","description":"One tiny blocking lookup","prompt":"<full task>"}}   ← exception only
+THE EXCEPTION — `run` blocks the conversation; only for a tiny lookup that gates this very turn:
+{"operation":{"action":"run","subagent_type":"explore","description":"One tiny blocking lookup","prompt":"<full task>"}}
 
 ## Operations (the `operation.action` field selects one)
 
