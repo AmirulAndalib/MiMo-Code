@@ -112,6 +112,44 @@ Memory is injected automatically when a session resumes, so the agent does not n
 - **Automatic checkpoints** — decides when to save session state based on the model context window
 - **Context reconstruction** — when context approaches the limit, rebuilds it from the latest checkpoint, project memory, task progress, and retained recent messages so the agent can continue the current task
 - **Budgeted injection** — uses a token budget to control how much checkpoint, memory, and notes content enters context, with importance ranking
+- **Adjustable compaction point** — `/context-limit` (or `compaction.max_context`) makes a model compact earlier than its own window, per model
+
+<details>
+<summary><strong>Compacting earlier than the model window (<code>/context-limit</code>)</strong></summary>
+
+Compaction normally fires just below the model's context window. Run `/context-limit` to
+pick a smaller working budget for the current model — `200K` / `300K` / `500K` / `1M` or a
+custom value — stored per model as `compaction.max_context`:
+
+```jsonc
+{
+  "compaction": {
+    "max_context": {
+      "openai/gpt-5.6": "272K", // token count, "300K", "1M", or "50%" of the window
+      "anthropic/*": "300K" // wildcards allowed, longest pattern wins
+    }
+  }
+}
+```
+
+The value is always clamped to what the provider actually accepts, so it can only lower the
+compaction point, never raise it. `0` restores the model's own window.
+
+Why you might want it:
+
+- **Cost tiers.** OpenAI prices GPT-5.6 prompts above 272K input at 2x input and 1.5x output
+  for the whole request.
+- **The advertised window is not always what you get.** The same model can have a different
+  usable window depending on how you reach it — a ChatGPT/Codex subscription, a direct API
+  key, or a reseller such as OpenRouter — so a catalog figure of 1M does not mean your route
+  serves 1M.
+- **Quality and latency.** Very long contexts are slower and, past a point, not better.
+
+`mimo models <provider>` prints, per model, the window MiMoCode resolved and the token count
+where it will compact. The prompt footer uses that same number as its denominator
+(`33.0K/260K↓ (13%)` — the `↓` means a budget is in force), and `/status` breaks it down.
+
+</details>
 
 ### Task Tracking
 

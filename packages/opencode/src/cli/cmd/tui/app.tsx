@@ -81,6 +81,7 @@ import {
 import type { EventSource } from "./context/sdk"
 import { DialogVariant } from "./component/dialog-variant"
 import { DialogModalities } from "./component/dialog-modalities"
+import { DialogContextLimit } from "./component/dialog-context-limit"
 
 function rendererConfig(_config: TuiConfig.Info, plainTerminal: boolean): CliRendererConfig {
   const mouseEnabled = !plainTerminal && !Flag.MIMOCODE_DISABLE_MOUSE && (_config.mouse ?? true)
@@ -693,6 +694,17 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
       },
       onSelect: () => {
         DialogModalities.show(dialog)
+      },
+    },
+    {
+      title: t("tui.command.context_limit.title"),
+      value: "model.context_limit",
+      category: "agent",
+      slash: {
+        name: "context-limit",
+      },
+      onSelect: () => {
+        DialogContextLimit.show(dialog)
       },
     },
     {
