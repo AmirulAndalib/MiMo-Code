@@ -55,12 +55,6 @@ import {
   TEXT_NGRAM_RECOVERY_REMIND,
   TEXT_NGRAM_RECOVERY_REPLAN,
 } from "../session/prompt/text-ngram-detection"
-import {
-  EMPTY_STEP_MAX_RECOVERY,
-  EMPTY_STEP_RECOVERY_REMIND,
-  EMPTY_STEP_RECOVERY_REPLAN,
-  isEmptyStep,
-} from "../session/prompt/empty-step-detection"
 import { builtinSkillRoot, matchDocumentSkills } from "@/skill/builtin/extract"
 import { ToolRegistry } from "../tool"
 import { MCP } from "../mcp"
@@ -2324,19 +2318,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         // prose text instead of a structured tool_use). Local to runLoop so each
         // fresh user turn starts clean.
         let textToolCallRetries = 0
-        // Consecutive empty/no-op tool-call steps in this turn. Counts steps
-        // where the model "called a tool" with empty/invalid input, or produced
-        // no valid tool part and no substantive output at all (see isEmptyStep).
-        // A single non-empty step resets it. Escalates soft (remind → replan)
-        // then hard-halts once it exceeds EMPTY_STEP_MAX_RECOVERY, mirroring the
-        // text-ngram ladder. Local to runLoop so a fresh user turn starts clean.
-        let emptyStepStreak = 0
-        // Set true when a guard hard-halts the turn (currently the empty-step
-        // guard). A hard halt is terminal: it must break out immediately and
-        // NOT be re-entered by the goalGate ReAct gate, which would
-        // otherwise inject a fresh user turn and re-drive a still-degraded model
-        // into the same loop.
-        let hardHalt = false
         const resolvedAgentID = agentID ?? "main"
         // Tracks plugin-driven cancellation (session.pre OR any session.userQuery.pre)
         // so session.post reports outcome="cancelled" instead of "error".
@@ -2833,90 +2814,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           yield* slog.info("text n-gram: recovery injected", { attempt: textNgramRecoveryAttempts })
           return true
         })
-
-        // Empty/no-op tool-call loop guard. Symmetric across main and fork
-        // branches, mirroring handleTextRepeat's soft→hard ladder but keyed on
-        // *empty steps* (empty/invalid tool input, or a fully empty terminal)
-        // rather than repeated text n-grams — the gap TEXT_NGRAM and
-        // stepSignature both miss (an empty tool call has no text to match and
-        // is dropped by stepSignature's undefined path).
-        //
-        // Returns:
-        //   "none"     — the step was NOT empty; streak reset, caller continues
-        //                normal classification.
-        //   "continue" — empty step, still within the soft-nudge budget; a
-        //                remind/replan reminder was injected, caller should loop.
-        //   "halt"     — empty streak exceeded EMPTY_STEP_MAX_RECOVERY; a
-        //                terminal error was published, caller must break.
-        const handleEmptyStep = Effect.fn("SessionPrompt.handleEmptyStep")(function* (input: {
-          lastUser: MessageV2.User
-          assistant: MessageV2.Assistant
-        }) {
-          // Never mask a genuine terminal outcome as an "empty loop": an errored
-          // step, a content-filter/error finish, or an already-resolved
-          // structured/summary step must fall through to its own classifier
-          // handler (writeContentFilterError / writeModelError / final). Those
-          // are terminal safety/error events, not a spinning no-op.
-          if (
-            input.assistant.error ||
-            input.assistant.summary ||
-            input.assistant.structured !== undefined ||
-            input.assistant.finish === "content-filter" ||
-            input.assistant.finish === "error"
-          ) {
-            return "none" as const
-          }
-          const parts = MessageV2.parts(input.assistant.id)
-          if (!isEmptyStep(parts)) {
-            emptyStepStreak = 0
-            return "none" as const
-          }
-          emptyStepStreak++
-          if (emptyStepStreak > EMPTY_STEP_MAX_RECOVERY) {
-            yield* slog.info("empty step: max recovery exceeded, terminating", { streak: emptyStepStreak })
-            hardHalt = true
-            // Discard the empty turn from request history so it can neither
-            // strand the conversation on an assistant prefill nor poison later
-            // context (toModelMessages skips a message whose info.error is set).
-            if (!input.assistant.error) {
-              input.assistant.error = new NamedError.Unknown({
-                message: `Empty tool call loop detected: ${emptyStepStreak} consecutive empty/no-op steps after ${EMPTY_STEP_MAX_RECOVERY} recovery attempts. Session terminated.`,
-              }).toObject()
-              yield* sessions.updateMessage(input.assistant)
-            }
-            yield* bus.publish(Session.Event.Error, {
-              sessionID,
-              error: new NamedError.Unknown({
-                message: `Empty tool call loop detected: ${emptyStepStreak} consecutive empty/no-op steps after ${EMPTY_STEP_MAX_RECOVERY} recovery attempts. Session terminated.`,
-              }).toObject(),
-            })
-            return "halt" as const
-          }
-          const recoveryText =
-            emptyStepStreak === 1 ? EMPTY_STEP_RECOVERY_REMIND : EMPTY_STEP_RECOVERY_REPLAN
-          const reentry = yield* sessions.updateMessage({
-            id: MessageID.ascending(),
-            role: "user" as const,
-            sessionID,
-            agentID: input.lastUser.agentID,
-            agent: input.lastUser.agent,
-            model: input.lastUser.model,
-            tools: input.lastUser.tools,
-            format: input.lastUser.format,
-            time: { created: Date.now() },
-          })
-          yield* sessions.updatePart({
-            id: PartID.ascending(),
-            messageID: reentry.id,
-            sessionID,
-            type: "text",
-            synthetic: true,
-            text: recoveryText,
-          } satisfies MessageV2.TextPart)
-          yield* slog.info("empty step: recovery injected", { streak: emptyStepStreak })
-          return "continue" as const
-        })
-
 
         // content-filter is terminal on first occurrence: re-sending the same
         // turn would just get filtered again, so there is no nudge / counter.
@@ -3624,14 +3521,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 return "break" as const
               }
 
-              // Empty/no-op tool-call loop guard (fork branch). Intercept before
-              // classify would `continue` an empty tool-calls step: soft-nudge
-              // within budget, hard-halt once exceeded. A non-empty step returns
-              // "none" and falls through to normal classification.
-              const forkEmptyStep = yield* handleEmptyStep({ lastUser, assistant: handle.message })
-              if (forkEmptyStep === "halt") return "break" as const
-              if (forkEmptyStep === "continue") return "continue" as const
-
               const forkClassification = classifyAssistantStep({
                 phase: "after-process",
                 lastUser,
@@ -3851,14 +3740,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               return "break" as const
             }
 
-            // Empty/no-op tool-call loop guard (main branch). Intercept before
-            // classify would `continue` an empty tool-calls step: soft-nudge
-            // within budget, hard-halt once exceeded. A non-empty step returns
-            // "none" and falls through to normal classification.
-            const emptyStep = yield* handleEmptyStep({ lastUser, assistant: handle.message })
-            if (emptyStep === "halt") return "break" as const
-            if (emptyStep === "continue") return "continue" as const
-
             const classification = classifyAssistantStep({
               phase: "after-process",
               lastUser,
@@ -4006,9 +3887,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           }
 
           if (outcome === "break") {
-            // A hard halt is terminal — skip the ReAct re-entry gates so a
-            // degraded model can't be re-driven into the same empty loop.
-            if (hardHalt) break
             if (yield* goalGate(lastUser)) continue
             break
           }
