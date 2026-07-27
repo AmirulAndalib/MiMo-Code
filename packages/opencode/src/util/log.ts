@@ -93,10 +93,10 @@ export async function init(options: Options) {
   })
 }
 
-// Log failures are swallowed. Streams still need a listener so an "error" event
-// cannot crash the process, but there is nowhere safe to report to: file
-// failures only happen when logging to a file, and that is exactly when stderr
-// belongs to the TUI screen. A missing or short log file is the only signal.
+// Log failures are swallowed: a file failure happens while logging to a file,
+// which is exactly when stderr belongs to the rendered TUI screen, and print
+// mode can only fail on the very stderr a report would need. The listener stays
+// because an unhandled stream "error" event would crash the process.
 function swallow() {}
 
 function write(msg: string) {
