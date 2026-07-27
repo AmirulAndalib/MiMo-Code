@@ -36,8 +36,9 @@ describe("plugin.codex", () => {
       const hooks = await CodexAuthPlugin(fakeInput)
       const provider = {
         models: {
-          "gpt-5.6-sol": { api: { id: "gpt-5.6-sol" }, cost: {} },
-          "gpt-4o": { api: { id: "gpt-4o" }, cost: {} },
+          "gpt-5.6-sol": { api: { id: "gpt-5.6-sol" }, cost: {}, limit: { context: 1_000_000 } },
+          "gpt-4o": { api: { id: "gpt-4o" }, cost: {}, limit: { context: 128_000 } },
+          o3: { api: { id: "o3" }, cost: {}, limit: { context: 200_000 } },
         },
       }
 
@@ -46,7 +47,8 @@ describe("plugin.codex", () => {
         provider as never,
       )
 
-      expect(Object.keys(provider.models)).toEqual(["gpt-5.6-sol", "gpt-4o"])
+      expect(Object.keys(provider.models)).toEqual(["gpt-5.6-sol", "gpt-4o", "o3"])
+      expect(Object.values(provider.models).map((model) => model.limit.context)).toEqual([300_000, 300_000, 200_000])
     })
 
     test("forwards request cancellation while refreshing an expired token", async () => {

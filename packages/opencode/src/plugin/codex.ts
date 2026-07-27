@@ -370,12 +370,13 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
         if (auth.type !== "oauth") return {}
 
         // Zero out costs for Codex (included with ChatGPT subscription)
-        for (const model of Object.values(provider.models)) {
+        for (const [modelID, model] of Object.entries(provider.models)) {
           model.cost = {
             input: 0,
             output: 0,
             cache: { read: 0, write: 0 },
           }
+          if (modelID.startsWith("gpt-")) model.limit.context = 300_000
         }
 
         return {
