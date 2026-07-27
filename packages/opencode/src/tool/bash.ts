@@ -459,8 +459,8 @@ export const BashTool = Tool.define(
     // machine hostname + wrong authorship into pushed commits. We inject
     // GIT_AUTHOR_*/COMMITTER_* env as a FLOOR (below repo/worktree local config,
     // which still wins). Resolved once per worktree and memoized.
-    const AGENT_NAME = "mimocode-agent[bot]"
-    const AGENT_EMAIL = "mimocode-agent[bot]@users.noreply.github.com"
+    const AGENT_NAME = "MiMo Code"
+    const AGENT_EMAIL = "mimo@xiaomi.com"
     const gitIdentityCache = new Map<string, { name: string; email: string }>()
     const resolveGitIdentity = Effect.fn("BashTool.resolveGitIdentity")(function* () {
       const worktree = Instance.worktree
@@ -468,9 +468,9 @@ export const BashTool = Tool.define(
       if (cached) return cached
       // Non-git projects set worktree to "/"; never read git config at root.
       if (worktree === "/") {
-        const bot = { name: AGENT_NAME, email: AGENT_EMAIL }
-        gitIdentityCache.set(worktree, bot)
-        return bot
+        const fallback = { name: AGENT_NAME, email: AGENT_EMAIL }
+        gitIdentityCache.set(worktree, fallback)
+        return fallback
       }
       const name = (yield* gitSvc.run(["config", "user.name"], { cwd: worktree })).text().trim()
       const email = (yield* gitSvc.run(["config", "user.email"], { cwd: worktree })).text().trim()

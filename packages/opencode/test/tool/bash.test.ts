@@ -239,7 +239,7 @@ describe("tool.bash git identity floor", () => {
     }
   })
 
-  each("falls back to the stable bot identity for a non-git project (worktree=/)", async () => {
+  each("falls back to the stable fallback identity for a non-git project (worktree=/)", async () => {
     const saved = savedEnv()
     restoreEnv({
       GIT_AUTHOR_NAME: undefined,
@@ -258,10 +258,10 @@ describe("tool.bash git identity floor", () => {
           const result = await Effect.runPromise(
             bash.execute({ command: printGitEnv, description: "print git env" }, ctx),
           )
-          expect(result.metadata.output).toContain("GIT_AUTHOR_NAME=mimocode-agent[bot]")
-          expect(result.metadata.output).toContain("GIT_AUTHOR_EMAIL=mimocode-agent[bot]@users.noreply.github.com")
-          expect(result.metadata.output).toContain("GIT_COMMITTER_NAME=mimocode-agent[bot]")
-          expect(result.metadata.output).toContain("GIT_COMMITTER_EMAIL=mimocode-agent[bot]@users.noreply.github.com")
+          expect(result.metadata.output).toContain("GIT_AUTHOR_NAME=MiMo Code")
+          expect(result.metadata.output).toContain("GIT_AUTHOR_EMAIL=mimo@xiaomi.com")
+          expect(result.metadata.output).toContain("GIT_COMMITTER_NAME=MiMo Code")
+          expect(result.metadata.output).toContain("GIT_COMMITTER_EMAIL=mimo@xiaomi.com")
         },
       })
     } finally {
