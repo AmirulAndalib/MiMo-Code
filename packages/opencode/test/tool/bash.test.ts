@@ -258,10 +258,10 @@ describe("tool.bash git identity floor", () => {
           const result = await Effect.runPromise(
             bash.execute({ command: printGitEnv, description: "print git env" }, ctx),
           )
-          expect(result.metadata.output).toContain("GIT_AUTHOR_NAME=MiMo")
-          expect(result.metadata.output).toContain("GIT_AUTHOR_EMAIL=mimo@xiaomi.com")
-          expect(result.metadata.output).toContain("GIT_COMMITTER_NAME=MiMo")
-          expect(result.metadata.output).toContain("GIT_COMMITTER_EMAIL=mimo@xiaomi.com")
+          expect(result.metadata.output).toContain(`GIT_AUTHOR_NAME=${Git.FALLBACK_IDENTITY.name}`)
+          expect(result.metadata.output).toContain(`GIT_AUTHOR_EMAIL=${Git.FALLBACK_IDENTITY.email}`)
+          expect(result.metadata.output).toContain(`GIT_COMMITTER_NAME=${Git.FALLBACK_IDENTITY.name}`)
+          expect(result.metadata.output).toContain(`GIT_COMMITTER_EMAIL=${Git.FALLBACK_IDENTITY.email}`)
         },
       })
     } finally {
@@ -269,7 +269,7 @@ describe("tool.bash git identity floor", () => {
     }
   })
 
-  each("does not override an operator-set GIT_AUTHOR_NAME", async () => {
+  each("applies the floor per-variable, not all-or-nothing, when only GIT_AUTHOR_NAME is operator-set", async () => {
     const saved = savedEnv()
     restoreEnv({
       GIT_AUTHOR_NAME: "Operator",
@@ -286,10 +286,14 @@ describe("tool.bash git identity floor", () => {
           const result = await Effect.runPromise(
             bash.execute({ command: printGitEnv, description: "print git env" }, ctx),
           )
-          // process.env value wins over the floor.
+          // The one operator-set var wins over the floor.
           expect(result.metadata.output).toContain("GIT_AUTHOR_NAME=Operator")
-          // Unset ones still get the floor.
+          // The other three are absent from process.env, so each still receives
+          // the floor independently. The tmpdir git fixture sets
+          // user.name=Test / user.email=test@mimocode.test.
+          expect(result.metadata.output).toContain("GIT_AUTHOR_EMAIL=test@mimocode.test")
           expect(result.metadata.output).toContain("GIT_COMMITTER_NAME=Test")
+          expect(result.metadata.output).toContain("GIT_COMMITTER_EMAIL=test@mimocode.test")
         },
       })
     } finally {

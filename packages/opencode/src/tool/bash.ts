@@ -456,11 +456,25 @@ export const BashTool = Tool.define(
     // commit in an ad-hoc dir via this bash tool, bypassing Worktree.setup()'s
     // per-worktree local-config fix. Without an identity, `git commit`
     // autodetects `user@hostname` (e.g. `MI <mi@host.local>`), leaking the
-    // machine hostname + wrong authorship into pushed commits. We inject
-    // GIT_AUTHOR_*/COMMITTER_* env as a FLOOR (below repo/worktree local config,
-    // which still wins). Resolved once per worktree and memoized.
-    const AGENT_NAME = "MiMo"
-    const AGENT_EMAIL = "mimo@xiaomi.com"
+    // machine hostname + wrong authorship into pushed commits.
+    //
+    // Behavioral contract of this floor and its cache:
+    //   - Its ONLY job is to guarantee a commit never falls back to
+    //     `user@hostname`. It is not a general identity-configuration feature.
+    //   - It is delivered as GIT_AUTHOR_*/GIT_COMMITTER_* ENV, and git gives env
+    //     vars precedence OVER `user.name`/`user.email` config. So the value
+    //     seeded here outranks the repo's own config for commits made through
+    //     this tool. We seed it FROM that config, so the two normally agree.
+    //   - Because the resolved value is memoized per worktree path for the
+    //     lifetime of the process, a `git config user.name ...` performed
+    //     mid-session is NOT picked up until the process restarts.
+    //   - Operator-set GIT_AUTHOR_*/GIT_COMMITTER_* still win: shellEnv only
+    //     fills the vars that are absent from process.env (see below).
+    //
+    // resolveGitIdentity and gitIdentityCache live in this outer setup block,
+    // not inside shellEnv, precisely so the cache persists across every bash
+    // invocation instead of being rebuilt (and re-spawning two `git config`
+    // subprocesses) on each call.
     const gitIdentityCache = new Map<string, { name: string; email: string }>()
     const resolveGitIdentity = Effect.fn("BashTool.resolveGitIdentity")(function* () {
       const worktree = Instance.worktree
@@ -468,13 +482,16 @@ export const BashTool = Tool.define(
       if (cached) return cached
       // Non-git projects set worktree to "/"; never read git config at root.
       if (worktree === "/") {
-        const fallback = { name: AGENT_NAME, email: AGENT_EMAIL }
+        const fallback = { name: Git.FALLBACK_IDENTITY.name, email: Git.FALLBACK_IDENTITY.email }
         gitIdentityCache.set(worktree, fallback)
         return fallback
       }
       const name = (yield* gitSvc.run(["config", "user.name"], { cwd: worktree })).text().trim()
       const email = (yield* gitSvc.run(["config", "user.email"], { cwd: worktree })).text().trim()
-      const identity = { name: name || AGENT_NAME, email: email || AGENT_EMAIL }
+      const identity = {
+        name: name || Git.FALLBACK_IDENTITY.name,
+        email: email || Git.FALLBACK_IDENTITY.email,
+      }
       gitIdentityCache.set(worktree, identity)
       return identity
     })
@@ -562,8 +579,10 @@ export const BashTool = Tool.define(
         // back to the ANSI code page (GBK on zh-CN), producing mojibake. Force
         // UTF-8 for child Python processes on Windows.
         ...(process.platform === "win32" ? { PYTHONIOENCODING: "utf-8" } : {}),
-        // Git authorship floor: below process.env (operator override wins) but
-        // above plugin extra.env (a plugin can still override).
+        // Git authorship floor. Placed after process.env so the spread order
+        // reads naturally, but it can never clobber an operator value: gitFloor
+        // only ever holds keys that were absent from process.env. A plugin's
+        // extra.env comes last and so can still override the floor.
         ...gitFloor,
         ...extra.env,
       }

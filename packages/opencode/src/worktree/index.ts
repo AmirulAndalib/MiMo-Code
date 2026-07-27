@@ -283,13 +283,14 @@ export const layer: Layer.Layer<
           // `user@hostname` (e.g. `MI <mi@host.local>`), leaking the machine
           // hostname + wrong authorship into pushed commits. Resolve the parent's
           // identity (walks local->global->system) and pin it into the new
-          // worktree's own local config; fall back to a stable mimocode identity
-          // so the worktree is NEVER left without one. Reading an unset key exits
+          // worktree's own local config; fall back to Git.FALLBACK_IDENTITY (the
+          // one shared source of truth, also used by the bash env floor) so the
+          // worktree is NEVER left without one. Reading an unset key exits
           // non-zero / empty, which the `git()` runner returns as empty text.
           const parentName = (yield* git(["config", "user.name"], { cwd: ctx.worktree })).text.trim()
           const parentEmail = (yield* git(["config", "user.email"], { cwd: ctx.worktree })).text.trim()
-          const name = parentName || "MiMo"
-          const email = parentEmail || "mimo@xiaomi.com"
+          const name = parentName || Git.FALLBACK_IDENTITY.name
+          const email = parentEmail || Git.FALLBACK_IDENTITY.email
           yield* git(["config", "user.name", name], { cwd: info.directory })
           yield* git(["config", "user.email", email], { cwd: info.directory })
         }),

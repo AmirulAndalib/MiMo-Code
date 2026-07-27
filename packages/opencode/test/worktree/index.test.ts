@@ -2,6 +2,7 @@ import { describe, expect } from "bun:test"
 import { $ } from "bun"
 import { Effect, Layer } from "effect"
 import { Worktree } from "../../src/worktree"
+import { Git } from "../../src/git"
 import { testEffect } from "../lib/effect"
 import { provideTmpdirInstance } from "../fixture/fixture"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
@@ -65,8 +66,8 @@ describe("Worktree.setup git identity", () => {
           const email = (
             yield* Effect.promise(() => $`git config user.email`.cwd(info.directory).quiet().text())
           ).trim()
-          expect(name).toBe("MiMo")
-          expect(email).toBe("mimo@xiaomi.com")
+          expect(name).toBe(Git.FALLBACK_IDENTITY.name)
+          expect(email).toBe(Git.FALLBACK_IDENTITY.email)
           // Sanity: identity is never left empty (the hostname-fallback trigger).
           expect(name.length).toBeGreaterThan(0)
           expect(email.length).toBeGreaterThan(0)
