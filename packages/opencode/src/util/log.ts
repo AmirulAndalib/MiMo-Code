@@ -65,7 +65,6 @@ let written = 0
 let rotation = true
 let sequence = 0
 let pending = Promise.resolve()
-let failureReported = false
 let printing = false
 
 function stamp() {
@@ -77,7 +76,6 @@ export async function init(options: Options) {
     await closeCurrent()
     if (options.level) level = options.level
     rotation = options.rotate ?? !Flag.MIMOCODE_DISABLE_LOG_ROTATION
-    failureReported = false
     printing = options.print
     const role = (process.env.MIMOCODE_PROCESS_ROLE ?? "main").replace(/[^a-zA-Z0-9._-]/g, "-")
     await cleanup(Global.Path.log, { pid: process.pid, role })
@@ -95,22 +93,18 @@ export async function init(options: Options) {
   })
 }
 
-function report(error: unknown) {
-  if (failureReported) return
-  failureReported = true
-  if (!printing) return
-  const message = error instanceof Error ? error.message : String(error)
-  try {
-    process.stderr.write(`mimocode log write failed: ${message}\n`)
-  } catch {}
-}
+// Log failures are swallowed. Streams still need a listener so an "error" event
+// cannot crash the process, but there is nowhere safe to report to: file
+// failures only happen when logging to a file, and that is exactly when stderr
+// belongs to the TUI screen. A missing or short log file is the only signal.
+function swallow() {}
 
 function write(msg: string) {
   void enqueue(() => append(msg))
 }
 
 function enqueue(operation: () => void | Promise<void>) {
-  pending = pending.then(operation).catch(report)
+  pending = pending.then(operation).catch(swallow)
   return pending
 }
 
@@ -150,7 +144,7 @@ async function rotate() {
 async function open(targetPath: string) {
   const target = createWriteStream(targetPath, { flags: "a" })
   stream = target
-  target.on("error", report)
+  target.on("error", swallow)
   const opened = await new Promise<boolean>((resolve) => {
     target.once("open", () => resolve(true))
     target.once("error", () => resolve(false))
@@ -166,11 +160,7 @@ async function move(source: string, target: string) {
   if (renamed) return true
   const copied = await fs.copyFile(source, target).then<"copied", "missing" | "failed">(
     () => "copied",
-    (error) => {
-      if (error instanceof Error && "code" in error && error.code === "ENOENT") return "missing"
-      report(error)
-      return "failed"
-    },
+    (error) => (error instanceof Error && "code" in error && error.code === "ENOENT" ? "missing" : "failed"),
   )
   if (copied === "missing") return true
   if (copied === "failed") return false
@@ -181,10 +171,7 @@ async function move(source: string, target: string) {
   if (removed) return true
   return fs.truncate(source, 0).then(
     () => true,
-    (error) => {
-      report(error)
-      return false
-    },
+    () => false,
   )
 }
 

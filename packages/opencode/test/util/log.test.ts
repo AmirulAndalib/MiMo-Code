@@ -326,3 +326,17 @@ test("an unusable log directory reports nothing to stderr", async () => {
   expect(result.stderr).toBe("")
   expect(result.stdout).toBe("")
 })
+
+test("print mode is unaffected by an unusable log directory", async () => {
+  await using tmp = await tmpdir()
+  const blocked = path.join(tmp.path, "not-a-directory")
+  await fs.writeFile(blocked, "file")
+
+  const result = await isolate(
+    [`await Log.init({ print: true })`, `Log.Default.info("printed record")`, `await Log.flush()`].join("\n"),
+    blocked,
+  )
+
+  expect(result.stderr).toContain("printed record")
+  expect(result.stderr).not.toContain("failed")
+})
