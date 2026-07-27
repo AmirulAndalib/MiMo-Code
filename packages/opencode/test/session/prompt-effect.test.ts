@@ -1383,6 +1383,7 @@ lifecycleMcpIt.live("MCP calls in one outer run share one turn and emit one term
       yield* prompt.prompt({
         sessionID: session.id,
         agent: "build",
+        model: ref,
         noReply: true,
         parts: [{ type: "text", text: "call the lifecycle tool twice" }],
       })
@@ -1435,6 +1436,7 @@ lifecycleMcpIt.live("MCP lifecycle waits for an in-flight tool call before notif
       yield* prompt.prompt({
         sessionID: session.id,
         agent: "build",
+        model: ref,
         noReply: true,
         parts: [{ type: "text", text: "call the lifecycle tool" }],
       })
