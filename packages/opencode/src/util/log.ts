@@ -98,6 +98,7 @@ export async function init(options: Options) {
 function report(error: unknown) {
   if (failureReported) return
   failureReported = true
+  if (!printing) return
   const message = error instanceof Error ? error.message : String(error)
   try {
     process.stderr.write(`mimocode log write failed: ${message}\n`)

@@ -312,3 +312,17 @@ test("print mode keeps writing records to stderr", async () => {
   expect(result.stderr).toContain("printed record")
   expect(await fs.readdir(tmp.path)).toHaveLength(0)
 })
+
+test("an unusable log directory reports nothing to stderr", async () => {
+  await using tmp = await tmpdir()
+  const blocked = path.join(tmp.path, "not-a-directory")
+  await fs.writeFile(blocked, "file")
+
+  const result = await isolate(
+    [`await Log.init({ print: false })`, `Log.Default.info("cannot be written")`, `await Log.flush()`].join("\n"),
+    blocked,
+  )
+
+  expect(result.stderr).toBe("")
+  expect(result.stdout).toBe("")
+})
