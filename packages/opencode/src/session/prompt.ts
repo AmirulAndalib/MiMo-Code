@@ -1018,8 +1018,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         agent: input.agent.name,
         actorID: input.agentID,
         taskId: input.task_id,
-        turnID: input.mcpContext.turnId,
-        turnActorID: input.mcpContext.actorId,
         messages: input.messages,
         metadata: (val) =>
           input.processor.updateToolCall(options.toolCallId, (match) => {

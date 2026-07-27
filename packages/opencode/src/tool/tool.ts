@@ -20,8 +20,6 @@ export type Context<M extends Metadata = Metadata> = {
   agent: string
   actorID?: string
   taskId?: string
-  turnID?: string
-  turnActorID?: string
   abort: AbortSignal
   callID?: string
   extra?: { [key: string]: unknown }

@@ -705,6 +705,63 @@ test(
 )
 
 // ========================================================================
+test(
+  "turn lifecycle abandons a permanently stuck send so a later turn still notifies promptly",
+  withInstance({}, (mcp) =>
+    Effect.gen(function* () {
+      lastCreatedClientName = "stuck-server"
+      const stuckState = getOrCreateClientState("stuck-server")
+      stuckState.serverCapabilities = {
+        experimental: { "com.xiaomi.mimo/turn-lifecycle": { version: 1 } },
+      }
+      stuckState.notificationHangs = true
+      yield* mcp.add("stuck-server", { type: "local", command: ["echo", "test"] })
+
+      const clients = yield* mcp.clients()
+
+      // turn_1's send never settles — its resolver is deliberately never called, so it
+      // stays orphaned in the pending map for the rest of the test.
+      yield* MCP.notifyTurnLifecycle(clients, { sessionId: "ses_1", turnId: "turn_1" }, "completed")
+      expect(stuckState.notificationCalls).toBe(1)
+      expect(stuckState.notifications).toEqual([])
+
+      // The transport recovers, but the orphaned send is still parked in the pending map.
+      stuckState.notificationHangs = false
+      yield* Effect.sleep(50)
+
+      const started = Date.now()
+      yield* MCP.notifyTurnLifecycle(clients, { sessionId: "ses_1", turnId: "turn_2" }, "completed")
+      const elapsed = Date.now() - started
+
+      // Before the fix this turn queued behind the orphan, burned the whole 1s budget
+      // and was dropped (notificationCalls would still be 1) — and so would every turn
+      // after it. Now the stuck entry is released and the send happens immediately.
+      expect(stuckState.notificationCalls).toBe(2)
+      expect(elapsed).toBeLessThan(MCP.TURN_LIFECYCLE_NOTIFICATION_TIMEOUT / 2)
+      expect(stuckState.notifications.map((notification) => notification.params)).toEqual([
+        { sessionId: "ses_1", turnId: "turn_2", status: "completed" },
+      ])
+      // Only the abandoned send is still counted in flight; overlapping it is the
+      // accepted cost of not blocking later turns forever.
+      expect(stuckState.notificationInFlight).toBe(1)
+      expect(stuckState.notificationMaxInFlight).toBe(2)
+
+      // A further turn is also prompt, and healthy sends stay serialized behind
+      // each other rather than piling up.
+      const secondStarted = Date.now()
+      yield* MCP.notifyTurnLifecycle(clients, { sessionId: "ses_1", turnId: "turn_3" }, "completed")
+      expect(Date.now() - secondStarted).toBeLessThan(MCP.TURN_LIFECYCLE_NOTIFICATION_TIMEOUT / 2)
+      expect(stuckState.notificationCalls).toBe(3)
+      expect(stuckState.notificationInFlight).toBe(1)
+      expect(stuckState.notificationMaxInFlight).toBe(2)
+      expect(stuckState.notifications.map((notification) => notification.params)).toEqual([
+        { sessionId: "ses_1", turnId: "turn_2", status: "completed" },
+        { sessionId: "ses_1", turnId: "turn_3", status: "completed" },
+      ])
+    }),
+  ),
+)
+
 // Test: tool change notifications refresh the cache
 // ========================================================================
 

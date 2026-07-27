@@ -73,6 +73,9 @@ export const TURN_LIFECYCLE_CAPABILITY = "com.xiaomi.mimo/turn-lifecycle"
 export const TURN_LIFECYCLE_NOTIFICATION = `notifications/${TURN_LIFECYCLE_CAPABILITY}`
 export const TURN_LIFECYCLE_VERSION = 1
 export const TURN_LIFECYCLE_NOTIFICATION_TIMEOUT = 1_000
+// A send that has already outlived the per-turn budget can never be useful to wait
+// on again, so later turns abandon it instead of queueing behind it forever.
+export const TURN_LIFECYCLE_STUCK_TIMEOUT = TURN_LIFECYCLE_NOTIFICATION_TIMEOUT
 
 const turnLifecycleClientOptions = {
   capabilities: {
@@ -85,6 +88,7 @@ const turnLifecycleClientOptions = {
 interface PendingTurnLifecycleNotification {
   readonly promise: Promise<void>
   readonly waiters: Set<() => void>
+  readonly startedAt: number
 }
 
 const pendingTurnLifecycleNotifications = new WeakMap<MCPClient, PendingTurnLifecycleNotification>()
@@ -116,7 +120,7 @@ function startTurnLifecycleNotification(client: MCPClient, context: TurnContext,
       params: { ...context, status },
     } as Parameters<MCPClient["notification"]>[0]),
   )
-  const notification: PendingTurnLifecycleNotification = { promise, waiters: new Set() }
+  const notification: PendingTurnLifecycleNotification = { promise, waiters: new Set(), startedAt: Date.now() }
   pendingTurnLifecycleNotifications.set(client, notification)
   const clear = () => {
     if (pendingTurnLifecycleNotifications.get(client) === notification) {
@@ -126,8 +130,29 @@ function startTurnLifecycleNotification(client: MCPClient, context: TurnContext,
     notification.waiters.clear()
     for (const waiter of waiters) waiter()
   }
+  // Attached at creation so an orphaned send's eventual rejection is always swallowed.
   void promise.then(clear, clear)
   return notification
+}
+
+// A send that outlives the per-turn budget is treated as stuck: drop it from the
+// pending map so the next turn sends immediately instead of paying the timeout
+// forever. The orphaned promise is never awaited again; its settlement still runs
+// `clear`, which no-ops because the map entry has been replaced.
+function releaseStuckTurnLifecycleNotification(
+  client: MCPClient,
+  notification: PendingTurnLifecycleNotification,
+  clientName: string,
+) {
+  if (pendingTurnLifecycleNotifications.get(client) !== notification) return
+  pendingTurnLifecycleNotifications.delete(client)
+  log.warn("abandoning stuck MCP turn lifecycle notification", {
+    clientName,
+    elapsed: Date.now() - notification.startedAt,
+  })
+  const waiters = [...notification.waiters]
+  notification.waiters.clear()
+  for (const waiter of waiters) waiter()
 }
 
 function waitForTurnLifecycleNotification(client: MCPClient, notification: PendingTurnLifecycleNotification) {
@@ -159,11 +184,20 @@ function waitForTurnLifecycleNotification(client: MCPClient, notification: Pendi
   })
 }
 
-function sendTurnLifecycleNotification(client: MCPClient, context: TurnContext, status: TurnStatus) {
+function sendTurnLifecycleNotification(
+  client: MCPClient,
+  context: TurnContext,
+  status: TurnStatus,
+  clientName: string,
+) {
   return Effect.gen(function* () {
     while (true) {
       const pending = pendingTurnLifecycleNotifications.get(client)
       if (pending) {
+        if (Date.now() - pending.startedAt >= TURN_LIFECYCLE_STUCK_TIMEOUT) {
+          releaseStuckTurnLifecycleNotification(client, pending, clientName)
+          continue
+        }
         yield* waitForTurnLifecycleNotification(client, pending)
         continue
       }
@@ -183,7 +217,7 @@ export function notifyTurnLifecycle(clients: Record<string, MCPClient>, context:
     Object.entries(clients),
     ([clientName, client]) => {
       if (!supportsTurnLifecycle(client)) return Effect.void
-      return sendTurnLifecycleNotification(client, context, status).pipe(
+      return sendTurnLifecycleNotification(client, context, status, clientName).pipe(
         Effect.timeout(TURN_LIFECYCLE_NOTIFICATION_TIMEOUT),
         Effect.tapError((error) =>
           Effect.sync(() => log.warn("failed to notify MCP turn lifecycle", { clientName, status, error })),
