@@ -42,11 +42,12 @@ function budget(input: { cfg: Config.Info; model: Provider.Model }, hard: number
       ? (Wildcard.all(key, configured as Record<string, number | string>) as number | string | undefined)
       : configured
   if (raw === undefined) return undefined
-  // 0 and "" mean "no budget for this model". A JSON merge cannot delete a key, so
-  // this is how the UI restores a model to its own window.
-  if (raw === 0 || raw === "") return undefined
+  if (raw === "") return undefined
 
   const parsed = Token.parseQuantity(raw, hard)
+  // 0 means "no budget for this model" — a config merge cannot delete a key, so this is
+  // how the UI restores a model to its own window. Not a misconfiguration, so no warning.
+  if (parsed === 0) return undefined
   if (parsed === undefined || parsed <= reserved) {
     if (!warned.has(`${key}:${raw}`)) {
       warned.add(`${key}:${raw}`)

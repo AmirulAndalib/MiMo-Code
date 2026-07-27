@@ -50,13 +50,13 @@ export const ModelsCommand = cmd({
               const provider = providers[providerID]
               const sorted = Object.entries(provider.models).sort(([a], [b]) => a.localeCompare(b))
               for (const [modelID, model] of sorted) {
-                const window = contextWindow({ cfg, model })
+                const win = contextWindow({ cfg, model })
                 process.stdout.write(`${providerID}/${modelID}`)
-                if (window.hard > 0) {
+                if (win.hard > 0) {
                   process.stdout.write(
-                    ` — window ${Token.format(window.hard)}` +
-                      (window.source === "config" ? `, budget ${Token.format(window.effective)}` : "") +
-                      `, compacts at ${Token.format(window.usable)}`,
+                    ` — window ${Token.format(win.hard)}` +
+                      (win.source === "config" ? `, budget ${Token.format(win.effective)}` : "") +
+                      `, compacts at ${Token.format(win.usable)}`,
                   )
                 }
                 process.stdout.write(EOL)

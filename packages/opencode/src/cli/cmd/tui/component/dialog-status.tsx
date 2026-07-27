@@ -22,24 +22,23 @@ export function DialogStatus() {
   const enabledFormatters = createMemo(() => sync.data.formatter.filter((f) => f.enabled))
 
   const context = createMemo(() => {
-    const selected = local.model.current()
-    if (!selected) return
-    const win = Model.contextWindow(
-      sync.data.config,
-      Model.get(sync.data.provider, selected.providerID, selected.modelID),
-    )
-    if (!win) return
     const sessionID = route.data.type === "session" ? route.data.sessionID : undefined
     const last = sessionID
       ? (sync.data.message[sessionID]?.["main"] ?? []).findLast(
           (item): item is AssistantMessage => item.role === "assistant" && item.tokens.output > 0,
         )
       : undefined
+    // Describe the model the tokens were actually spent on, so a mid-session model
+    // switch cannot divide the old model's usage by the new model's trigger.
+    const target = last ? { providerID: last.providerID, modelID: last.modelID } : local.model.current()
+    if (!target) return
+    const win = Model.contextWindow(sync.data.config, Model.get(sync.data.provider, target.providerID, target.modelID))
+    if (!win) return
     const tokens = last
       ? last.tokens.input + last.tokens.output + last.tokens.reasoning + last.tokens.cache.read + last.tokens.cache.write
       : undefined
     return {
-      model: `${selected.providerID}/${selected.modelID}`,
+      model: `${target.providerID}/${target.modelID}`,
       window: Token.format(win.hard),
       budget: win.source === "config" ? Token.format(win.effective) : undefined,
       reserved: Token.format(win.effective - win.usable),

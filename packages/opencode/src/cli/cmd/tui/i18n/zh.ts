@@ -311,6 +311,7 @@ export const dict = {
   "tui.context_limit.busy": "会话运行中，无法修改上下文上限",
   "tui.context_limit.too_small": "必须为 {{reserved}} 的压缩预留留出空间",
   "tui.context_limit.scalar_config": "compaction.max_context 当前是对所有模型生效的单值，请在 mimocode.json 中改为按模型配置",
+  "tui.context_limit.shadowed": "已保存，但仍有其他配置将其固定为 {{value}}，请检查项目的 mimocode.json",
   "tui.context_limit.no_model": "未选择模型",
   "tui.command.mcp.list.title": "切换 MCP",
   "tui.command.never_ask.title_on": "跳过提问：已开启（自动决策，权限请求除外） - 点击关闭",

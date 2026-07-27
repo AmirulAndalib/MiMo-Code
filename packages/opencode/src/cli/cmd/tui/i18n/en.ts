@@ -289,6 +289,7 @@ export const dict: Record<string, string> = {
   "tui.context_limit.busy": "Cannot change the context limit while a session is running",
   "tui.context_limit.too_small": "Must leave room for the {{reserved}} compaction reserve",
   "tui.context_limit.scalar_config": "compaction.max_context is set to a single value for all models — edit it in mimocode.json to switch to per-model limits",
+  "tui.context_limit.shadowed": "Saved, but another config still forces {{value}} — check your project mimocode.json",
   "tui.context_limit.no_model": "No model selected",
   "tui.command.mcp.list.title": "Toggle MCPs",
   "tui.command.never_ask.title_on": "Never-ask: ON (auto-decide, permissions excluded) — click to turn off",

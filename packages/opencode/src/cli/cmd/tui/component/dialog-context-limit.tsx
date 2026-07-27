@@ -83,6 +83,22 @@ export function DialogContextLimit() {
     await sdk.client.instance.dispose()
     await sync.bootstrap()
     dialog.clear()
+
+    // The write lands in the user-global config, but everything reads the merged one and
+    // project config wins per key. Re-resolve and say so rather than claiming success on
+    // a value that a project mimocode.json shadows.
+    const applied = Model.contextWindow(
+      sync.data.config,
+      Model.get(sync.data.provider, selected.providerID, selected.modelID),
+    )
+    if (applied && applied.effective !== (value ?? applied.hard)) {
+      toast.show({
+        variant: "error",
+        message: t("tui.context_limit.shadowed", { value: Token.format(applied.effective) }),
+        duration: 6000,
+      })
+      return
+    }
     toast.show({
       variant: "success",
       message:

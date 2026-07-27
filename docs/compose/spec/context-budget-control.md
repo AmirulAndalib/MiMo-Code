@@ -63,7 +63,7 @@ return input.model.limit.input
   : Math.max(0, context - outputReserve - reserved)
 ```
 
-models.dev catalog (`packages/opencode/src/provider/models-snapshot.js`) for the openai provider:
+models.dev catalog (bundled at build time as `packages/opencode/src/provider/models-snapshot.js`, cached at `~/.cache/mimocode/models.json`) for the openai provider:
 
 | model | context | input | usable() before #1926 | usable() after #1926 |
 | --- | --- | --- | --- | --- |
@@ -192,7 +192,7 @@ Those are the two quantities S1.1 separates, so the provider layer takes 372K an
 
 ### S2.6 Display / "how do I see my context window"
 
-Three surfaces compute `%` independently against raw `limit.context` today, and none of them matches the trigger. All three switch to `Overflow.window()`:
+Three surfaces compute `%` independently against raw `limit.context` today, and none of them matches the trigger. All three switch to `Overflow.contextWindow()`:
 
 | Surface | Today | After |
 | --- | --- | --- |
@@ -266,7 +266,7 @@ Rejected alternatives:
 
 Route D (do first, independent):
 
-- [x] T1: Replace the assignment in `plugin/codex.ts` with a clamp, including `limit.input` and the `limit.context === 0` guard — acceptance: `bun test test/plugin/codex.test.ts` asserts `gpt-5.6-sol` → `{context: 300K, input: 300K}`, `gpt-5.3-codex` → `{context: 300K, input: 272K}`, `gpt-4o` → `{context: 128K}` unchanged, `gpt-image-1` → `{context: 0}` unchanged, `o3` → `{context: 200K}` unchanged (covers: S2.5)
+- [x] T1: Replace the assignment in `plugin/codex.ts` with a clamp, including `limit.input` and the `limit.context === 0` guard — acceptance: `bun test test/plugin/codex.test.ts` asserts `gpt-5.6-sol` → `{context: 372K, input: 372K}`, `gpt-5.3-codex` → `{context: 372K, input: 272K}`, `gpt-4o` → `{context: 128K}` unchanged and no `input` introduced, `gpt-image-1` → `{context: 0}` unchanged, `o3` → `{context: 200K}` unchanged (covers: S2.5)
 - [x] T2: Confirm the real Codex prompt cap and either keep the literal or make it plan-derived — acceptance: the chosen value is documented in a code comment with its source (covers: S2.5; depends: T1). Resolved to **372,000** with sources in the comment: OpenAI's Codex model registry declares `context_window = max_context_window = 372000` for the gpt-5.6 variants (openai/codex#31860 quotes the served catalog), and a direct Codex request with 350,317 input tokens completes (can1357/oh-my-pi#5705). The 272,000 figure that Codex's bundled metadata was lowered to (openai/codex#33972) is the >272K 2x-input / 1.5x-output billing boundary, i.e. a spending policy — documented as a `compaction.max_context` recipe instead of baked into the cap.
 
 Route A (substrate):

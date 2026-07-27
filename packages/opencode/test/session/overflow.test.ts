@@ -690,6 +690,9 @@ describe("compaction.max_context reset sentinel", () => {
     const model = createModel({ context: 1_050_000, input: 922_000, id: "gpt-5.6" })
     expect(usable({ cfg: mockCfg({ max_context: { "test/gpt-5.6": 0 } as any }), model })).toBe(902_000)
     expect(contextWindow({ cfg: mockCfg({ max_context: 0 }), model }).source).toBe("model")
+    // The picker writes a number, but a hand-edited config may carry the string form.
+    expect(usable({ cfg: mockCfg({ max_context: { "test/gpt-5.6": "0" } }), model })).toBe(902_000)
+    expect(usable({ cfg: mockCfg({ max_context: "" }), model })).toBe(902_000)
   })
 })
 
