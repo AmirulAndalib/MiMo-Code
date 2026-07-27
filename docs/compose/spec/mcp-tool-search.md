@@ -1,9 +1,9 @@
 ---
 feature: mcp-tool-search
-status: in-progress
+status: completed
 updated: 2026-07-26
 branch: feature/mcp-tool-search
-commits: c946f4c215aaf326036342a8c3dec6ad12d8772a..working-tree
+commits: c946f4c215aaf326036342a8c3dec6ad12d8772a..HEAD
 ---
 
 # MCP Tool Skillization
@@ -14,7 +14,7 @@ Sending every complete MCP function definition to the model consumes context bef
 
 ## [S2] Private Catalog And Generic Discovery
 
-MiMoCode keeps every transformed schema and execute closure in a local registry. When at least one effective MCP tool exists and the selected model supports function calling, the request exposes one ordinary function named `mcp_tool_search`. Its description contains a deterministic catalog of the effective MCP tools so the model knows what it can search for, while individual MCP function definitions and schemas remain hidden until activation.
+MiMoCode keeps every transformed schema and execute closure in a local registry. When MCP Tool Search is enabled, at least one effective MCP tool exists, and the selected model supports function calling, the request exposes one ordinary function named `mcp_tool_search`. Its description contains a deterministic catalog of the effective MCP tools so the model knows what it can search for, while individual MCP function definitions and schemas remain hidden until activation.
 
 At context pressure levels 0-1 (below 70% of the usable input window), the catalog includes every effective callable name and description when the complete rendering fits its budget. At levels 2-3, or when the rich catalog itself exceeds the budget, it degrades to callable names only. The catalog budget is 10% of the model's usable input window capped at 20,000 estimated tokens; unknown windows use the 20,000-token cap. If all names still exceed the budget, the renderer includes a deterministic prefix plus an omitted-count notice. Local search always covers the complete catalog.
 
@@ -36,13 +36,13 @@ This guard covers hallucinated calls, stale history, repair mistakes, Max Mode r
 
 ## [S5] Provider And ToolScript Behavior
 
-The mechanism uses an ordinary function tool and applies to every resolved model with `capabilities.toolcall = true`; it does not depend on model-family detection, OpenAI provider tools, or `defer_loading`. Models without function calling receive neither MCP discovery nor MCP definitions.
+The mechanism uses an ordinary function tool and does not depend on OpenAI provider tools or `defer_loading`. It is enabled by default for GPT-family models except GPT-OSS. Other models expose effective MCP definitions directly by default and may opt into discovery with `MIMOCODE_EXPERIMENTAL_MCP_TOOL_SEARCH=true` (or the umbrella `MIMOCODE_EXPERIMENTAL`). Models without function calling receive neither MCP discovery nor MCP definitions.
 
 The GPT ToolScript/`exec` surface no longer embeds or dispatches MCP tools. This prevents ToolScript descriptions and sandbox declarations from leaking the private catalog or bypassing request-scoped activation. Loaded MCP capabilities are invoked through their ordinary direct tool definitions.
 
 ## [S6] Testing Boundaries
 
-Focused coverage must prove that initial GPT and non-GPT requests contain `mcp_tool_search` with the effective name/description catalog but no MCP schema or separately callable MCP definitions; only search matches become callable on the next request; unmatched tools remain inactive; multiple searches accumulate; new user messages reset loading; non-tool-call models omit discovery; inactive calls fail recoverably; and ordinary MCP success/error normalization remains unchanged.
+Focused coverage must prove that initial GPT requests contain `mcp_tool_search` with the effective name/description catalog but no MCP schema or separately callable MCP definitions; non-GPT models expose MCP tools directly by default and can opt into discovery with the feature flag; only search matches become callable on the next request; unmatched tools remain inactive; multiple searches accumulate; new user messages reset loading; non-tool-call models omit both discovery and MCP definitions; inactive calls fail recoverably; and ordinary MCP success/error normalization remains unchanged.
 
 Tests also cover context-pressure boundaries, rich-to-name-only budget fallback, deterministic truncation, BM25 ranking and cache invalidation, active tool wire serialization, ToolScript isolation, reserved search-tool collisions, limits, catalog fingerprints, and package type safety.
 
@@ -52,11 +52,11 @@ This change does not add semantic embeddings, persist loaded tools across user r
 
 ## Report
 
-Pending final verification and independent review.
+Implemented provider-independent, request-scoped MCP discovery with token-aware catalog disclosure, GPT-default gating, direct non-GPT fallback, and execution-time eligibility guards. Focused and integration coverage verifies search activation, direct execution, permission filtering, GPT-OSS exclusion, context-pressure degradation, and schema privacy. Package and repository type checks pass.
 
 ## Tasks
 
 - [x] T1: Replace provider-native Tool Search with ordinary `mcp_tool_search` and cached local BM25 discovery.
 - [x] T2: Separate registered executors from model-visible `activeTools` and activate only request-scoped matches.
 - [x] T3: Preserve MCP execution safety while removing ToolScript catalog leakage and inactive-call bypasses.
-- [ ] T4: Complete focused/broad verification, independent review, and delivery report.
+- [x] T4: Complete focused/broad verification, independent review, and delivery report.

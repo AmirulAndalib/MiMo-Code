@@ -220,6 +220,11 @@ export const Flag = {
   MIMOCODE_EXPERIMENTAL_OXFMT: MIMOCODE_EXPERIMENTAL || truthy("MIMOCODE_EXPERIMENTAL_OXFMT"),
   MIMOCODE_EXPERIMENTAL_LSP_TY: truthy("MIMOCODE_EXPERIMENTAL_LSP_TY"),
   MIMOCODE_EXPERIMENTAL_LSP_TOOL: MIMOCODE_EXPERIMENTAL || truthy("MIMOCODE_EXPERIMENTAL_LSP_TOOL"),
+  // Defaults to OFF for non-GPT models. GPT models enable MCP Tool Search in
+  // SessionPrompt regardless of this flag. Opt in here to enable it for every
+  // function-calling model.
+  MIMOCODE_EXPERIMENTAL_MCP_TOOL_SEARCH:
+    MIMOCODE_EXPERIMENTAL || truthy("MIMOCODE_EXPERIMENTAL_MCP_TOOL_SEARCH"),
   // Defaults to OFF (opt-in): the Orchestrator primary mode — a general
   // coordinator that delegates to child sessions via the `session` tool, with a
   // global singleton workspace and child permission-approval routing. Enable with

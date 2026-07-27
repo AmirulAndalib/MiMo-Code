@@ -124,6 +124,7 @@ import {
   type McpToolSearchEntry,
   type McpToolSearchMetadata,
 } from "@/tool/mcp-tool-search"
+import { isMcpToolSearchEnabled } from "@/tool/gpt"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -936,7 +937,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       processor: Pick<SessionProcessor.Handle, "message" | "updateToolCall" | "completeToolCall">
       bypassAgentCheck: boolean
       messages: MessageV2.WithParts[]
-      mcpCatalog: { rich: boolean; budget: number }
       agentID?: string
       task_id?: string
     }) {
@@ -946,6 +946,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       const loadedMcpTools = new Set<string>()
       const mcpSearchEntries: McpToolSearchEntry[] = []
       const mcpCatalog = { current: createMcpToolSearchCatalog([]) }
+      const useMcpToolSearch = isMcpToolSearchEnabled(
+        Flag.MIMOCODE_EXPERIMENTAL_MCP_TOOL_SEARCH,
+        input.model.id,
+        input.model.api.id,
+        input.model.family,
+      )
       const run = yield* runner()
       const promptOps = yield* ops()
 
@@ -1171,18 +1177,19 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         const schema = yield* Effect.promise(() => Promise.resolve(asSchema(item.inputSchema).jsonSchema))
         const transformed = ProviderTransform.schema(input.model, schema)
         item.inputSchema = jsonSchema(transformed)
-        if (
+        const available =
           input.tools?.[key] !== false &&
           !disabledMcpTools.has(key) &&
-          (!agentToolAllowlist || agentToolAllowlist.has(key)) &&
-          (!whitelist || whitelist.has(key))
-        ) {
+          (!agentToolAllowlist || agentToolAllowlist.has(key))
+        const searchable = available && (!whitelist || whitelist.has(key))
+        if (searchable && useMcpToolSearch) {
           mcpSearchEntries.push({
             name: key,
             description: item.description ?? "",
             parameters: transformed as unknown as JSONObject,
           })
         }
+        if (searchable && !useMcpToolSearch && input.model.capabilities.toolcall) activeTools.add(key)
         item.execute = (args, opts) =>
           run.promise(
             Effect.gen(function* () {
@@ -1194,7 +1201,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 sessionID: input.session.id,
               })
               const ctx = context(args, opts)
-              if (!loadedMcpTools.has(key)) {
+              if (!useMcpToolSearch && (!available || !input.model.capabilities.toolcall)) {
+                return yield* Effect.fail(
+                  new RecoverableError(`The MCP tool "${key}" is unavailable for this request.`),
+                )
+              }
+              if (useMcpToolSearch && !loadedMcpTools.has(key)) {
                 return yield* Effect.fail(
                   new RecoverableError(
                     `The MCP tool "${key}" is not loaded for this request. Call ${MCP_TOOL_SEARCH_ID} first, then retry on the next step.`,
@@ -1317,15 +1329,40 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       mcpCatalog.current = createMcpToolSearchCatalog(
         mcpSearchEntries.toSorted((a, b) => a.name.localeCompare(b.name)),
       )
-      if (tools[MCP_TOOL_SEARCH_ID]) {
+      if (useMcpToolSearch && tools[MCP_TOOL_SEARCH_ID]) {
+        const cfg = yield* config.get()
+        const usableTokens = usable({ cfg, model: input.model })
+        const lastFinished = input.messages.findLast(
+          (message): message is MessageV2.WithParts & { info: MessageV2.Assistant } =>
+            message.info.role === "assistant" && !!message.info.finish,
+        )
+        const lastFinishedIndex = lastFinished
+          ? input.messages.findIndex((message) => message.info.id === lastFinished.info.id)
+          : -1
         tools[MCP_TOOL_SEARCH_ID] = {
           ...tools[MCP_TOOL_SEARCH_ID],
-          description: mcpToolSearchDescription(mcpCatalog.current.entries, input.mcpCatalog),
+          description: mcpToolSearchDescription(mcpCatalog.current.entries, {
+            rich:
+              contextPressureLevel({
+                cfg,
+                tokens: lastFinished?.info.tokens ?? {
+                  input: 0,
+                  output: 0,
+                  reasoning: 0,
+                  cache: { read: 0, write: 0 },
+                },
+                model: input.model,
+                additionalTokens: Token.estimate(
+                  JSON.stringify(input.messages.slice(lastFinishedIndex + 1)),
+                ),
+              }) < 2,
+            budget: mcpToolCatalogBudget({ usable: usableTokens, context: input.model.limit.context }),
+          }),
         }
       }
       const searchable = new Set(mcpCatalog.current.entries.map((entry) => entry.name))
       const currentUser = input.messages.findLast((message) => message.info.role === "user")
-      if (currentUser) {
+      if (currentUser && useMcpToolSearch) {
         for (const message of input.messages) {
           if (message.info.role !== "assistant" || message.info.parentID !== currentUser.info.id) continue
           for (const part of message.parts) {
@@ -1344,6 +1381,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       }
 
       if (
+        useMcpToolSearch &&
         input.model.capabilities.toolcall &&
         mcpCatalog.current.entries.length > 0 &&
         tools[MCP_TOOL_SEARCH_ID]
@@ -3375,12 +3413,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           const outcome: "break" | "continue" = yield* Effect.gen(function* () {
             const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
             const bypassAgentCheck = lastUserMsg?.parts.some((p) => p.type === "agent") ?? false
-            const cfg = yield* config.get()
-            const usableTokens = usable({ cfg, model })
-            const lastFinishedIndex = lastFinished
-              ? msgs.findIndex((item) => item.info.id === lastFinished.id)
-              : -1
-            const additionalTokens = Token.estimate(JSON.stringify(msgs.slice(lastFinishedIndex + 1)))
 
             const resolvedTools = yield* resolveTools({
               agent,
@@ -3390,21 +3422,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               processor: handle,
               bypassAgentCheck,
               messages: msgs,
-              mcpCatalog: {
-                rich:
-                  contextPressureLevel({
-                    cfg,
-                    tokens: lastFinished?.tokens ?? {
-                      input: 0,
-                      output: 0,
-                      reasoning: 0,
-                      cache: { read: 0, write: 0 },
-                    },
-                    model,
-                    additionalTokens,
-                  }) < 2,
-                budget: mcpToolCatalogBudget({ usable: usableTokens, context: model.limit.context }),
-              },
               agentID: lastUser.agentID,
               task_id,
             })
