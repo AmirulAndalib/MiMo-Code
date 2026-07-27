@@ -270,6 +270,92 @@ function supportsCacheMarkers(model: Provider.Model): boolean {
 // not an assistant prefill.
 const CONTINUATION_PROMPT = "Continue."
 
+// Backfill text for a message whose content is structurally present but carries
+// nothing a provider will accept. Same string as the continuation prompt: both
+// mean "there is no new instruction here, keep going".
+const EMPTY_CONTENT_PLACEHOLDER = CONTINUATION_PROMPT
+
+// Mirrors the AI SDK's OWN user-content filter. `ai@6` builds the wire payload in
+// `convertToLanguageModelMessage`, whose user branch is:
+//
+//   content: message.content.map((part) => convertPartToLanguageModelPart(part, ...))
+//     .filter((part) => part.type !== "text" || part.text !== "")
+//
+// It runs AFTER every transform here and does NOT backfill, so a user message
+// whose only text part is "" reaches the provider as `content: []` — exactly the
+// shape observed in the live Bedrock 400 payload. Note the asymmetry: the SDK's
+// assistant branch keeps an empty text part when it carries providerOptions
+// (`|| part.providerOptions != null`); the user branch has no such escape, so
+// even an empty text part holding a cache_control marker is stripped.
+//
+// Consequence: emptiness of a user message CANNOT be judged by `content.length`
+// — at this layer the offending message is a length-1 array that looks fine. It
+// must be judged by what SURVIVES this filter.
+function sdkVisibleUserParts(content: readonly any[]): readonly any[] {
+  return content.filter((part) => !part || part.type !== "text" || part.text !== "")
+}
+
+// The SDK's ASSISTANT branch uses a slightly looser predicate — an empty text
+// part survives when it carries providerOptions:
+//   .filter((part) => part.type !== "text" || part.text !== "" || part.providerOptions != null)
+// so assistant emptiness has to be judged against that rule, not the user one.
+function sdkVisibleAssistantParts(content: readonly any[]): readonly any[] {
+  return content.filter(
+    (part) => !part || part.type !== "text" || part.text !== "" || part.providerOptions != null,
+  )
+}
+
+// True when a message will reach the provider with no usable content.
+function hasNoSendableContent(msg: ModelMessage): boolean {
+  const content = msg.content as unknown
+  if (typeof content === "string") return content === ""
+  if (!Array.isArray(content)) return true
+  // Judge each role by the SDK's own post-filter view (see the notes above).
+  if (msg.role === "user") return sdkVisibleUserParts(content).length === 0
+  if (msg.role === "assistant") return sdkVisibleAssistantParts(content).length === 0
+  return content.length === 0
+}
+
+// THE global pre-send content invariant: no message may reach the provider with
+// empty content. This layer never existed before — `normalizeContentArray` only
+// guards content SHAPE, `normalizeMessages` only strips empty parts and only for
+// `@ai-sdk/anthropic`/`@ai-sdk/amazon-bedrock` (so a Bedrock-backed gateway on any
+// other npm got no protection at all), and `ensureTrailingUserMessage` inspects
+// only the trailing assistant. An empty user message fell through all three seams
+// and produced `messages.<N>: user messages must have non-empty content`.
+//
+// Policy is per-role and deliberately asymmetric:
+//   - user      → BACKFILL a minimal non-empty text turn. Dropping it would make
+//                 the request end with an assistant message, which Bedrock rejects
+//                 as a prefill — trading this 400 for the prefill 400.
+//   - assistant → DROP. It is residue with nothing to preserve, and the trailing
+//                 user guard that runs next re-establishes the prefill invariant.
+//   - tool      → LEAVE UNTOUCHED. A tool message's content must be `tool-result`
+//                 blocks keyed to a preceding `tool-call`; we cannot synthesize a
+//                 valid one, and injecting text would break tool_use/tool_result
+//                 pairing (a different 400). The SDK's empty-text filter does not
+//                 apply to the tool branch, and no empty tool message exists in
+//                 any observed transcript, so there is nothing to repair here.
+//
+// Provider-agnostic on purpose: the AI SDK applies its stripping filter for every
+// provider, so gating this on an npm package name is what created the hole.
+export function ensureNonEmptyContent(msgs: ModelMessage[]): ModelMessage[] {
+  const result: ModelMessage[] = []
+  for (const msg of msgs) {
+    if (!hasNoSendableContent(msg)) {
+      result.push(msg)
+      continue
+    }
+    if (msg.role === "assistant") continue
+    if (msg.role === "tool") {
+      result.push(msg)
+      continue
+    }
+    result.push({ ...msg, content: [{ type: "text", text: EMPTY_CONTENT_PLACEHOLDER }] } as ModelMessage)
+  }
+  return result
+}
+
 // True when an assistant ModelMessage carries no renderable content (no text and
 // no tool-call) — pure residue we can drop without losing anything.
 function isEmptyAssistant(msg: ModelMessage): boolean {
@@ -292,13 +378,23 @@ function isEmptyAssistant(msg: ModelMessage): boolean {
 // user turn is appended so the list ends with a user message. Runs at the
 // pre-send choke point in `message()`, so it also self-heals history that
 // already ends in an assistant turn.
+//
+// ORDERING CONTRACT: `ensureNonEmptyContent` MUST run before this function.
+// This guard only establishes "the list ends with user/tool"; it says nothing
+// about whether that trailing message has usable content. Running it first and
+// resolving emptiness second would let this function return a list ending in an
+// empty user message (which is what shipped, and what produced the live 400),
+// and resolving emptiness afterwards could drop that message again and re-open
+// the prefill 400. Emptiness first, prefill second — the two cannot fight.
 export function ensureTrailingUserMessage(msgs: ModelMessage[]): ModelMessage[] {
   // Drop only trailing EMPTY assistant residue (nothing to preserve).
   let end = msgs.length
   while (end > 0 && isEmptyAssistant(msgs[end - 1])) end--
   const trimmed = end === msgs.length ? msgs : msgs.slice(0, end)
   const last = trimmed[trimmed.length - 1]
-  // Already ends with user or tool (or empty) — safe to send as-is.
+  // Already ends with a user or tool message, so this is not a prefill. Their
+  // content is guaranteed non-empty by `ensureNonEmptyContent` (see the ordering
+  // contract above) — an empty trailing message is NOT safe to send as-is.
   if (!last || last.role !== "assistant") return trimmed
   // A content-bearing assistant is legitimately last: keep it and append a
   // minimal user turn so the request ends with a user message.
@@ -457,14 +553,20 @@ function applyCaching(msgs: ModelMessage[], model: Provider.Model): ModelMessage
 // Minimal crash guard: ensure msg.content is never a non-string non-array value
 // (object, undefined, null) that would blow up downstream `.map()` calls.
 // Strings are valid ModelMessage content (the AI SDK accepts content: string |
-// Array) and are left untouched. Only genuinely-invalid types are normalized
-// to a safe empty array so every downstream path can safely call `.map()`.
+// Array) and are left untouched. Only genuinely-invalid types are normalized.
+//
+// Invalid content is BACKFILLED, not blanked, for roles the provider requires to
+// be non-empty. Emitting `content: []` here would trade a crash for a 400
+// ("user messages must have non-empty content"), and blanking a user turn also
+// re-opens the trailing-assistant prefill 400 once the empty message is dropped
+// downstream. An assistant gets `[]` because it carries no obligation: the
+// non-empty invariant drops empty assistant residue and the trailing-user guard
+// then re-establishes the prefill invariant.
 function normalizeContentArray(msgs: ModelMessage[]): ModelMessage[] {
   return msgs.map((msg) => {
     if (typeof msg.content === "string" || Array.isArray(msg.content)) return msg
-    // object / undefined / null — not a valid ModelMessage content shape;
-    // wrap in an empty array so .map() downstream never throws.
-    return { ...msg, content: [] } as ModelMessage
+    if (msg.role === "assistant") return { ...msg, content: [] } as ModelMessage
+    return { ...msg, content: [{ type: "text", text: EMPTY_CONTENT_PLACEHOLDER }] } as ModelMessage
   })
 }
 
@@ -810,6 +912,11 @@ export function message(msgs: ModelMessage[], model: Provider.Model, options: Re
   msgs = limitImages(msgs, model)
   msgs = normalizeMessages(msgs, model, options)
   msgs = forceAnthropicReasoningContent(msgs, model)
+  // Ordering is load-bearing (see ensureTrailingUserMessage's ordering contract):
+  // resolve EMPTY content first, then the trailing-assistant/prefill invariant.
+  // Emptiness is provider-agnostic because the AI SDK strips empty user text
+  // parts for every provider, downstream of everything here.
+  msgs = ensureNonEmptyContent(msgs)
   // SAFE prefill guard: never let the request end with an assistant (prefill)
   // message a provider (e.g. Bedrock) would reject, without deleting a completed
   // reply. Drops only empty residue; appends a continuation user turn otherwise.
