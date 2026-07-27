@@ -25,6 +25,11 @@ const DEFAULT_CACHE_TTL = 300_000
 // checkpoint thresholds. Users can override via cfg.checkpoint.reserved.
 const CHECKPOINT_RESERVED = 13_000
 const MAX_WRITER_FAILURES = 3
+// How many times the retry watcher re-enters the bounded waitForWriter (5min
+// each) before it stops waiting for a writer that has not settled. Caps the
+// watcher fiber's lifetime at ~1h so a permanently stuck writer cannot pin it
+// for the life of the process.
+const MAX_WRITER_WAIT_EXTENSIONS = 12
 
 /**
  * Default checkpoint thresholds by context window size.
@@ -297,7 +302,9 @@ export const layer: Layer.Layer<
           // Fork a watcher that settles after the detached writer fiber
           // finishes. On success, clear the failure counter. On failure,
           // increment the counter; if below MAX_WRITER_FAILURES, clear the
-          // session's crossed thresholds so the next iteration retries.
+          // session's crossed thresholds so the next iteration retries. The
+          // wait is extended across bound expiries so what gets booked is the
+          // writer's REAL outcome, never the mere fact that it was slow.
           //
           // Known narrow race: between tryStartCheckpointWriter returning "started" and
           // the watcher's forkDetach scheduling, a very-fast writer fiber can
@@ -309,15 +316,44 @@ export const layer: Layer.Layer<
           // tryStartCheckpointWriter return the Deferred handle so the watcher doesn't
           // re-read the writers map.
           yield* Effect.gen(function* () {
-            const result = yield* checkpoint.waitForWriter(input.sessionID)
+            // waitForWriter is bounded (5min). Expiry means "still in flight",
+            // not "failed" — but returning here would book the writer's real
+            // outcome NOWHERE: this fiber is the only thing holding the
+            // per-fire accounting, and writerFailures is private to this
+            // layer, so the checkpoint settle watcher cannot reach it. A
+            // writer that genuinely fails at, say, 400s would then never tick
+            // the counter (making the cap unreachable for exactly the slow
+            // regime that motivated the "timeout" outcome), and a writer that
+            // succeeds at 400s would never CLEAR a counter left at 1-2 by
+            // earlier fast failures. So keep waiting across bound expiries and
+            // account for the settled result.
+            //
+            // Each extension re-enters waitForWriter, which re-reads the
+            // writers map. Two microsecond-wide windows are accepted rather
+            // than papered over: (1) the writer settles between our expiry and
+            // the re-entry, so the entry is gone and we get "no-writer" — no
+            // outcome to attribute, same as the pre-existing fast-writer race
+            // noted above; (2) a queued writer was drained into a fresh entry in
+            // that window, so we book ITS outcome instead — still a real
+            // outcome for this session. Extensions are capped so a permanently
+            // stuck writer cannot hold this fiber forever.
+            let result = yield* checkpoint.waitForWriter(input.sessionID)
+            for (let extension = 1; result === "timeout"; extension++) {
+              if (extension > MAX_WRITER_WAIT_EXTENSIONS) {
+                log.warn("checkpoint writer still in flight after max wait extensions — stopped waiting", {
+                  sessionID: input.sessionID,
+                  extensions: MAX_WRITER_WAIT_EXTENSIONS,
+                })
+                return
+              }
+              result = yield* checkpoint.waitForWriter(input.sessionID)
+            }
             if (result === "success") {
               writerFailures.delete(input.sessionID)
               return
             }
-            // "no-writer" and "timeout" both mean "not a settled failure". A
-            // timed-out wait leaves the writer in flight (and still able to
-            // advance the watermark), so counting it would retire a
-            // merely-slow-but-working writer. Only a real failure ticks below.
+            // Only "no-writer" reaches here besides "failure": the writer
+            // settled before we could observe it, so there is nothing to book.
             if (result !== "failure") return
             const next = (writerFailures.get(input.sessionID) ?? 0) + 1
             writerFailures.set(input.sessionID, next)

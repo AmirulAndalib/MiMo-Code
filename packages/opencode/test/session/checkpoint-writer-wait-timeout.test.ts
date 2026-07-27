@@ -108,11 +108,18 @@ describe("SessionCheckpoint.waitForWriter", () => {
         })
         expect(started).toBe("started")
 
-        // Drive past the 5-minute internal bound on the TestClock. The writer's
-        // Deferred is still unresolved, so the wait expires while the writer is
-        // genuinely in flight.
+        // Pin the BOUND, not just the outcome. At 4 minutes the wait must still
+        // be pending: without this, shrinking the bound to (say) 1s would
+        // reintroduce the original bug in a new shape — every honest 60-180s
+        // writer would report "timeout" — and a lone `adjust("6 minutes")`
+        // assertion would still pass.
         const fiber = yield* Effect.forkChild(svc.waitForWriter(info.id))
-        yield* TestClock.adjust("6 minutes")
+        yield* TestClock.adjust("4 minutes")
+        expect(fiber.pollUnsafe()).toBeUndefined()
+
+        // Now cross the 5-minute bound. The writer's Deferred is still
+        // unresolved, so the wait expires while the writer is genuinely in flight.
+        yield* TestClock.adjust("2 minutes")
         const result = yield* Fiber.join(fiber)
 
         // Regression: this used to be "failure", which made the prune retry
@@ -120,7 +127,11 @@ describe("SessionCheckpoint.waitForWriter", () => {
         // "gave up after max consecutive failures" — permanently disabling
         // checkpointing for a session whose writers were only slow.
         expect(result).toBe("timeout")
-        expect(result).not.toBe("failure")
+
+        // The expiry must not have cancelled or retired the writer: it is still
+        // in flight and still owns the watermark advance. This is the property
+        // that makes "timeout" honest rather than a renamed failure.
+        expect(yield* svc.isWriterRunning(info.id)).toBe(true)
       }),
     ),
   )

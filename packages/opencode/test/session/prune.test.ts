@@ -367,6 +367,85 @@ describe("SessionPrune.fireCheckpoints writer-failure retry", () => {
       { checkpoint: { thresholds: ["50%"] } },
     )
   })
+
+  // The PR's whole thesis lives here, not in waitForWriter's return value: a
+  // bounded wait that expires must not be booked as a writer failure, and must
+  // not lose the writer's real outcome either. The stub's outcome queue is
+  // shifted once per waitForWriter call, so a "timeout" entry models one
+  // expired 5-minute bound followed by whatever comes next.
+  test("a timed-out wait never ticks the counter, and the writer's real success clears it", async () => {
+    const harness = makeRetryHarness()
+    const promptOps = {} as any
+
+    await runWithHarness(
+      harness,
+      Effect.gen(function* () {
+        const svc = yield* SessionPrune.Service
+        const ssn = yield* SessionNs.Service
+        const info = yield* ssn.create({})
+        const model = createModel({ context: 100_000, output: 32_000 })
+
+        // Fires 1-2 fail fast → counter 1, 2 (each clears crossed, so the next
+        // fire re-enqueues). Fire 3's writer blows through two bound expiries
+        // and THEN succeeds: the counter must be cleared, not frozen at 2.
+        harness.outcomes.push("failure", "failure", "timeout", "timeout", "success")
+        for (let i = 0; i < 3; i++) {
+          yield* svc.fireCheckpoints({ sessionID: info.id, model, tokens: makeTokens(), promptOps })
+          yield* Effect.sleep(100)
+        }
+        expect(harness.state.enqueueCount).toBe(3)
+
+        // Re-cross the threshold and fail fast twice more. Because fire 3's
+        // late success reset the counter, these land at 1 and 2 — below the cap
+        // — so each clears crossed and the following fire enqueues again.
+        // If a post-timeout success did NOT clear the counter (the gap this
+        // test pins), the first of these would land at 3, trip "gave up", keep
+        // crossed set, and the final fire would not enqueue → 5, not 6.
+        yield* svc.resetThresholds(info.id)
+        harness.outcomes.push("failure", "failure", "failure")
+        for (let i = 0; i < 3; i++) {
+          yield* svc.fireCheckpoints({ sessionID: info.id, model, tokens: makeTokens(), promptOps })
+          yield* Effect.sleep(100)
+        }
+        expect(harness.state.enqueueCount).toBe(6)
+      }),
+      { checkpoint: { thresholds: ["50%"] } },
+    )
+  })
+
+  test("a writer that fails past the wait bound is still counted, so the cap stays reachable", async () => {
+    const harness = makeRetryHarness()
+    const promptOps = {} as any
+
+    await runWithHarness(
+      harness,
+      Effect.gen(function* () {
+        const svc = yield* SessionPrune.Service
+        const ssn = yield* SessionNs.Service
+        const info = yield* ssn.create({})
+        const model = createModel({ context: 100_000, output: 32_000 })
+
+        // Three writers, each slow enough to blow the bound and then genuinely
+        // failing — the realistic shape for a writer doing ~13 sequential LLM
+        // round-trips. If the watcher gave up at the bound instead of waiting,
+        // no failure would ever be booked: crossed would never be cleared, so
+        // fire 2 would not even enqueue and this would read 1.
+        harness.outcomes.push("timeout", "failure", "timeout", "failure", "timeout", "failure")
+        for (let i = 0; i < 3; i++) {
+          yield* svc.fireCheckpoints({ sessionID: info.id, model, tokens: makeTokens(), promptOps })
+          yield* Effect.sleep(100)
+        }
+        expect(harness.state.enqueueCount).toBe(3)
+
+        // Fire 3's watcher hit the cap, so crossed was left set → no enqueue.
+        // A permanently-broken-but-slow writer now gives up like a fast one.
+        yield* svc.fireCheckpoints({ sessionID: info.id, model, tokens: makeTokens(), promptOps })
+        yield* Effect.sleep(100)
+        expect(harness.state.enqueueCount).toBe(3)
+      }),
+      { checkpoint: { thresholds: ["50%"] } },
+    )
+  })
 })
 
 describe("defaultThresholdsFor (Part 2 density)", () => {

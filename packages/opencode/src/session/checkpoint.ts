@@ -982,13 +982,14 @@ export const layer: Layer.Layer<
       const state = writers.get(sessionID)
       if (!state) return "no-writer" as const
 
-      // v2 writers manage 3 file types and frequently take 60-180s; pad to
-      // 5min so a long-but-honest writer is not mistaken for a failure by
-      // the prune retry watcher. AgentOutcome → WriterOutcome translation:
-      // success → "success", failure / cancelled → "failure".
+      // v2 writers manage 3 file types and frequently take 60-180s, so the
+      // wait is bounded at 5min rather than left unbounded. AgentOutcome →
+      // WriterOutcome translation: success → "success", failure / cancelled →
+      // "failure", bound expired with the writer still unsettled → "timeout".
       //
-      // The bound expiring is NOT a writer failure. This timeout does not
-      // cancel the writer, and the settle watcher that owns the watermark
+      // The bound expiring is NOT a writer failure — the padding is not what
+      // keeps the two apart, the distinct return value is. This timeout does
+      // not cancel the writer, and the settle watcher that owns the watermark
       // advance (see tryStartCheckpointWriter) awaits the SAME Deferred with no
       // bound — so a slow-but-successful writer still advances
       // last_checkpoint_message_id after we stop waiting. Reporting "failure"
@@ -996,13 +997,23 @@ export const layer: Layer.Layer<
       // and MAX_WRITER_FAILURES such waits then tripped "gave up after max
       // consecutive failures", permanently disabling checkpointing for a
       // session whose every writer had actually succeeded. Report "timeout" so
-      // callers can distinguish "still in flight" from "settled unsuccessfully"
-      // (prune's `result !== "failure"` guard already skips the counter).
+      // callers can distinguish "still in flight" from "settled unsuccessfully";
+      // prune's `result !== "failure"` guard skips the counter, and prune keeps
+      // waiting so the writer's real outcome is still booked (see prune.ts).
       const outcome = yield* Deferred.await(state.writing).pipe(
         Effect.timeout(300_000),
         Effect.catch(() => Effect.succeed("timeout" as const)),
       )
-      if (outcome === "timeout") return "timeout" as const
+      if (outcome === "timeout") {
+        // Hitting the bound must stay observable: the caller reports neither a
+        // success nor a failure, so without this line a writer stuck past 5min
+        // produces no log at all until it finally settles.
+        log.info("checkpoint writer wait bound expired — writer still in flight", {
+          sessionID,
+          boundMs: 300_000,
+        })
+        return "timeout" as const
+      }
       return outcome.status === "success" ? ("success" as const) : ("failure" as const)
     })
 
