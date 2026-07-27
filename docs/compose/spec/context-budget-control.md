@@ -3,7 +3,7 @@ feature: context-budget-control
 status: delivered
 updated: 2026-07-27
 branch: feat/context-budget-control
-commits: 028f3178..063c84ee
+commits: 028f3178..3b15062d
 ---
 
 # Context Budget Control (user-adjustable early compaction)
