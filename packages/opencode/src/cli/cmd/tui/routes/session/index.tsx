@@ -99,6 +99,7 @@ import { DialogGoUpsell } from "../../component/dialog-go-upsell"
 import { DialogTokenPlan } from "../../component/dialog-token-plan"
 import { SessionRetry } from "@/session/retry"
 import { getRevertDiffFiles } from "../../util/revert-diff"
+import * as Collapse from "../../util/collapse"
 import {
   createFreeApiSunsetSignal,
   freeApiModelNameKey,
@@ -2285,12 +2286,14 @@ function WorkItemTask(props: ToolProps<typeof TaskTool>) {
   )
 }
 
-// Renderer for the `exec` batch-orchestration tool. Default view is a
-// single InlineTool line — spinner + live aggregated call counts while running
-// (published through ctx.metadata), one muted summary line when done. Clicking
-// swaps to the full BlockTool with code, result, logs and per-call trace.
+// Renderer for the `exec` batch-orchestration tool, shaped like <Bash>: once the
+// script source has streamed in it lives in a BlockTool, and collapsing only caps
+// how much of the script and its output are shown (head + "…") instead of hiding
+// both behind a one-line summary. The title carries the live aggregated call
+// counts published through ctx.metadata.
 function ToolScript(props: ToolProps<typeof ToolScriptTool>) {
   const { theme } = useTheme()
+  const ctx = use()
   const [expanded, setExpanded] = createSignal(false)
   const isRunning = createMemo(() => props.part.state.status === "running")
   const meta = createMemo(() =>
@@ -2314,33 +2317,47 @@ function ToolScript(props: ToolProps<typeof ToolScriptTool>) {
     return failed() ? `${status()} · ${base}` : base
   })
 
+  const code = createMemo(() => ((props.input.code as string | undefined) ?? "").trim())
+  // exec embeds nested tool output (a `bash` call's stdout) into <return_value>
+  // and <logs>, so escape sequences reach this renderer raw.
+  const output = createMemo(() => stripAnsi(props.output?.trim() ?? ""))
+  const columns = createMemo(() => Collapse.columns(ctx.width))
+  const overflow = createMemo(
+    () =>
+      Collapse.rows(code(), columns()) > TOOL_BLOCK_COLLAPSE_MAX_ROWS ||
+      Collapse.rows(output(), columns()) > TOOL_BLOCK_COLLAPSE_MAX_ROWS,
+  )
+  const clip = (content: string) => {
+    if (expanded()) return content
+    return Collapse.clip(content, columns(), TOOL_BLOCK_COLLAPSE_MAX_ROWS)
+  }
+
   return (
-    <Show
-      when={expanded()}
-      fallback={
-        <InlineTool
-          icon="»"
-          iconColor={failed() ? theme.error : undefined}
-          pending="Writing script..."
-          complete={!isRunning()}
-          spinner={isRunning()}
+    <Switch>
+      <Match when={code()}>
+        <BlockTool
+          title={`# exec · ${summary()}`}
           part={props.part}
-          onClick={() => setExpanded(true)}
+          spinner={isRunning()}
+          onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}
         >
-          exec {summary()}
+          <box gap={1}>
+            <text fg={theme.textMuted}>{clip(code())}</text>
+            <Show when={output()}>
+              <text fg={failed() ? theme.error : theme.text}>{clip(output())}</text>
+            </Show>
+            <Show when={overflow()}>
+              <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+            </Show>
+          </box>
+        </BlockTool>
+      </Match>
+      <Match when={true}>
+        <InlineTool icon="»" pending="Writing script..." complete={false} part={props.part}>
+          exec
         </InlineTool>
-      }
-    >
-      <BlockTool title={`# exec · ${summary()}`} part={props.part} onClick={() => setExpanded(false)}>
-        <box gap={1}>
-          <text fg={theme.textMuted}>{((props.input.code as string | undefined) ?? "").trim()}</text>
-          <Show when={props.output}>
-            <text fg={failed() ? theme.error : theme.text}>{props.output}</text>
-          </Show>
-          <text fg={theme.textMuted}>Click to collapse</text>
-        </box>
-      </BlockTool>
-    </Show>
+      </Match>
+    </Switch>
   )
 }
 
@@ -2761,7 +2778,6 @@ function CollapsibleError(props: { error: string; paddingLeft?: number }) {
 
 function InlineTool(props: {
   icon: string
-  iconColor?: RGBA
   complete: any
   pending: string
   spinner?: boolean
@@ -2848,7 +2864,7 @@ function InlineTool(props: {
         <Match when={true}>
           <text paddingLeft={3} fg={fg()} attributes={denied() || recoverable() || props.dismissed ? TextAttributes.STRIKETHROUGH : undefined}>
             <Show fallback={<>~ {props.pending}</>} when={props.complete}>
-              <span style={{ fg: props.iconColor }}>{props.icon}</span> {props.children}
+              {props.icon} {props.children}
             </Show>
           </text>
         </Match>
@@ -2909,27 +2925,27 @@ function BlockTool(props: {
 
 const TOOL_COLLAPSE_MAX_LINES = 3
 const TOOL_COLLAPSE_MAX_LINE_LENGTH = 120
-
-function displayLines(content: string) {
-  if (!content) return []
-  return content.replace(/\n$/, "").split("\n")
-}
+// Height budget for block-shaped tools (bash, exec) whose collapsed state still
+// shows content — collapsing caps the flood, it doesn't hide the output. Counted
+// in rendered rows, see @tui/util/collapse.
+const TOOL_BLOCK_COLLAPSE_MAX_ROWS = 10
 
 function hasLongDisplayLine(content: string) {
-  return displayLines(content).some((line) => line.length > TOOL_COLLAPSE_MAX_LINE_LENGTH)
+  return Collapse.lines(content).some((line) => line.length > TOOL_COLLAPSE_MAX_LINE_LENGTH)
 }
 
 function Bash(props: ToolProps<typeof BashTool>) {
   const { theme } = useTheme()
+  const ctx = use()
   const sync = useSync()
   const isRunning = createMemo(() => props.part.state.status === "running")
   const output = createMemo(() => stripAnsi(props.metadata.output?.trim() ?? ""))
   const [expanded, setExpanded] = createSignal(false)
-  const lines = createMemo(() => output().split("\n"))
-  const overflow = createMemo(() => lines().length > 10)
+  const columns = createMemo(() => Collapse.columns(ctx.width))
+  const overflow = createMemo(() => Collapse.rows(output(), columns()) > TOOL_BLOCK_COLLAPSE_MAX_ROWS)
   const limited = createMemo(() => {
-    if (expanded() || !overflow()) return output()
-    return [...lines().slice(0, 10), "…"].join("\n")
+    if (expanded()) return output()
+    return Collapse.clip(output(), columns(), TOOL_BLOCK_COLLAPSE_MAX_ROWS)
   })
 
   const workdirDisplay = createMemo(() => {
@@ -2993,7 +3009,7 @@ function Write(props: ToolProps<typeof WriteTool>) {
     if (!props.input.content) return ""
     return props.input.content
   })
-  const lineCount = createMemo(() => displayLines(code()).length)
+  const lineCount = createMemo(() => Collapse.lines(code()).length)
   const collapsed = createMemo(() => lineCount() > TOOL_COLLAPSE_MAX_LINES || hasLongDisplayLine(code()))
 
   return (
