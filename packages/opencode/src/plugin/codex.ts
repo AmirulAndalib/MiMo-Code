@@ -14,6 +14,12 @@ const ISSUER = "https://auth.openai.com"
 const CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses"
 const OAUTH_PORT = 1455
 const OAUTH_POLLING_SAFETY_MARGIN_MS = 3000
+// Prompt ceiling observed for gpt-* models through the ChatGPT Codex backend, which is
+// lower than what models.dev reports for the raw OpenAI API. This is an empirical value,
+// not a documented one, and may differ per ChatGPT plan — it is applied as a clamp so a
+// wrong guess can only compact earlier, never send an over-long prompt. Users who need a
+// lower trigger can set `compaction.max_context`; raising it back requires a code change.
+const CODEX_GPT_CONTEXT_CAP = 300_000
 
 interface PkceCodes {
   verifier: string
@@ -376,7 +382,19 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
             output: 0,
             cache: { read: 0, write: 0 },
           }
-          if (modelID.startsWith("gpt-")) model.limit.context = 300_000
+          // The Codex backend accepts a smaller prompt than the raw OpenAI API for
+          // gpt-* models. Clamp, never raise: models whose real window is already
+          // below the cap (gpt-4o at 128K) must keep it, and limit.context === 0 is
+          // the sentinel that disables overflow handling entirely.
+          // limit.input is what Overflow.usable() reads when present, so it must be
+          // clamped too — but only when the catalog already publishes it. Introducing
+          // one would switch usable() to the input branch and drop the output reserve.
+          // The v1 SDK model type predates limit.input; the runtime object carries it.
+          const limit = model.limit as { context: number; output: number; input?: number }
+          if (modelID.startsWith("gpt-") && limit.context > 0) {
+            limit.context = Math.min(limit.context, CODEX_GPT_CONTEXT_CAP)
+            if (limit.input) limit.input = Math.min(limit.input, CODEX_GPT_CONTEXT_CAP)
+          }
         }
 
         return {
