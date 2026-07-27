@@ -229,3 +229,114 @@ test("shutdown flushes and marks the active file completed", async () => {
     ),
   ).toBe(false)
 })
+
+test("flush persists records without closing the file sink", async () => {
+  await using tmp = await tmpdir()
+  Global.Path.log = tmp.path
+  await Log.init({ print: false })
+  const active = Log.file()
+  Log.Default.info("before flush")
+
+  await Log.flush()
+  expect(await fs.readFile(active, "utf8")).toContain("before flush")
+
+  Log.Default.info("during teardown")
+  await Log.shutdown()
+
+  expect(await fs.readFile(Log.file(), "utf8")).toContain("during teardown")
+})
+
+// The TUI renders on the same terminal the process writes stderr to, so a log
+// record must never reach stderr unless the user asked for printed logs. A
+// child process keeps the module-level sink state honest.
+async function isolate(body: string, dir: string) {
+  const src = path.join(import.meta.dir, "..", "..", "src")
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "-e",
+      [
+        `const { Global } = await import(${JSON.stringify(path.join(src, "global", "index.ts"))})`,
+        `const Log = await import(${JSON.stringify(path.join(src, "util", "log.ts"))})`,
+        `Global.Path.log = ${JSON.stringify(dir)}`,
+        body,
+      ].join("\n"),
+    ],
+    { stdout: "pipe", stderr: "pipe", env: { ...process.env, [MIMOCODE_PROCESS_ROLE]: "worker" } },
+  )
+  const [stdout, stderr] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()])
+  expect(await child.exited).toBe(0)
+  return { stdout, stderr }
+}
+
+test("records written after shutdown never reach stderr", async () => {
+  await using tmp = await tmpdir()
+
+  const result = await isolate(
+    [
+      `await Log.init({ print: false })`,
+      `Log.Default.info("before shutdown")`,
+      `await Log.shutdown()`,
+      `Log.Default.info("teardown after shutdown")`,
+      `await Log.flush()`,
+    ].join("\n"),
+    tmp.path,
+  )
+
+  expect(result.stderr).toBe("")
+  expect(result.stdout).toBe("")
+  const files = await fs.readdir(tmp.path)
+  expect(files).toHaveLength(1)
+  const contents = await fs.readFile(path.join(tmp.path, files[0]), "utf8")
+  expect(contents).toContain("before shutdown")
+  expect(contents).not.toContain("teardown after shutdown")
+})
+
+test("records written before initialization never reach stderr", async () => {
+  await using tmp = await tmpdir()
+
+  const result = await isolate([`Log.Default.info("before init")`, `await Log.flush()`].join("\n"), tmp.path)
+
+  expect(result.stderr).toBe("")
+  expect(result.stdout).toBe("")
+})
+
+test("print mode keeps writing records to stderr", async () => {
+  await using tmp = await tmpdir()
+
+  const result = await isolate(
+    [`await Log.init({ print: true })`, `Log.Default.info("printed record")`, `await Log.flush()`].join("\n"),
+    tmp.path,
+  )
+
+  expect(result.stderr).toContain("printed record")
+  expect(await fs.readdir(tmp.path)).toHaveLength(0)
+})
+
+test("an unusable log directory reports nothing to stderr", async () => {
+  await using tmp = await tmpdir()
+  const blocked = path.join(tmp.path, "not-a-directory")
+  await fs.writeFile(blocked, "file")
+
+  const result = await isolate(
+    [`await Log.init({ print: false })`, `Log.Default.info("cannot be written")`, `await Log.flush()`].join("\n"),
+    blocked,
+  )
+
+  expect(result.stderr).toBe("")
+  expect(result.stdout).toBe("")
+})
+
+test("print mode is unaffected by an unusable log directory", async () => {
+  await using tmp = await tmpdir()
+  const blocked = path.join(tmp.path, "not-a-directory")
+  await fs.writeFile(blocked, "file")
+
+  const result = await isolate(
+    [`await Log.init({ print: true })`, `Log.Default.info("printed record")`, `await Log.flush()`].join("\n"),
+    blocked,
+  )
+
+  expect(result.stderr).toContain("printed record")
+  expect(result.stderr).not.toContain("failed")
+})

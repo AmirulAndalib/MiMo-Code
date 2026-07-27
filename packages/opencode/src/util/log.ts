@@ -65,7 +65,7 @@ let written = 0
 let rotation = true
 let sequence = 0
 let pending = Promise.resolve()
-let failureReported = false
+let printing = false
 
 function stamp() {
   return new Date().toISOString().replace(/[:.]/g, "")
@@ -76,7 +76,7 @@ export async function init(options: Options) {
     await closeCurrent()
     if (options.level) level = options.level
     rotation = options.rotate ?? !Flag.MIMOCODE_DISABLE_LOG_ROTATION
-    failureReported = false
+    printing = options.print
     const role = (process.env.MIMOCODE_PROCESS_ROLE ?? "main").replace(/[^a-zA-Z0-9._-]/g, "-")
     await cleanup(Global.Path.log, { pid: process.pid, role })
     if (options.print) {
@@ -93,21 +93,18 @@ export async function init(options: Options) {
   })
 }
 
-function report(error: unknown) {
-  if (failureReported) return
-  failureReported = true
-  const message = error instanceof Error ? error.message : String(error)
-  try {
-    process.stderr.write(`mimocode log write failed: ${message}\n`)
-  } catch {}
-}
+// Log failures are swallowed: a file failure happens while logging to a file,
+// which is exactly when stderr belongs to the rendered TUI screen, and print
+// mode can only fail on the very stderr a report would need. The listener stays
+// because an unhandled stream "error" event would crash the process.
+function swallow() {}
 
 function write(msg: string) {
   void enqueue(() => append(msg))
 }
 
 function enqueue(operation: () => void | Promise<void>) {
-  pending = pending.then(operation).catch(report)
+  pending = pending.then(operation).catch(swallow)
   return pending
 }
 
@@ -116,7 +113,11 @@ async function append(msg: string) {
   if (rotation && written > 0 && written + size > MAX_FILE_SIZE) await rotate()
   const target = stream
   if (!target) {
-    process.stderr.write(msg)
+    // Only --print-logs may reach the terminal. Without a file sink (before
+    // init, after shutdown, or when the sink failed) records are dropped: the
+    // TUI shares stderr with the rendered screen, so leaking log lines there
+    // corrupts the display.
+    if (printing) process.stderr.write(msg)
     return
   }
   await new Promise<void>((resolve, reject) => {
@@ -143,7 +144,7 @@ async function rotate() {
 async function open(targetPath: string) {
   const target = createWriteStream(targetPath, { flags: "a" })
   stream = target
-  target.on("error", report)
+  target.on("error", swallow)
   const opened = await new Promise<boolean>((resolve) => {
     target.once("open", () => resolve(true))
     target.once("error", () => resolve(false))
@@ -159,11 +160,7 @@ async function move(source: string, target: string) {
   if (renamed) return true
   const copied = await fs.copyFile(source, target).then<"copied", "missing" | "failed">(
     () => "copied",
-    (error) => {
-      if (error instanceof Error && "code" in error && error.code === "ENOENT") return "missing"
-      report(error)
-      return "failed"
-    },
+    (error) => (error instanceof Error && "code" in error && error.code === "ENOENT" ? "missing" : "failed"),
   )
   if (copied === "missing") return true
   if (copied === "failed") return false
@@ -174,10 +171,7 @@ async function move(source: string, target: string) {
   if (removed) return true
   return fs.truncate(source, 0).then(
     () => true,
-    (error) => {
-      report(error)
-      return false
-    },
+    () => false,
   )
 }
 
