@@ -229,6 +229,7 @@ export const dict = {
   "tui.skill.skill-creator.description": "エージェントスキルの作成・レビュー・改善",
   "tui.skill.drive-mimo.description": "別の MiMoCode プロセスをプログラムで操作——ヘッドレス JSON イベントまたは tmux 経由のインタラクティブ TUI",
   "tui.skill.research-paper-writing.description": "学術論文の執筆・推敲・査読者視点の批評",
+  "tui.skill.playwright.description": "ターミナルから実ブラウザの操作を自動化",
   "tui.skill.codex.description": "スクリプト、CI、Docker、Kubernetes で Codex CLI を自律実行",
   "tui.skill.claude-code.description": "コーディングタスクを Claude Code CLI に委任",
   "tui.skill.grok-build.description": "コマンドラインから Grok Build を操作",
