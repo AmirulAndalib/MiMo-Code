@@ -281,6 +281,7 @@ export const dict = {
   "tui.skill.research-paper-writing.description": "Rédiger, polir et critiquer des articles académiques avec l'œil d'un relecteur",
   "tui.skill.codex.description": "Exécuter Codex CLI de façon autonome dans les scripts, la CI, Docker et Kubernetes",
   "tui.skill.claude-code.description": "Déléguer des tâches de programmation à Claude Code CLI",
+  "tui.skill.grok-build.description": "Utiliser Grok Build depuis la ligne de commande",
   "tui.skill.design-blueprint.description":
     "Produire un plan de design (DESIGN.md + Decision Trace) avant tout mockup",
   "tui.skill.super-research.description":
