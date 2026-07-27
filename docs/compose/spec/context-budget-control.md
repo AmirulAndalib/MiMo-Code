@@ -14,7 +14,7 @@ commits: 028f3178..063c84ee
 
 The three TUI surfaces that previously divided by the raw `limit.context` (prompt footer, subagent footer, sidebar) now divide by the trigger and mark a configured budget with `↓`, `/status` gained a Context block (window, budget + source, reserved, compact-at, used), and `mimocode models <provider>` prints the same numbers without `--verbose`. `/context-limit` opens a preset picker (Model default / 200K / 300K / 500K / 1M / Custom…) that writes only the current model's key into the global config, refusing while a session is busy because a config write disposes the instance and cancels in-flight runners.
 
-Separately, the merged PR #1926 was corrected: it assigned `limit.context = 300_000` for every `gpt-*` model under Codex OAuth, which *raised* the window for gpt-4o (128K) and gpt-3.5-turbo (16K), broke the `limit.context === 0` sentinel for image models, and never moved the compaction trigger for the 1M-class models it targeted because `usable()` reads `limit.input` when the catalog publishes one. It is now a clamp on both fields, applied only when a window exists and only when `limit.input` already exists.
+Separately, the merged PR #1926 was corrected: it assigned `limit.context = 300_000` for every `gpt-*` model under Codex OAuth, which *raised* the window for gpt-4o (128K) and gpt-3.5-turbo (16K), broke the `limit.context === 0` sentinel for image models, and never moved the compaction trigger for the 1M-class models it targeted because `usable()` reads `limit.input` when the catalog publishes one. It is now a clamp on both fields at **372,000** — the capacity OpenAI's Codex registry declares and that a 350,317-token request demonstrably reaches — applied only when a window exists and only when `limit.input` already exists. The 272K figure circulating for Codex is the 2x-input billing boundary, not capacity, so it ships as a documented `compaction.max_context` recipe (see S2.5).
 
 **Verification**
 
@@ -32,6 +32,7 @@ Separately, the merged PR #1926 was corrected: it assigned `limit.context = 300_
 3. Config merges cannot delete keys, and `null` would fail schema validation, so "reset to model default" is expressed as `0`. Writing a single leaf key (not a read-modify-write of the whole map) avoids promoting project-level entries into the user's global file and is safe for both the JSON `mergeDeep` and the JSONC `patchJsonc` writers.
 4. SDK regeneration is currently broken on `main`: `bun dev generate` emits a dangling `#/components/schemas/__schema0` ref from `ToolStateCompleted.providerOutput`, so `@hey-api/openapi-ts` fails. Confirmed at base commit; new config fields therefore need a narrow cast at the TUI boundary until that is fixed.
 5. `usable()` can be 0 for a positive window (window smaller than the reserves, or a large `compaction.reserved`), which would have rendered `Infinity%` in three footers. Any UI that divides by it needs the guard now in `tui/util/model.contextWindow`.
+6. Provider "context window" numbers in the wild are frequently a *billing* tier or a client's conservative default, not capacity — Codex ships 372K capacity, a 95% effective window, a 90% auto-compact default, and a 272K price boundary, all four called "the context window" somewhere. Ask which one a number is before hard-coding it into `limit`.
 
 ## [S1] Problem
 
@@ -170,20 +171,24 @@ Validation at write time (config load warns, slash command refuses): value must 
 
 ### S2.5 Provider-layer fix for Codex (independent of the user-facing knob)
 
-`packages/opencode/src/plugin/codex.ts:379` becomes a clamp that also closes the `limit.input` hole and respects the sentinel:
+`packages/opencode/src/plugin/codex.ts` becomes a clamp that also closes the `limit.input` hole and respects the sentinel:
 
 ```ts
-const CODEX_GPT_CAP = 300_000
-if (modelID.startsWith("gpt-") && model.limit.context > 0) {
-  model.limit.context = Math.min(model.limit.context, CODEX_GPT_CAP)
-  if (model.limit.input) model.limit.input = Math.min(model.limit.input, CODEX_GPT_CAP)
-  else model.limit.input = Math.min(model.limit.context, CODEX_GPT_CAP)
+const CODEX_GPT_CONTEXT_CAP = 372_000
+if (modelID.startsWith("gpt-") && limit.context > 0) {
+  limit.context = Math.min(limit.context, CODEX_GPT_CONTEXT_CAP)
+  if (limit.input) limit.input = Math.min(limit.input, CODEX_GPT_CONTEXT_CAP)
 }
 ```
 
-Setting `limit.input` is what actually moves the trigger; setting `limit.context` is what makes the display honest. Both are required. `gpt-image-*` / `gpt-3.5-turbo` / `gpt-4o` keep their real windows.
+Clamping `limit.input` is what actually moves the trigger; clamping `limit.context` is what makes the display honest. `limit.input` is only touched when the catalog already publishes one — introducing it would switch `usable()` to the input branch and silently drop the output reserve (that would move gpt-4o from 91,616 to 111,616). `gpt-image-*` / `gpt-3.5-turbo` / `gpt-4o` keep their real windows.
 
-Open question to resolve before implementing this task: is 300K the Codex-side prompt cap for *all* `gpt-*` models under ChatGPT OAuth, or plan-dependent? If plan-dependent, the literal must become a per-plan lookup or fall back to the catalog value; the clamp form above is safe either way (it can only reduce).
+The cap value, resolved during implementation (2026-07-27):
+
+- **372,000 = capacity.** OpenAI's Codex model registry declares `context_window = max_context_window = 372000` for the gpt-5.6 variants (openai/codex#31860 quotes the served catalog, which also applies `effective_context_window_percent: 95` and a 90% auto-compact default on top), and a direct Codex request with 350,317 input tokens completes (can1357/oh-my-pi#5705). So 272K is not a hard rejection boundary.
+- **272,000 = billing.** Prompts above 272K input are priced at 2x input / 1.5x output for the whole request, and Codex's bundled metadata was lowered from 372000 to 272000 (openai/codex#33972) to keep default sessions inside the cheaper tier — after openai/codex#32486 pointed out the 353.4K effective window ran ~81K past it.
+
+Those are the two quantities S1.1 separates, so the provider layer takes 372K and the 272K line is documented as a `compaction.max_context` recipe rather than baked into the cap. Users on plans with a smaller served catalog window (openai/codex#33069 reports 272K for Pro Lite) can lower it the same way; the clamp form can only reduce, so a stale literal never produces an over-long prompt.
 
 ### S2.6 Display / "how do I see my context window"
 
@@ -262,7 +267,7 @@ Rejected alternatives:
 Route D (do first, independent):
 
 - [x] T1: Replace the assignment in `plugin/codex.ts` with a clamp, including `limit.input` and the `limit.context === 0` guard — acceptance: `bun test test/plugin/codex.test.ts` asserts `gpt-5.6-sol` → `{context: 300K, input: 300K}`, `gpt-5.3-codex` → `{context: 300K, input: 272K}`, `gpt-4o` → `{context: 128K}` unchanged, `gpt-image-1` → `{context: 0}` unchanged, `o3` → `{context: 200K}` unchanged (covers: S2.5)
-- [ ] T2: Confirm the real Codex prompt cap per plan (docs or a probe request) and either keep the 300K literal or make it plan-derived — acceptance: the chosen value is documented in a code comment with its source (covers: S2.5; depends: T1). **Not done** — no authoritative source available; the comment now states the value is empirical and explains why a wrong guess is safe under a clamp.
+- [x] T2: Confirm the real Codex prompt cap and either keep the literal or make it plan-derived — acceptance: the chosen value is documented in a code comment with its source (covers: S2.5; depends: T1). Resolved to **372,000** with sources in the comment: OpenAI's Codex model registry declares `context_window = max_context_window = 372000` for the gpt-5.6 variants (openai/codex#31860 quotes the served catalog), and a direct Codex request with 350,317 input tokens completes (can1357/oh-my-pi#5705). The 272,000 figure that Codex's bundled metadata was lowered to (openai/codex#33972) is the >272K 2x-input / 1.5x-output billing boundary, i.e. a spending policy — documented as a `compaction.max_context` recipe instead of baked into the cap.
 
 Route A (substrate):
 

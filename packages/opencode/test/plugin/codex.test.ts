@@ -52,10 +52,10 @@ describe("plugin.codex", () => {
       )
 
       expect(Object.keys(provider.models)).toEqual(["gpt-5.6-sol", "gpt-5.3-codex", "gpt-4o", "gpt-image-1", "o3"])
-      expect(provider.models["gpt-5.6-sol"].limit).toEqual({ context: 300_000, input: 300_000 })
+      expect(provider.models["gpt-5.6-sol"].limit).toEqual({ context: 372_000, input: 372_000 })
       // 272K input cap is already below the Codex cap — it must survive untouched,
       // otherwise we would raise the trigger above what the provider accepts.
-      expect(provider.models["gpt-5.3-codex"].limit).toEqual({ context: 300_000, input: 272_000 })
+      expect(provider.models["gpt-5.3-codex"].limit).toEqual({ context: 372_000, input: 272_000 })
       // Real window below the cap: never raised.
       expect(provider.models["gpt-4o"].limit).toEqual({ context: 128_000 })
       // context 0 is the "overflow handling disabled" sentinel — leave it alone.

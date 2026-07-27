@@ -14,12 +14,21 @@ const ISSUER = "https://auth.openai.com"
 const CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses"
 const OAUTH_PORT = 1455
 const OAUTH_POLLING_SAFETY_MARGIN_MS = 3000
-// Prompt ceiling observed for gpt-* models through the ChatGPT Codex backend, which is
-// lower than what models.dev reports for the raw OpenAI API. This is an empirical value,
-// not a documented one, and may differ per ChatGPT plan — it is applied as a clamp so a
-// wrong guess can only compact earlier, never send an over-long prompt. Users who need a
-// lower trigger can set `compaction.max_context`; raising it back requires a code change.
-const CODEX_GPT_CONTEXT_CAP = 300_000
+// Hard prompt capacity of the ChatGPT Codex backend for gpt-* models, lower than what
+// models.dev reports for the raw OpenAI API. OpenAI's Codex model registry declares
+// context_window = max_context_window = 372000 for the gpt-5.6 variants
+// (openai/codex#31860 quotes the served catalog), and a direct Codex request with
+// 350,317 input tokens completes (can1357/oh-my-pi#5705), so 372K is capacity rather
+// than a billing boundary.
+//
+// Not to be confused with 272K: OpenAI prices prompts above 272K input at 2x input /
+// 1.5x output for the whole request, and Codex's bundled metadata was lowered to 272000
+// (openai/codex#33972) to keep default sessions under that line. That is a spending
+// policy, not a capacity limit, so it belongs in `compaction.max_context` — see the
+// Compaction section of the config docs.
+//
+// Applied as a clamp, so models whose real window is already smaller keep it.
+const CODEX_GPT_CONTEXT_CAP = 372_000
 
 interface PkceCodes {
   verifier: string
