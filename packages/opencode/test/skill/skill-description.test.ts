@@ -78,6 +78,7 @@ describe("skillDescription", () => {
 
   test("agent CLI skills have descriptions in every TUI locale", () => {
     for (const dict of [en, es, fr, ja, ru, zh, zht]) {
+      expect(dict["tui.skill.playwright.description"]).toBeTruthy()
       expect(dict["tui.skill.codex.description"]).toBeTruthy()
       expect(dict["tui.skill.claude-code.description"]).toBeTruthy()
       expect(dict["tui.skill.grok-build.description"]).toBeTruthy()
