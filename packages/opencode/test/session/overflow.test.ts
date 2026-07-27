@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { isOverflow, pressureLevel, usable } from "../../src/session/overflow"
+import { contextPressureLevel, isOverflow, pressureLevel, usable } from "../../src/session/overflow"
 import { Token } from "../../src/util"
 import { Session as SessionNs } from "../../src/session"
 import type { Provider } from "../../src/provider"
@@ -79,6 +79,19 @@ describe("pressureLevel", () => {
     const limit = usable({ cfg, model })
     const tokens = { input: Math.floor(limit * 0.9), output: 0, cache: { read: 0, write: 0 } } as any
     expect(pressureLevel({ cfg, tokens, model })).toBe(0)
+    expect(contextPressureLevel({ cfg, tokens, model })).toBe(3)
+  })
+
+  test("uses exact context pressure boundaries independently of compaction policy", () => {
+    const model = createModel({ context: 200_000 })
+    const cfg = mockCfg({ auto: false })
+    const limit = usable({ cfg, model })
+    const tokens = (ratio: number) =>
+      ({ input: limit * ratio, output: 0, cache: { read: 0, write: 0 } }) as any
+
+    expect(contextPressureLevel({ cfg, tokens: tokens(0.5), model })).toBe(1)
+    expect(contextPressureLevel({ cfg, tokens: tokens(0.7), model })).toBe(2)
+    expect(contextPressureLevel({ cfg, tokens: tokens(0.85), model })).toBe(3)
   })
 
   test("returns 0 when context limit is 0", () => {

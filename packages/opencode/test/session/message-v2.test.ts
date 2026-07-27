@@ -130,6 +130,61 @@ function basePart(messageID: string, id: string) {
 }
 
 describe("session.message-v2.toModelMessage", () => {
+  test("preserves structured provider-executed outputs", async () => {
+    const userID = "m-provider-user"
+    const assistantID = "m-provider-assistant"
+    const providerOutput = { results: [{ title: "Result", url: "https://example.com" }] }
+    const messages = await MessageV2.toModelMessages(
+      [
+        {
+          info: userInfo(userID),
+          parts: [{ ...basePart(userID, "u-provider"), type: "text", text: "search" }],
+        },
+        {
+          info: assistantInfo(assistantID, userID),
+          parts: [
+            {
+              ...basePart(assistantID, "a-provider"),
+              type: "tool",
+              tool: "web_search",
+              callID: "provider-call",
+              metadata: { providerExecuted: true, test: { itemId: "call-item" } },
+              state: {
+                status: "completed",
+                input: { query: "example" },
+                output: JSON.stringify(providerOutput),
+                providerOutput,
+                providerMetadata: { test: { itemId: "result-item" } },
+                title: "",
+                metadata: {},
+                time: { start: 0, end: 1 },
+              },
+            },
+          ],
+        },
+      ] as MessageV2.WithParts[],
+      model,
+    )
+
+    expect(messages[1]).toMatchObject({
+      role: "assistant",
+      content: [
+        {
+          type: "tool-call",
+          toolName: "web_search",
+          providerExecuted: true,
+          providerOptions: { test: { itemId: "call-item" } },
+        },
+        {
+          type: "tool-result",
+          toolName: "web_search",
+          output: { type: "json", value: providerOutput },
+          providerOptions: { test: { itemId: "result-item" } },
+        },
+      ],
+    })
+  })
+
   test("filters out messages with no parts", async () => {
     const input: MessageV2.WithParts[] = [
       {

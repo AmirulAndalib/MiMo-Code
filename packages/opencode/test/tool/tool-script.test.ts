@@ -5,11 +5,10 @@ import os from "os"
 import fs from "fs/promises"
 import path from "path"
 import { evalScript } from "../../src/workflow/sandbox"
-import { jsonSchema } from "ai"
 import { Agent } from "../../src/agent/agent"
 import { Truncate, Tool } from "../../src/tool"
 import { ToolScriptTool, renderToolScriptDeclarations } from "../../src/tool/tool-script"
-import { toolScriptRegistry, toolScriptMcp, TOOL_SCRIPT_EXCLUDED } from "../../src/tool/tool-script-ref"
+import { toolScriptRegistry, TOOL_SCRIPT_EXCLUDED } from "../../src/tool/tool-script-ref"
 import { Instance } from "../../src/project/instance"
 
 describe("sandbox non-deterministic mode", () => {
@@ -91,7 +90,6 @@ async function runToolScript(
   defs: Tool.Def[],
   abort?: AbortSignal,
   opts?: {
-    mcp?: Record<string, any>
     ask?: () => Effect.Effect<void>
     maxToolCalls?: number
     timeoutSeconds?: number
@@ -99,9 +97,7 @@ async function runToolScript(
   },
 ) {
   const prev = toolScriptRegistry.current
-  const prevMcp = toolScriptMcp.current
   toolScriptRegistry.current = () => Effect.succeed(defs)
-  toolScriptMcp.current = opts?.mcp ? () => Effect.succeed(opts.mcp!) : undefined
   try {
     return await Instance.provide({
       directory: tmp,
@@ -132,7 +128,6 @@ async function runToolScript(
     })
   } finally {
     toolScriptRegistry.current = prev
-    toolScriptMcp.current = prevMcp
   }
 }
 
@@ -517,108 +512,6 @@ describe("exec", () => {
   })
 })
 
-describe("exec MCP dispatch", () => {
-  function fakeMcpTool(execute: (args: any) => Promise<any>) {
-    return {
-      description: "fake mcp tool",
-      inputSchema: jsonSchema({ type: "object", properties: { q: { type: "string" } } }),
-      execute,
-    }
-  }
-
-  test("MCP tool is callable; result content folds to text output", async () => {
-    const seen: any[] = []
-    const mcp = {
-      srv_search: fakeMcpTool(async (args) => {
-        seen.push(args)
-        return { content: [{ type: "text", text: "hit-1" }, { type: "text", text: "hit-2" }] }
-      }),
-    }
-    const result = await runToolScript(
-      `const r = await tools.srv_search({ q: "x" }); return r.output`,
-      [],
-      undefined,
-      { mcp },
-    )
-    expect(result.metadata.status).toBe("completed")
-    expect(result.output).toContain("hit-1")
-    expect(result.output).toContain("hit-2")
-    expect(seen).toEqual([{ q: "x" }])
-  })
-
-  test("MCP call goes through permission ask", async () => {
-    const asked: string[] = []
-    const mcp = {
-      srv_go: fakeMcpTool(async () => ({ content: [{ type: "text", text: "ok" }] })),
-    }
-    const result = await runToolScript(`return (await tools.srv_go({})).output`, [], undefined, {
-      mcp,
-      ask: () => {
-        asked.push("srv_go")
-        return Effect.void
-      },
-    })
-    expect(result.metadata.status).toBe("completed")
-    expect(asked).toContain("srv_go")
-  })
-
-  test("MCP isError result rejects catchably", async () => {
-    const mcp = {
-      srv_fail: fakeMcpTool(async () => ({
-        isError: true,
-        content: [{ type: "text", text: "server exploded" }],
-      })),
-    }
-    const result = await runToolScript(
-      `try { await tools.srv_fail({}) } catch (e) { return "caught: " + e.message }`,
-      [],
-      undefined,
-      { mcp },
-    )
-    expect(result.metadata.status).toBe("completed")
-    expect(result.output).toContain("caught: srv_fail: server exploded")
-  })
-
-  test("non-text MCP content is dropped with a note", async () => {
-    const mcp = {
-      srv_img: fakeMcpTool(async () => ({
-        content: [
-          { type: "text", text: "caption" },
-          { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
-        ],
-      })),
-    }
-    const result = await runToolScript(`return (await tools.srv_img({})).output`, [], undefined, { mcp })
-    expect(result.metadata.status).toBe("completed")
-    expect(result.output).toContain("caption")
-    expect(result.output).toContain("non-text attachment(s) dropped")
-  })
-
-  test("builtin tool id wins over a colliding MCP tool id", async () => {
-    const defs = [fakeDef("echo", async (args) => `builtin:${args.value}`)]
-    const mcp = {
-      echo: fakeMcpTool(async () => ({ content: [{ type: "text", text: "mcp-should-not-run" }] })),
-    }
-    const result = await runToolScript(`return (await tools.echo({ value: "v" })).output`, defs, undefined, { mcp })
-    expect(result.metadata.status).toBe("completed")
-    expect(result.output).toContain("builtin:v")
-    expect(result.output).not.toContain("mcp-should-not-run")
-  })
-
-  test("MCP calls count against the shared 50-call budget", async () => {
-    const mcp = {
-      srv_ping: fakeMcpTool(async () => ({ content: [{ type: "text", text: "pong" }] })),
-    }
-    const result = await runToolScript(
-      `for (let i = 0; i < 60; i++) await tools.srv_ping({}); return "done"`,
-      [],
-      undefined,
-      { mcp },
-    )
-    expect(result.metadata.status).toBe("budget_exceeded")
-  })
-})
-
 describe("renderToolScriptDeclarations", () => {
   test("renders TS signatures and skips excluded tools", () => {
     const defs = [
@@ -634,7 +527,7 @@ describe("renderToolScriptDeclarations", () => {
   })
 
   test("exclusion list covers agent control-flow tools but allows bash", () => {
-    for (const id of ["task", "question", "actor", "skill", "plan_enter", "plan_exit", "exec"]) {
+    for (const id of ["task", "question", "actor", "skill", "plan_enter", "plan_exit", "exec", "mcp_tool_search"]) {
       expect(TOOL_SCRIPT_EXCLUDED.has(id)).toBe(true)
     }
     expect(TOOL_SCRIPT_EXCLUDED.has("bash")).toBe(false)
@@ -647,16 +540,4 @@ describe("renderToolScriptDeclarations", () => {
     expect(text).toContain("Alias for bash")
   })
 
-  test("MCP tools are rendered into the declaration block", () => {
-    const mcp = {
-      srv_search: {
-        description: "Search the thing",
-        inputSchema: jsonSchema({ type: "object", properties: { q: { type: "string" } }, required: ["q"] }),
-        execute: async () => ({ content: [] }),
-      },
-    }
-    const text = renderToolScriptDeclarations([fakeDef("read", async () => "x")], mcp as any)
-    expect(text).toContain("srv_search(input: { q: string })")
-    expect(text).toContain("[MCP] Search the thing")
-  })
 })
