@@ -66,6 +66,7 @@ let rotation = true
 let sequence = 0
 let pending = Promise.resolve()
 let failureReported = false
+let printing = false
 
 function stamp() {
   return new Date().toISOString().replace(/[:.]/g, "")
@@ -77,6 +78,7 @@ export async function init(options: Options) {
     if (options.level) level = options.level
     rotation = options.rotate ?? !Flag.MIMOCODE_DISABLE_LOG_ROTATION
     failureReported = false
+    printing = options.print
     const role = (process.env.MIMOCODE_PROCESS_ROLE ?? "main").replace(/[^a-zA-Z0-9._-]/g, "-")
     await cleanup(Global.Path.log, { pid: process.pid, role })
     if (options.print) {
@@ -116,7 +118,11 @@ async function append(msg: string) {
   if (rotation && written > 0 && written + size > MAX_FILE_SIZE) await rotate()
   const target = stream
   if (!target) {
-    process.stderr.write(msg)
+    // Only --print-logs may reach the terminal. Without a file sink (before
+    // init, after shutdown, or when the sink failed) records are dropped: the
+    // TUI shares stderr with the rendered screen, so leaking log lines there
+    // corrupts the display.
+    if (printing) process.stderr.write(msg)
     return
   }
   await new Promise<void>((resolve, reject) => {
