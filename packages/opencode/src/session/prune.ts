@@ -314,6 +314,10 @@ export const layer: Layer.Layer<
               writerFailures.delete(input.sessionID)
               return
             }
+            // "no-writer" and "timeout" both mean "not a settled failure". A
+            // timed-out wait leaves the writer in flight (and still able to
+            // advance the watermark), so counting it would retire a
+            // merely-slow-but-working writer. Only a real failure ticks below.
             if (result !== "failure") return
             const next = (writerFailures.get(input.sessionID) ?? 0) + 1
             writerFailures.set(input.sessionID, next)
