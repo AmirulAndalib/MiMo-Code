@@ -1625,3 +1625,120 @@ describe("session tool join (fan-in aggregation, T38)", () => {
     30000,
   )
 })
+
+// === #1741: `session send` is RESUME, not relay-only ===
+// The route-first redesign claims a finished child stays resumable: status is
+// informational and does NOT gate resume, so recovering an interrupted/terminal
+// child is a `send` into the SAME session rather than a `create` re-described
+// from memory. These drive the real session tool over a real DB: a real child
+// session with real persisted history, driven to a terminal outcome, then sent
+// to — asserting the observable consequences (same session id, no new child,
+// history intact), not the wording of orchestrator.txt.
+describe("session send as resume (#1741 route-first)", () => {
+  const peerChild = (parentID: SessionID, label: string) =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const registry = yield* ActorRegistry.Service
+      const child = yield* sessions.create({ parentID, title: label })
+      yield* registry.register({
+        sessionID: child.id,
+        actorID: child.id,
+        mode: "peer",
+        parentActorID: "main",
+        agent: "build",
+        description: label,
+        contextMode: "none",
+        background: true,
+        lifecycle: "persistent",
+      })
+      return child.id
+    })
+
+  askIt.live(
+    "send to a TERMINAL child resumes that same session — no new child, history preserved",
+    () =>
+      provideTmpdirServer(
+        Effect.fnUntraced(function* ({ llm }) {
+          const sessions = yield* Session.Service
+          const registry = yield* ActorRegistry.Service
+          const parent = yield* sessions.create({
+            title: "orchestrator",
+            permission: [{ permission: "*", pattern: "*", action: "allow" }],
+          })
+          const childID = yield* peerChild(parent.id, "PR-1741 worker")
+
+          // Real persisted history — the thing a resume continues FROM.
+          yield* seedAssistantText(childID, childID, "I finished step one and stopped")
+          // Drive it to a TERMINAL outcome (the redesign's claim: still resumable).
+          yield* registry.updateStatus(childID, childID, { status: "idle", lastOutcome: "success" })
+          const live = yield* registry.liveness(childID, childID)
+          expect(live?.liveness).toBe("success")
+
+          // Hang so a woken turn cannot complete — the assertions are about
+          // routing/relay, not about what the child then does.
+          yield* llm.hang
+
+          const tool = yield* (yield* SessionTool).init()
+          const before = yield* sessions.children(parent.id)
+
+          const sent = yield* tool.execute(
+            { operation: { action: "send", sessionID: childID, task: "continue from where you stopped" } },
+            ctx(parent.id),
+          )
+
+          // Terminal status did NOT block the resume.
+          expect(sent.metadata.sessionID).toBe(childID)
+          expect(sent.title).toContain(`Relayed task to ${childID}`)
+          expect(sent.output).toContain("Enqueued the task")
+          expect(sent.output).not.toContain("not reachable")
+
+          // No new child session was spawned: send resumed, it did not recreate.
+          const after = yield* sessions.children(parent.id)
+          expect(after.length).toBe(before.length)
+          expect(after.map((c) => c.id)).toContain(childID)
+
+          // Exactly one peer child still owns this work (no duplicate actor row).
+          const peers = yield* registry.listPeerChildren(parent.id, "main")
+          expect(peers.filter((p) => p.actor.sessionID === childID).length).toBe(1)
+
+          // The history the resume continues from is still persisted.
+          const msgs = yield* sessions.messages({ sessionID: childID, agentID: "*" })
+          const text = msgs
+            .flatMap((m) => m.parts)
+            .flatMap((part) => (part.type === "text" ? [part.text] : []))
+            .join("\n")
+          expect(text).toContain("I finished step one and stopped")
+        }),
+        { git: true, config: askProviderCfg },
+      ),
+    60000,
+  )
+
+  askIt.live(
+    "send to an id that was never a child fails loudly instead of silently creating one",
+    () =>
+      provideTmpdirServer(
+        Effect.fnUntraced(function* () {
+          const sessions = yield* Session.Service
+          const parent = yield* sessions.create({
+            title: "orchestrator",
+            permission: [{ permission: "*", pattern: "*", action: "allow" }],
+          })
+          const tool = yield* (yield* SessionTool).init()
+          const before = yield* sessions.children(parent.id)
+
+          const sent = yield* tool.execute(
+            { operation: { action: "send", sessionID: "ses_nonexistent", task: "do something" } },
+            ctx(parent.id),
+          )
+
+          expect(sent.title).toContain("Send failed")
+          // Route-first must never silently degrade into create-a-new-child.
+          const after = yield* sessions.children(parent.id)
+          expect(after.length).toBe(before.length)
+        }),
+        { git: true, config: askProviderCfg },
+      ),
+    60000,
+  )
+})
