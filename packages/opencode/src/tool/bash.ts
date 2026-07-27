@@ -459,7 +459,7 @@ export const BashTool = Tool.define(
     // machine hostname + wrong authorship into pushed commits. We inject
     // GIT_AUTHOR_*/COMMITTER_* env as a FLOOR (below repo/worktree local config,
     // which still wins). Resolved once per worktree and memoized.
-    const AGENT_NAME = "MiMo Code"
+    const AGENT_NAME = "MiMo"
     const AGENT_EMAIL = "mimo@xiaomi.com"
     const gitIdentityCache = new Map<string, { name: string; email: string }>()
     const resolveGitIdentity = Effect.fn("BashTool.resolveGitIdentity")(function* () {
