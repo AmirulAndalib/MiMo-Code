@@ -109,6 +109,38 @@ sudo apt install xsel
 - **自动检查点** — 根据模型上下文窗口自动决定什么时候保存会话状态
 - **上下文重建** — 当上下文接近上限时，从最新 checkpoint、项目记忆、任务进展和保留的近期消息重建上下文，让 agent 继续当前任务
 - **预算化注入** — 用 token budget 控制 checkpoint / memory / notes 注入上下文的大小，按重要性排序
+- **压缩点可调** — `/context-limit`（或 `compaction.max_context`）让模型比自身窗口更早压缩，按模型生效
+
+<details>
+<summary><strong>比模型窗口更早压缩（<code>/context-limit</code>）</strong></summary>
+
+压缩默认在略低于模型上下文窗口处触发。执行 `/context-limit` 可为当前模型选一个更小的工作预算
+—— `200K` / `300K` / `500K` / `1M` 或自定义值 —— 按模型存为 `compaction.max_context`：
+
+```jsonc
+{
+  "compaction": {
+    "max_context": {
+      "openai/gpt-5.6": "272K", // token 数、"300K"、"1M"，或窗口的 "50%"
+      "anthropic/*": "300K" // 支持通配符，最长模式优先
+    }
+  }
+}
+```
+
+该值始终会被 clamp 到厂商实际接受的上限，因此只能把压缩点调低，不能调高。填 `0` 恢复模型自身窗口。
+
+什么时候需要它：
+
+- **计费档位。** OpenAI 对 GPT-5.6 超过 272K input 的请求按 2x input、1.5x output 计费，且作用于整个请求。
+- **标称窗口不等于你能用到的窗口。** 同一个模型经由 ChatGPT/Codex 订阅、直连 API key，还是 OpenRouter
+  这类转售渠道，实际可用窗口可能不同 —— 目录里写 1M 不代表你这条链路给你 1M。
+- **质量与延迟。** 上下文越长越慢，超过某个点也并不更好。
+
+`mimo models <provider>` 会逐个模型打印 MiMoCode 解析出的窗口以及实际压缩的 token 数。输入框底部
+用的就是同一个数字作分母（`33.0K/260K↓ (13%)`，`↓` 表示有预算生效），`/status` 里有完整拆解。
+
+</details>
 
 ### 任务追踪
 
