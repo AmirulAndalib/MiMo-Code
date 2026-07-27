@@ -2,7 +2,7 @@ import { afterEach, test, expect } from "bun:test"
 import { Effect } from "effect"
 import path from "path"
 import os from "os"
-import { mkdtempSync } from "fs"
+import { mkdtempSync, rmSync } from "fs"
 import { provideInstance } from "../fixture/fixture"
 import { Instance } from "../../src/project/instance"
 import { Agent } from "../../src/agent/agent"
@@ -19,30 +19,34 @@ function load<A>(dir: string, fn: (svc: Agent.Interface) => Effect.Effect<A>) {
 // Returns the list of agent names Agent.list() produced under `flag`.
 function listAgentNames(flag: boolean): string[] {
   const root = mkdtempSync(path.join(os.tmpdir(), "orch-gate-"))
-  const env: Record<string, string> = {
-    ...(process.env as Record<string, string>),
-    XDG_DATA_HOME: path.join(root, "share"),
-    XDG_CACHE_HOME: path.join(root, "cache"),
-    XDG_CONFIG_HOME: path.join(root, "config"),
-    XDG_STATE_HOME: path.join(root, "state"),
-    HOME: path.join(root, "home"),
-    MIMOCODE_DB: ":memory:",
-    MIMOCODE_DISABLE_DEFAULT_PLUGINS: "true",
-    MIMOCODE_TEST_TMPDIR_ROOT: path.join(root, "tmp"),
+  try {
+    const env: Record<string, string> = {
+      ...(process.env as Record<string, string>),
+      XDG_DATA_HOME: path.join(root, "share"),
+      XDG_CACHE_HOME: path.join(root, "cache"),
+      XDG_CONFIG_HOME: path.join(root, "config"),
+      XDG_STATE_HOME: path.join(root, "state"),
+      HOME: path.join(root, "home"),
+      MIMOCODE_DB: ":memory:",
+      MIMOCODE_DISABLE_DEFAULT_PLUGINS: "true",
+      MIMOCODE_TEST_TMPDIR_ROOT: path.join(root, "tmp"),
+    }
+    delete env.MIMOCODE_EXPERIMENTAL
+    delete env.MIMOCODE_EXPERIMENTAL_ORCHESTRATOR
+    if (flag) env.MIMOCODE_EXPERIMENTAL_ORCHESTRATOR = "true"
+    const result = Bun.spawnSync({
+      cmd: [process.execPath, path.join(import.meta.dir, "fixtures", "list-agents-probe.ts")],
+      cwd: process.cwd(),
+      env,
+    })
+    const out = result.stdout.toString() + result.stderr.toString()
+    expect(result.exitCode, `probe failed:\n${out}`).toBe(0)
+    const m = out.match(/NAMES=(\[.*\])/)
+    expect(m, `probe produced no NAMES line:\n${out}`).not.toBeNull()
+    return JSON.parse(m![1]) as string[]
+  } finally {
+    rmSync(root, { recursive: true, force: true })
   }
-  delete env.MIMOCODE_EXPERIMENTAL
-  delete env.MIMOCODE_EXPERIMENTAL_ORCHESTRATOR
-  if (flag) env.MIMOCODE_EXPERIMENTAL_ORCHESTRATOR = "true"
-  const result = Bun.spawnSync({
-    cmd: [process.execPath, path.join(import.meta.dir, "fixtures", "list-agents-probe.ts")],
-    cwd: process.cwd(),
-    env,
-  })
-  const out = result.stdout.toString() + result.stderr.toString()
-  expect(result.exitCode, `probe failed:\n${out}`).toBe(0)
-  const m = out.match(/NAMES=(\[.*\])/)
-  expect(m, `probe produced no NAMES line:\n${out}`).not.toBeNull()
-  return JSON.parse(m![1]) as string[]
 }
 
 afterEach(async () => {

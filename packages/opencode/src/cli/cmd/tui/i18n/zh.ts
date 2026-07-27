@@ -318,6 +318,8 @@ export const dict = {
   "tui.command.worktree.list.title": "工作树",
   "tui.command.theme.switch.title": "切换主题",
   "tui.command.image.switch.title": "切换背景图片",
+  "tui.dialog.agent.force.title": "强制切换模式",
+  "tui.dialog.agent.force.hint": "绕过会话中锁定 — 可切换到任意可用模式",
   "tui.dialog.image.title": "背景图片",
   "tui.dialog.image.import.option": "选择新图片…",
   "tui.dialog.image.import.title": "导入背景图片",

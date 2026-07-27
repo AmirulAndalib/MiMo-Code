@@ -112,11 +112,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           }
           this.set(name)
         },
-        // Force-switch bypasses the mid-session `canSwitchTo` lock so any primary
-        // agent (notably Orchestrator, which is never in FREE_SWITCH_GROUP) can be
-        // reached from an in-progress session. Still validates the name via set()
-        // — the orchestrator-entry effect in app.tsx keys off agentStore.current,
-        // so setting it here drives the dir-switch just like a fresh entry.
+        // bypasses the mid-session canSwitchTo lock; set() still validates the name
         forceSwitch(name: string) {
           this.set(name)
         },

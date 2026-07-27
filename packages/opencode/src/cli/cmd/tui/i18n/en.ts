@@ -297,6 +297,8 @@ export const dict: Record<string, string> = {
   "tui.command.worktree.list.title": "Worktrees",
   "tui.command.theme.switch.title": "Switch theme",
   "tui.command.image.switch.title": "Switch background image",
+  "tui.dialog.agent.force.title": "Force switch mode",
+  "tui.dialog.agent.force.hint": "Bypasses the mid-session lock — switch to any available mode",
   "tui.dialog.image.title": "Background images",
   "tui.dialog.image.import.option": "Choose new image…",
   "tui.dialog.image.import.title": "Import background image",
