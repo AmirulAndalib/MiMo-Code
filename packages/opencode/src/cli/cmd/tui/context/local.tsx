@@ -106,6 +106,10 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           }
           this.set(name)
         },
+        // bypasses the mid-session canSwitchTo lock; set() still validates the name
+        forceSwitch(name: string) {
+          this.set(name)
+        },
         move(direction: 1 | -1) {
           const current = this.current()
           if (!current) return
