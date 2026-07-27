@@ -125,6 +125,19 @@ describe("isOverflow", () => {
     expect(isOverflow({ cfg, tokens, model })).toBe(true)
   })
 
+  test("includes cache.write in token count", () => {
+    // On the first request against a fresh cache, read is 0 and nearly the whole prompt is
+    // a cache write. input/read/write partition one request's prompt (getUsage subtracts
+    // both cache figures out of the SDK's inputTokens), so dropping write here would make
+    // a full context look empty. Provider totals confirm the partition: totalTokens equals
+    // input + output + reasoning + read + write.
+    const model = createModel({ context: 200_000, output: 32_000 })
+    const cfg = mockCfg()
+    const tokens = { input: 300, output: 400, reasoning: 0, cache: { read: 0, write: 180_000 } } as any
+    expect(isOverflow({ cfg, tokens, model })).toBe(true)
+    expect(contextPressureLevel({ cfg, tokens, model })).toBe(3)
+  })
+
   test("respects input limit for input caps", () => {
     const model = createModel({ context: 400_000, input: 272_000, output: 128_000 })
     const cfg = mockCfg()
