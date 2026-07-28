@@ -2367,6 +2367,7 @@ function ToolScript(props: ToolProps<typeof ToolScriptTool>) {
             onClick={() => setExpanded(true)}
           >
             <text fg={theme.textMuted}>{recentLines().join("\n")}</text>
+            <text fg={theme.textMuted}>Click to expand</text>
           </BlockTool>
         </Show>
       }
