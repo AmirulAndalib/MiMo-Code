@@ -1458,11 +1458,17 @@ describe("session tool ask (fork-query) functional", () => {
   )
 
   // DEFECT 2 (b): the <active-sessions> roster is assembled once per REQUEST, so
-  // a child created earlier in the SAME turn is invisible to the model until the
-  // next request — that is how one live turn spawned two children for the same
+  // a child dispatched earlier in the SAME turn is invisible to the model until
+  // the next request — that is how one live turn spawned two children for the same
   // docs topic and had to cancel one. A tool RESULT, unlike the system prompt, is
-  // read before the model's next tool call, so `session create` now echoes the
-  // routable sibling roster into its own output.
+  // read before the model's next tool call, so every dispatch echoes the routable
+  // sibling roster into its own output.
+  //
+  // MECHANISM-LEVEL (deterministic): these assert the exact bytes the model will
+  // read back from its own dispatch, not what a model then decides to do with
+  // them. The behavioural half — that a real model actually routes instead of
+  // re-dispatching — lives in test/session/orchestrator-live-behavior.test.ts and
+  // asserts on the tool call the model emitted.
   askIt.live("DEFECT 2: session create echoes the routable sibling roster so the same turn can route instead", () =>
     provideTmpdirServer(
       Effect.fnUntraced(function* ({ llm }) {
@@ -1476,18 +1482,28 @@ describe("session tool ask (fork-query) functional", () => {
         const info = yield* SessionTool
         const tool = yield* info.init()
 
-        // First create: nothing else exists yet, so no sibling roster is emitted.
+        // FIRST create of the turn. Even with no siblings, the result must carry a
+        // ledger naming the child THIS call just made: the failure being fixed is
+        // self-duplication, and an empty notice here leaves the model's next tool
+        // call with no record of its own dispatch (which is how #4/#5 happened —
+        // the pair that duplicated was create-then-create, so the FIRST create's
+        // result is the only thing that could have prevented the second).
         const first = yield* tool.execute(
           { operation: { action: "create", task: "write the docs page", mode: "build", title: "docs page" } },
           ctx(parent.id),
         )
         const firstID = first.metadata.sessionID!
         expect(firstID).toBeDefined()
-        expect(first.output).not.toContain("ROUTE FIRST")
+        expect(first.output).toContain("ROUTE FIRST")
+        expect(first.output).toContain(firstID)
+        expect(first.output).toContain("YOU JUST CREATED THIS, IN THE CURRENT TURN")
+        // The brief is echoed too, so "I already dispatched this exact work" is
+        // legible and not just "some child exists".
+        expect(first.output).toContain("write the docs page")
 
-        // Second create in the SAME turn: the output must hand back the existing
-        // child's id and the route-first instruction, so the model's very next
-        // tool call can `session send` instead of creating a third.
+        // Second create in the SAME turn: the output must hand back BOTH the
+        // existing sibling's id and its own, so the model's very next tool call
+        // can `session send` instead of creating a third.
         const second = yield* tool.execute(
           { operation: { action: "create", task: "polish the docs page", mode: "build", title: "docs polish" } },
           ctx(parent.id),
@@ -1496,11 +1512,55 @@ describe("session tool ask (fork-query) functional", () => {
         expect(second.output).toContain("ROUTE FIRST")
         expect(second.output).toContain(firstID)
         expect(second.output).toContain("session send <id> <task>")
-        // It advertises the sibling, not itself.
-        expect(second.output.slice(second.output.indexOf("ROUTE FIRST"))).not.toContain(secondID)
+        // It advertises the sibling AND itself — the self row is exactly what makes
+        // a repeat self-evident, so excluding it defeated the purpose.
+        const ledger = second.output.slice(second.output.indexOf("ROUTE FIRST"))
+        expect(ledger).toContain(secondID)
+        expect(ledger).toContain("polish the docs page")
+        // Only the just-dispatched row is marked; the sibling is a plain roster line.
+        expect(ledger.split("\n").filter((l) => l.includes("YOU JUST")).length).toBe(1)
+        expect(ledger.split("\n").find((l) => l.includes("YOU JUST"))).toContain(secondID)
         // Roster shape matches the system-prompt roster: id | title | agent | status
         expect(second.output).toMatch(new RegExp(`${firstID} \\| .*docs page.* \\| build \\| (progressing|idle)`))
         expect(secondID).toBeDefined()
+      }),
+      { git: true, config: askProviderCfg },
+    ),
+    60000,
+  )
+
+  // The same intra-turn hole exists after a `send`: the live duplicate pair was
+  // create→create, but "dispatch twice for the same work in one turn" is equally
+  // reachable as send→create or send→send, and `send` emitted no ledger at all.
+  askIt.live("DEFECT 2: session send echoes the same ledger, marking the child it just sent to", () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const sessions = yield* Session.Service
+        const parent = yield* sessions.create({
+          title: "send ledger parent",
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        })
+        yield* llm.hang
+
+        const tool = yield* (yield* SessionTool).init()
+        const created = yield* tool.execute(
+          { operation: { action: "create", task: "own the README", mode: "build", title: "readme owner" } },
+          ctx(parent.id),
+        )
+        const childID = created.metadata.sessionID!
+
+        const sent = yield* tool.execute(
+          { operation: { action: "send", sessionID: childID, task: "add usage examples to the README" } },
+          ctx(parent.id),
+        )
+        expect(sent.output).toContain("Enqueued the task")
+        expect(sent.output).toContain("ROUTE FIRST")
+        const ledger = sent.output.slice(sent.output.indexOf("ROUTE FIRST"))
+        expect(ledger).toContain(childID)
+        expect(ledger).toContain("YOU JUST SENT THIS TASK TO THIS, IN THE CURRENT TURN")
+        // The relayed brief — NOT the child's title, which still shows the original
+        // task — is what makes a second identical send visible as a repeat.
+        expect(ledger).toContain("add usage examples to the README")
       }),
       { git: true, config: askProviderCfg },
     ),

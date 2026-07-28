@@ -447,6 +447,21 @@ describe("orchestrator <active-sessions> roster — e2e on the wire", () => {
     })
   })
 
+  // DOCUMENTATION claim, so a text assertion IS the right instrument here (the
+  // deliverable is prose). The behaviour it describes is already pinned by
+  // "DEFECT 3" above, which reads field 3 off the assembled on-the-wire roster.
+  // The shipped design spec was still documenting the pre-fix `mode` while
+  // orchestrator.txt and llm.ts had already been corrected to `agent`.
+  test("DEFECT 3: the shipped design spec documents the same field-3 as the code emits", async () => {
+    const spec = await Bun.file(
+      path.join(__dirname, "../../../../docs/compose/specs/2026-07-14-orchestrator-route-first-redesign.md"),
+    ).text()
+    expect(spec).toContain("id | title | agent | status")
+    expect(spec).not.toContain("id | title | mode | status")
+    // Calling the build/plan/compose set "mode" is the same drift, one sentence later.
+    expect(spec).not.toContain("Which session's mode (build/plan/compose)")
+  })
+
   test("system-spawned agents (checkpoint-writer) stay out of the roster even when idle", async () => {
     const server = queueState.server!
     const fixture = await loadFixture(PROVIDER_ID, MODEL_ID)

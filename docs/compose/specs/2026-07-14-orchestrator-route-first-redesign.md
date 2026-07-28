@@ -151,7 +151,7 @@ Orchestrator 的 system prompt 需要注入 **活会话上下文**, 像人看聊
 </active-sessions>
 ```
 
-每个会话一行: `id | title | mode | status`。只有 4 个字段, 没有 dir 和最近任务详情。AI 需要详情时, 自己调用 `session ask` 或 `session status` 按需查询。详见 R1.1 注入策略。
+每个会话一行: `id | title | agent | status`。只有 4 个字段, 没有 dir 和最近任务详情。第 3 个字段是子会话的 **agent**(`build`/`plan`/`compose` — 即上面示例里的 `build`/`compose`), **不是**它的 actor `mode`: peer 子会话的 mode 恒为 `peer`, 不携带任何路由信号, 而 agent 才是"这个孩子能做什么"的判断依据。实现见 `packages/opencode/src/session/llm.ts` 里渲染 `actor.agent` 的那一行。AI 需要详情时, 自己调用 `session ask` 或 `session status` 按需查询。详见 R1.1 注入策略。
 
 **注入位置**: `packages/opencode/src/session/llm.ts:240-306` (`buildSystemArray`)。在 agent prompt 组装完成后、plugin transform 前, 注入一个 `<active-sessions>` block。这个 block 由 `session list` 的数据自动生成, 不需要 Orchestrator 主动调用。
 
@@ -234,14 +234,14 @@ orchestrator.txt 的核心变化 — 让 AI 自己做路由决策:
 ```
 ## Routing: route to existing sessions first
 
-Your system prompt contains an <active-sessions> block listing your live
-child sessions in compact format: id | title | mode | status.
+Your system prompt contains an <active-sessions> block listing your routable
+child sessions in compact format: id | title | agent | status.
 This is your fleet — use it.
 
 When a new task arrives, your FIRST action is to decide: does an existing session
 already own this work? Look at <active-sessions> and evaluate:
 - Which session's title/theme matches this task's domain?
-- Which session's mode (build/plan/compose) is appropriate?
+- Which session's agent (build/plan/compose) is appropriate?
 - Is the session idle (ready for new work) or progressing (can accept follow-up)?
 
 If you need more detail about a session (its directory, recent commits, etc.),

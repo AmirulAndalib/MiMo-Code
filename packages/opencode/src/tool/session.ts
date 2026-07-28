@@ -622,39 +622,56 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
     }
 
     // ROUTE-FIRST WITHIN ONE TURN. The `<active-sessions>` roster is assembled
-    // once per REQUEST, so a child created earlier in the SAME turn is invisible
-    // to the model until the next request — which is exactly how one live turn
-    // spawned two children for the same docs topic and then had to cancel one,
-    // burning a worktree. A tool RESULT, unlike the system prompt, is read
-    // before the model's next tool call, so `session create` echoes the live
-    // sibling roster into its own output. That closes the staleness hole with
-    // DATA (the ids needed to `session send`) rather than with prompt wording,
-    // and without any mid-turn system-prompt rebuild.
-    const routableSiblingNotice = Effect.fn("SessionTool.routableSiblings")(function* (
+    // once per REQUEST, so a child dispatched earlier in the SAME turn is
+    // invisible to the model until the next request — which is exactly how one
+    // live turn spawned two children for the same docs topic and then had to
+    // cancel one, burning a worktree. A tool RESULT, unlike the system prompt, is
+    // read before the model's next tool call, so every DISPATCH (`create` AND
+    // `send`) echoes the live sibling roster into its own output. That closes the
+    // staleness hole with DATA (the ids needed to `session send`) rather than with
+    // prompt wording, and without any mid-turn system-prompt rebuild.
+    //
+    // The child THIS call just dispatched to is INCLUDED and marked, with an
+    // excerpt of the brief it was handed. The failure being fixed is
+    // self-duplication — the model re-dispatching work it just sent — so listing
+    // only the OTHER siblings hides precisely the row that makes the repeat
+    // self-evident, and leaves the first dispatch of a turn with no ledger at all.
+    // Making the duplicate VISIBLE is deliberate in place of refusing it: there is
+    // no reliable semantic key for "same topic", and a false refusal would block
+    // legitimate parallel fan-out — strictly worse than a duplicate the model can
+    // see and correct.
+    const dispatchLedgerNotice = Effect.fn("SessionTool.dispatchLedger")(function* (
       parentID: SessionID,
-      excludeID: string,
+      dispatched: { id: string; verb: string; task: string },
     ) {
       const children = yield* sessions.children(parentID)
-      const enriched = yield* Effect.forEach(
-        children.filter((c) => c.id !== excludeID),
-        (child) => actorReg.get(child.id, child.id).pipe(Effect.map((actor) => ({ child, actor }))),
+      const enriched = yield* Effect.forEach(children, (child) =>
+        actorReg.get(child.id, child.id).pipe(Effect.map((actor) => ({ child, actor }))),
       )
       const now = Date.now()
       // Same routability rule as the roster in session/llm.ts: real peers only,
-      // dead (failed/cancelled) children excluded, success reported as idle.
+      // dead (failed/cancelled) children excluded, success reported as idle. The
+      // just-dispatched child is EXEMPT from the liveness filter — its line is a
+      // fact about what this call did, not a judgement about the child's health,
+      // so it must survive whatever deriveLiveness reports for a brand-new row.
       const lines = enriched
         .flatMap(({ child, actor }) => (actor ? [{ child, actor }] : []))
         .filter(({ actor }) => actor.mode !== "subagent" && !SYSTEM_SPAWNED_AGENT_TYPES.has(actor.agent))
         .map((e) => ({ ...e, live: deriveLiveness(e.actor, now) }))
-        .filter(({ live }) => live !== "failure" && live !== "cancelled")
+        .filter(({ child, live }) => child.id === dispatched.id || (live !== "failure" && live !== "cancelled"))
         .map(
           ({ child, actor, live }) =>
-            `  ${child.id} | ${child.title} | ${actor.agent} | ${live === "success" ? "idle" : live}`,
+            `  ${child.id} | ${child.title} | ${actor.agent} | ${live === "success" ? "idle" : live}` +
+            (child.id === dispatched.id
+              ? `   <-- YOU JUST ${dispatched.verb} THIS, IN THE CURRENT TURN: "${dispatched.task.replace(/\s+/g, " ").slice(0, 100)}"`
+              : ``),
         )
       if (lines.length === 0) return ""
       return (
-        `\n\nROUTE FIRST — you already have these routable child sessions. Send the NEXT related task into one of them ` +
-        `with \`session send <id> <task>\` instead of creating another:\n${lines.join("\n")}`
+        `\n\nROUTE FIRST — these are your routable child sessions right now, including the one this call just ` +
+        `dispatched to. Before you dispatch again in THIS turn, re-read this list: if the next piece of work ` +
+        `belongs to one of these, use \`session send <id> <task>\` instead of \`session create\` — and do not ` +
+        `re-send work that is already marked as just dispatched:\n${lines.join("\n")}`
       )
     })
 
@@ -707,7 +724,12 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
                 title: `Reused topic '${op.topic}' → relayed to ${childID}`,
                 output:
                   `Found standing child ${childID} for topic '${op.topic}'. ` +
-                  `Enqueued the task into it and woke it — it runs the relayed task as its next turn.`,
+                  `Enqueued the task into it and woke it — it runs the relayed task as its next turn.` +
+                  (yield* dispatchLedgerNotice(ctx.sessionID as SessionID, {
+                    id: childID,
+                    verb: "SENT THIS TASK TO",
+                    task: op.task,
+                  })),
                 metadata: { sessionID: childID } as Metadata,
               }
             }
@@ -784,7 +806,11 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
         } else if (op.title) {
           yield* sessions.setTitle({ sessionID: result.sessionID, title: op.title })
         }
-        const siblingNotice = yield* routableSiblingNotice(ctx.sessionID as SessionID, result.sessionID)
+        const siblingNotice = yield* dispatchLedgerNotice(ctx.sessionID as SessionID, {
+          id: result.sessionID,
+          verb: "CREATED",
+          task: op.task,
+        })
         return {
           title: `Session created: ${result.sessionID}`,
           output:
@@ -854,7 +880,12 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
             `It will run the relayed task as its next turn` +
             (actor.status === "running" || actor.status === "pending"
               ? ` (currently busy — the task is queued and drains after its current turn).`
-              : `.`),
+              : `.`) +
+            (yield* dispatchLedgerNotice(ctx.sessionID as SessionID, {
+              id: childID,
+              verb: "SENT THIS TASK TO",
+              task: op.task,
+            })),
           metadata: { sessionID: op.sessionID } as Metadata,
         }
       }
