@@ -125,6 +125,7 @@ import {
   type McpToolSearchMetadata,
 } from "@/tool/mcp-tool-search"
 import { isMcpToolSearchEnabled } from "@/tool/gpt"
+import { toolScriptMcp } from "@/tool/tool-script-ref"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -1387,6 +1388,19 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         activeTools.add(MCP_TOOL_SEARCH_ID)
       }
       loadedMcpTools.forEach((name) => activeTools.add(name))
+
+      // Populate the exec sandbox's MCP view (late-bound ref, see
+      // tool-script-ref.ts) with the REQUEST-SCOPED set: exactly the MCP tools
+      // active for this request. Under mcp_tool_search gating that means only
+      // search-loaded tools — exec must not bypass the discovery gate. The map
+      // is rebuilt on every resolveTools pass, so the view tracks each turn.
+      const execMcpView: Record<string, AITool> = {}
+      for (const [key] of mcpTools) {
+        if (!tools[key] || !activeTools.has(key)) continue
+        if (key === MCP_TOOL_SEARCH_ID) continue
+        execMcpView[key] = tools[key]
+      }
+      toolScriptMcp.current = () => Effect.succeed(execMcpView)
 
       return {
         tools,

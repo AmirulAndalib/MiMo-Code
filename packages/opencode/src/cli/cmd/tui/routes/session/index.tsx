@@ -2316,6 +2316,22 @@ function ToolScript(props: ToolProps<typeof ToolScriptTool>) {
     if (isRunning()) return base
     return failed() ? `${status()} · ${base}` : base
   })
+  // Per-call trace tail published live via ctx.metadata (see publishProgress
+  // in tool-script.ts). While running, show the last few sub-calls under the
+  // summary line so long batches aren't a black box.
+  type RecentCall = { name: string; status: string; durationMs: number; error?: string }
+  const recent = createMemo(() => {
+    const r = meta().recent as RecentCall[] | undefined
+    return Array.isArray(r) ? r : []
+  })
+  const recentLines = createMemo(() =>
+    recent()
+      .slice(-5)
+      .map(
+        (t) =>
+          `  ${t.status === "error" ? "✗" : "✓"} ${t.name} [${t.durationMs}ms]${t.error ? ` ${t.error.slice(0, 80)}` : ""}`,
+      ),
+  )
 
   const code = createMemo(() => ((props.input.code as string | undefined) ?? "").trim())
   // exec embeds nested tool output (a `bash` call's stdout) into <return_value>
@@ -2343,6 +2359,9 @@ function ToolScript(props: ToolProps<typeof ToolScriptTool>) {
         >
           <box gap={1}>
             <text fg={theme.textMuted}>{clip(code())}</text>
+            <Show when={recentLines().length > 0}>
+              <text fg={theme.textMuted}>{recentLines().join("\n")}</text>
+            </Show>
             <Show when={output()}>
               <text fg={failed() ? theme.error : theme.text}>{clip(output())}</text>
             </Show>
