@@ -277,6 +277,7 @@ export interface Interface {
   readonly command: (input: CommandInput) => Effect.Effect<MessageV2.WithParts>
   readonly resolvePromptParts: (template: string) => Effect.Effect<PromptInput["parts"]>
   readonly sweepOrphanAssistants: (sessionID: SessionID, immediate?: boolean) => Effect.Effect<void>
+  readonly sweepOrphanToolParts: (sessionID: SessionID) => Effect.Effect<void>
   readonly predict: (input: { sessionID: SessionID }) => Effect.Effect<string>
 }
 
@@ -2261,6 +2262,50 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       }
     })
 
+    // A tool part is persisted as `running` the moment the tool STARTS (so the TUI
+    // can stream progress) and is only rewritten by the abort finalizer in
+    // `SessionProcessor.cleanup`. Every exit path that skips that finalizer — process
+    // kill, crash, dev restart — leaves the row `running` forever, so the transcript
+    // permanently shows tool calls that will never finish. Nothing else repairs them:
+    // the model-message converter (`MessageV2.toModelMessages`) synthesizes an
+    // `output-error` for `pending`/`running` parts so the provider never sees a
+    // dangling `tool_use`, but it never touches the persisted row.
+    //
+    // SAFETY — a CURRENTLY EXECUTING tool part is also `running`, so an unscoped
+    // "rewrite every running row" sweep would corrupt live turns. Two guards, both
+    // required, both narrow:
+    //   1. session status must be `idle`. `busy`/`retry` mean an active runner owns
+    //      this session, and a tool can only execute inside a runner's turn. This is
+    //      the same gate `sweepOrphanAssistants`' caller relies on, kept INSIDE the
+    //      function here because that is where the danger lives.
+    //   2. the MAIN slice only (`sessions.messages` default). `SessionProcessor` only
+    //      publishes status for the main slice (`if (isMain) status.set(...)`), so a
+    //      subagent slice can be executing tools while the session status reads
+    //      `idle` — its parts are out of scope.
+    const sweepOrphanToolParts = Effect.fn("SessionPrompt.sweepOrphanToolParts")(function* (sessionID: SessionID) {
+      if ((yield* status.get(sessionID)).type !== "idle") return
+      for (const m of yield* sessions.messages({ sessionID })) {
+        if (m.info.role !== "assistant") continue
+        for (const part of m.parts) {
+          if (part.type !== "tool") continue
+          if (part.state.status !== "pending" && part.state.status !== "running") continue
+          yield* sessions
+            .updatePart({ ...part, state: MessageV2.abortedToolState(part.state) })
+            .pipe(
+              Effect.catchCause((cause) =>
+                elog.warn("orphan-tool-part-update-failed", { sessionID, partID: part.id, cause }),
+              ),
+            )
+          yield* elog.info("orphan-tool-part-cleared", {
+            sessionID,
+            messageID: m.info.id,
+            partID: part.id,
+            tool: part.tool,
+          })
+        }
+      }
+    })
+
     const prompt: (input: PromptInput) => Effect.Effect<MessageV2.WithParts> = Effect.fn("SessionPrompt.prompt")(
       function* (input: PromptInput) {
         const session = yield* sessions.get(input.sessionID)
@@ -2271,6 +2316,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           // so a fresh message is not rendered as stuck QUEUED behind it.
           const idle = (yield* status.get(input.sessionID)).type === "idle"
           yield* sweepOrphanAssistants(input.sessionID, idle)
+          // Same recovery point, same idleness argument: repair tool parts a killed
+          // process left stuck at `running`. Self-gated on idle (see the function).
+          yield* sweepOrphanToolParts(input.sessionID)
         }
         const message = yield* createUserMessage(input)
         yield* sessions.touch(input.sessionID)
@@ -4321,6 +4369,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       command,
       resolvePromptParts,
       sweepOrphanAssistants,
+      sweepOrphanToolParts,
       predict,
     })
     sessionPromptRef.current = { loop: impl.loop }

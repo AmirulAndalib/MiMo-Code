@@ -30,6 +30,7 @@ import { useExit } from "./exit"
 import { useArgs } from "./args"
 import { batch, onMount } from "solid-js"
 import { Log } from "@/util"
+import { isDirectoryDeniedError } from "@/server/routes/instance/access"
 import { emptyConsoleState, type ConsoleState } from "@/config/console-state"
 
 /**
@@ -271,7 +272,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     event.subscribe((event) => {
       switch (event.type) {
         case "server.instance.disposed":
-          void bootstrap()
+          void bootstrap().catch(() => {})
           break
         case "permission.replied": {
           const requests = store.permission[event.properties.sessionID]
@@ -786,20 +787,28 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         })
         .catch(async (e) => {
           Log.Default.error("tui bootstrap failed", {
-            error: e instanceof Error ? e.message : String(e),
+            error: isDirectoryDeniedError(e) ? e.error : e instanceof Error ? e.message : String(e),
             name: e instanceof Error ? e.name : undefined,
             stack: e instanceof Error ? e.stack : undefined,
           })
-          if (fatal) {
+          // The server's directory whitelist rejecting the requested directory is a
+          // recoverable policy decision, not a broken TUI: exiting here would take
+          // the user's whole session down over a mistyped/untrusted path. Always
+          // rethrow so the switch caller can restore the previous directory and show
+          // the error. Genuinely fatal bootstrap failures still exit.
+          if (fatal && !isDirectoryDeniedError(e)) {
             await exit(e)
-          } else {
-            throw e
+            return
           }
+          throw e
         })
     }
 
     onMount(() => {
-      void bootstrap()
+      // Errors are already logged (and exited on, when fatal) inside bootstrap; the
+      // rethrown recoverable case has no caller here, so swallow it rather than
+      // emitting an unhandled rejection.
+      void bootstrap().catch(() => {})
     })
 
     const result = {

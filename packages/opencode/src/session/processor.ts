@@ -743,21 +743,28 @@ export const layer: Layer.Layer<
         for (const toolCallID of Object.keys(ctx.toolcalls)) {
           const match = yield* readToolCall(toolCallID)
           if (!match) continue
-          const part = match.part
-          const end = Date.now()
-          const metadata = "metadata" in part.state && isRecord(part.state.metadata) ? part.state.metadata : {}
           yield* session.updatePart({
-            ...part,
-            state: {
-              ...part.state,
-              status: "error",
-              error: "Tool execution aborted",
-              metadata: { ...metadata, interrupted: true },
-              time: { start: "time" in part.state ? part.state.time.start : end, end },
-            },
+            ...match.part,
+            state: MessageV2.abortedToolState(match.part.state),
           })
         }
         ctx.toolcalls = {}
+        // Second pass, DB-driven. The loop above can only see calls this process
+        // still holds in `ctx.toolcalls`, so a call whose registration lost the race
+        // with teardown, or that arrived after the map was cleared, or whose
+        // `readToolCall` lookup missed, keeps its persisted `running` status forever
+        // — the transcript then shows a tool call that will never finish. Every tool
+        // part of THIS assistant message belongs to the turn being torn down here,
+        // so any part still `pending`/`running` is unfinalized by definition.
+        // Idempotent: the pass above already rewrote the tracked ones.
+        for (const part of yield* Effect.sync(() => MessageV2.parts(ctx.assistantMessage.id))) {
+          if (part.type !== "tool") continue
+          if (part.state.status !== "pending" && part.state.status !== "running") continue
+          yield* session.updatePart({
+            ...part,
+            state: MessageV2.abortedToolState(part.state),
+          })
+        }
         ctx.assistantMessage.time.completed = Date.now()
         yield* session.updateMessage(ctx.assistantMessage)
       })
