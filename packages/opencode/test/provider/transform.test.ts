@@ -4607,6 +4607,23 @@ describe("ProviderTransform.message - non-array content guard (j.map is not a fu
     ] as any[]
     expect(() => ProviderTransform.message(msgs, genericModel, {})).not.toThrow()
   })
+
+  // Policy pin, not a reachability claim: tool messages are always built with
+  // array content, so this input does not occur in normal use. It is pinned
+  // because normalizeContentArray must agree with ensureNonEmptyContent, which
+  // deliberately leaves tool messages untouched — injecting a text part into a
+  // tool message breaks tool_use/tool_result pairing (trading one 400 for
+  // another), and `content: []` is itself illegal for a tool result.
+  test("a tool message with non-array content is never text-backfilled", () => {
+    const msgs = [
+      { role: "user", content: [{ type: "text", text: "run it" }] },
+      { role: "assistant", content: [{ type: "tool-call", toolCallId: "c1", toolName: "bash", input: {} }] },
+      { role: "tool", content: undefined },
+    ] as any[]
+    const tool = ProviderTransform.message(msgs, genericModel, {}).find((m) => m.role === "tool")
+    expect(tool).toBeDefined()
+    expect(Array.isArray(tool!.content) && tool!.content.some((p: any) => p.type === "text")).toBe(false)
+  })
 })
 
 describe("ProviderTransform.message - interleaved field: openrouter exclusion", () => {

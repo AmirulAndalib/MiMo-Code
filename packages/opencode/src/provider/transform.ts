@@ -603,11 +603,17 @@ function applyCaching(msgs: ModelMessage[], model: Provider.Model): ModelMessage
 // downstream. An assistant gets `[]` because it carries no obligation: the
 // non-empty invariant drops empty assistant residue and the trailing-user guard
 // then re-establishes the prefill invariant.
+//
+// A `tool` message is left EXACTLY as-is, matching ensureNonEmptyContent's
+// per-role policy: injecting a text part into a tool message breaks tool_use /
+// tool_result pairing, which trades one 400 for another, and emitting `content:
+// []` is itself illegal for a tool result. Only `user` gets the backfill.
 function normalizeContentArray(msgs: ModelMessage[]): ModelMessage[] {
   return msgs.map((msg) => {
     if (typeof msg.content === "string" || Array.isArray(msg.content)) return msg
     if (msg.role === "assistant") return { ...msg, content: [] } as ModelMessage
-    return { ...msg, content: [{ type: "text", text: EMPTY_CONTENT_PLACEHOLDER }] } as ModelMessage
+    if (msg.role === "user") return { ...msg, content: [{ type: "text", text: EMPTY_CONTENT_PLACEHOLDER }] } as ModelMessage
+    return msg
   })
 }
 
