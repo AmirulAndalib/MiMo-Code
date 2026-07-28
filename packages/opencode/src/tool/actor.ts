@@ -178,16 +178,23 @@ const mapActorVerb = Effect.fn("mapActorVerb")(function* (verb: string | undefin
       const { flags, rest } = yield* extractNamedFlags(args, ["session", "type"], line)
       if (rest.length !== 2)
         return yield* actorArityError("send", '<to_actor_id> "<content>" [--session <id>] [--type <t>]', rest, line)
-      // Parity with the JSON path's `content: z.string().min(1)`. shell-wrap
-      // calls def.execute(parsed) directly, so a shell-parsed op is NEVER
-      // re-validated against `parameters` — without this, `actor send main ""`
-      // queued a body-less inbox row that drain() then rendered into an
-      // unusable synthetic user text part.
-      if (rest[1] === "")
+      // NOT the layer that makes a blank body unreachable — `parameters` DOES
+      // re-validate a shell-parsed op. shell-wrap.ts calls `def.execute(parsed)`
+      // on the def produced by Tool.init, which is wrap()-decorated, and wrap()
+      // runs `parameters.parse(args)` inside execute — so `content:
+      // z.string().min(1)` already rejects `actor send x ""` (verified: with
+      // this guard removed the shell route still enqueues nothing and reports
+      // `Too small: expected string to have >=1 characters → at
+      // operation.content`).
+      //
+      // This guard earns its place for two other reasons: it turns that generic
+      // zod dump into one specific, teachable message, and `.trim()` also
+      // rejects whitespace-only bodies, which `min(1)` accepts.
+      if (rest[1].trim() === "")
         return yield* Effect.fail({
           kind: "flag" as const,
           line,
-          detail: `actor: send: content must not be empty`,
+          detail: "actor: send: content must not be empty",
         })
       return {
         operation: {

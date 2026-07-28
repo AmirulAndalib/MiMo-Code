@@ -199,18 +199,34 @@ describe("actor.shell.parse: send", () => {
     expect(err.detail).toContain("to_actor_id")
   })
 
-  // The JSON path declares `content: z.string().min(1)`, but shell-wrap routes a
-  // shell-parsed op straight to def.execute WITHOUT re-validating it against
-  // `parameters` — so an empty token used to reach Inbox.send, queue a body-less
-  // row, and become an unusable synthetic user text part after drain(). Reject it
-  // here so the model gets a loud, self-correctable error instead.
-  test("send with an empty content token is rejected (parity with the JSON min(1))", async () => {
-    const exit = await Effect.runPromise(Effect.exit(parseActorScript('actor send main "" --type actor_notification')))
-    expect(exit._tag).toBe("Failure")
-    const cause: any = (exit as any).cause
-    const fail = cause.reasons?.find?.((r: any) => r._tag === "Fail") ?? cause
-    const err = fail.error ?? fail
-    expect(err.detail).toContain("content must not be empty")
+  // A blank body is already unreachable via the tool: `parameters` DOES re-validate
+  // a shell-parsed op (shell-wrap.ts calls `def.execute(parsed)` on the
+  // wrap()-decorated def, and wrap() runs `parameters.parse` inside execute), so
+  // `content: z.string().min(1)` rejects it — see
+  // test/inbox/empty-notification-reachability.test.ts for the end-to-end proof.
+  // These cases pin the parse-level guard, which exists to turn a generic zod dump
+  // into one specific, teachable message and to also reject whitespace-only bodies
+  // (which `min(1)` accepts).
+  for (const script of [
+    'actor send main ""',
+    'actor send main "" --type actor_notification',
+    'actor send main "   " --type actor_notification',
+  ]) {
+    test(`send rejects a blank content: ${script}`, async () => {
+      const exit = await Effect.runPromise(Effect.exit(parseActorScript(script)))
+      expect(exit._tag).toBe("Failure")
+      const cause: any = (exit as any).cause
+      const fail = cause.reasons?.find?.((r: any) => r._tag === "Fail") ?? cause
+      const err = fail.error ?? fail
+      expect(err.detail).toContain("content must not be empty")
+    })
+  }
+
+  test("send still accepts a short non-blank content (guard is not over-broad)", async () => {
+    const out = await parse('actor send main "0" --type actor_notification')
+    expect(out).toEqual([
+      { operation: { action: "send", to_actor_id: "main", content: "0", type: "actor_notification" } },
+    ])
   })
 })
 

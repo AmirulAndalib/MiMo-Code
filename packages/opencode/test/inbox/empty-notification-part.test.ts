@@ -12,13 +12,16 @@ import { MessageID, SessionID } from "../../src/session/schema"
 import { ProviderID, ModelID } from "../../src/provider/schema"
 import { tmpdir } from "../fixture/fixture"
 
-// Producer of the empty-user-content provider 400.
+// Latent defence gap in the inbox render/drain path (NOT an observed producer —
+// see empty-notification-reachability.test.ts: the actor tool's shell route is
+// re-validated against `content: z.string().min(1)`, so no caller could supply a
+// blank body).
 //
 // Inbox.drain writes ONE synthetic `role:"user"` message and then one text part
 // per queued row, with `text: renderInboxRow(row)` persisted verbatim —
 // bypassing createUserMessage/hasSubstantiveContent entirely. renderInboxRow
 // used `content.text ?? "(no notification body)"`, and `??` does not catch `""`,
-// so a body-less `actor_notification` row rendered to exactly `""`. With a
+// so a body-less `actor_notification` row would render to exactly `""`. With a
 // single queued row that yields `parts: [{type:"text",text:""}]` — length 1, so
 // every `parts.length === 0` guard misses it — which `ai`'s
 // convertToLanguageModelMessage then filters to `content: []`, the shape a
@@ -122,10 +125,11 @@ describe("Inbox.drain never persists an empty user text part", () => {
       )
       await seedRealMessage(rt, session.id, "actor-empty")
 
-      // The reachable trigger: `actor send <id> "" --type actor_notification`.
-      // The JSON path's `content: z.string().min(1)` is bypassed in shell mode
-      // (shell-wrap calls def.execute(parsed) without re-validating), so an
-      // empty body did reach Inbox.send in production.
+      // Constructed, not reachable through the actor tool: the shell route IS
+      // re-validated against `content: z.string().min(1)` (see
+      // empty-notification-reachability.test.ts). This calls Inbox.send directly
+      // to pin what the layers BELOW the entry point do with a blank body, so the
+      // render/drain invariants are proven independently of any caller's guard.
       await rt.runPromise(
         Inbox.Service.use((inbox) =>
           inbox.send({
