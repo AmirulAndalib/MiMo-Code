@@ -107,6 +107,38 @@ describe("assembleFleet", () => {
     expect(summary.counts).toEqual({ progressing: 0, stalled: 0, idle: 0, failed: 0, cancelled: 0 })
     expect(summary.rows).toEqual([])
   })
+
+  // Defect A: a child whose process is gone but whose registry row was never
+  // reconciled must NOT be reported as routable. Both `progressing` and
+  // `stalled` are "in progress" buckets — the orchestrator routes work to them
+  // and treats them as already in flight — so a row that has claimed
+  // running/pending for longer than any live turn could must land in `idle`.
+  // Field values are the two real fixture rows measured in an isolated dev home
+  // (peers "Fix calc.py add() bug" turnCount 26 and "Modernize docs/README.md
+  // install steps" turnCount 20), replayed a day after their last turn.
+  test("a row still claiming running a day after its last turn is not routable", () => {
+    const DAY = 24 * 60 * 60_000
+    const inputs: FleetActorInput[] = [
+      {
+        session: sess("ses_05c0af252ffeigpmiJbqaa8vUV", "[topic:calc-py] Fix calc.py add() bug", "/wt/calc"),
+        actor: actor({ status: "running", lastTurnTime: NOW - DAY, turnCount: 26, time: { created: NOW - DAY - 60_000, updated: NOW - DAY } }),
+      },
+      {
+        session: sess("ses_05c08a1e9ffeFg2DEKBuhhBxuS", "[topic:docs-readme] Modernize docs/README.md", "/wt/docs"),
+        actor: actor({ status: "pending", lastTurnTime: NOW - DAY, turnCount: 20, time: { created: NOW - DAY - 60_000, updated: NOW - DAY } }),
+      },
+      // A never-started child spawned a day ago (defect B at the consumer layer).
+      {
+        session: sess("ses_never", "queued forever", "/wt/never"),
+        actor: actor({ status: "pending", lastTurnTime: NOW - DAY, turnCount: 0, time: { created: NOW - DAY, updated: NOW - DAY } }),
+      },
+    ]
+    const summary = assembleFleet(inputs, [], NOW)
+    expect(summary.counts.progressing).toBe(0)
+    expect(summary.counts.stalled).toBe(0)
+    expect(summary.counts.idle).toBe(3)
+    expect(summary.rows.map((r) => r.liveness)).toEqual(["idle", "idle", "idle"])
+  })
 })
 
 describe("renderFleetTable", () => {

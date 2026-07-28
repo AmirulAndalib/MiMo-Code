@@ -58,7 +58,9 @@ export type Actor = z.infer<typeof Actor>
 //   - stalled: running/pending, HAS run at least one turn, BUT no turn advance
 //     for longer than the window.
 //   - success | failure | cancelled: terminal, taken straight from lastOutcome.
-//   - idle: finished with no recorded outcome (or an unknown state).
+//   - idle: finished with no recorded outcome, an unknown state, OR a row whose
+//     claim to be running/pending has outlived DEFAULT_LIVENESS_ABANDON_MS — see
+//     that constant for why an unbounded claim is not honest.
 // Never fabricates: every value maps 1:1 to fields the engine actually wrote.
 export const Liveness = z.enum(["progressing", "stalled", "success", "failure", "cancelled", "idle"])
 export type Liveness = z.infer<typeof Liveness>
@@ -70,14 +72,37 @@ export type Liveness = z.infer<typeof Liveness>
 // watchdog (T40) would fire.
 export const DEFAULT_LIVENESS_STALL_MS = 90_000
 
+// Abandonment bound: how long a row may keep CLAIMING `running`/`pending` before
+// we stop believing it. `progressing` and `stalled` both read as "in progress" to
+// every consumer (the orchestrator roster, `session list`, the fleet table) — they
+// mark a child as routable and imply something is already in flight. That claim
+// needs an upper bound, because the only repair for a row whose owner died is
+// ActorRegistry's orphan sweep, and that sweep runs ONCE at process init and only
+// for rows carrying a DIFFERENT instance_id; until it runs — and for any row it
+// cannot reach — the row asserts progress with nothing behind it.
+// 30 minutes, picked the same way DEFAULT_LIVENESS_STALL_MS was: a child that has
+// genuinely begun bumps last_turn_time on EVERY step (updateTurn is the per-step
+// heartbeat), so 30m of silence is an order of magnitude past the 5-minute
+// stuck-detection cutoff and unreachable by a live turn; a child that has not
+// begun is waiting on the concurrency gate, which admits work continuously, so
+// 30m of zero admissions means its process is gone. Past the bound we report
+// `idle` — "finished with no recorded outcome (or an unknown state)", the honest
+// reading and the only non-routable bucket.
+export const DEFAULT_LIVENESS_ABANDON_MS = 30 * 60_000
+
 export function deriveLiveness(
-  actor: Pick<Actor, "status" | "lastOutcome" | "lastTurnTime" | "turnCount">,
+  actor: Pick<Actor, "status" | "lastOutcome" | "lastTurnTime" | "turnCount" | "time">,
   now: number = Date.now(),
   stallMs: number = DEFAULT_LIVENESS_STALL_MS,
+  abandonMs: number = DEFAULT_LIVENESS_ABANDON_MS,
 ): Liveness {
   if (actor.status === "running" || actor.status === "pending") {
-    // Not-yet-started child (no turn completed): last_turn_time is the spawn
-    // time, so a slow first turn (queued/cold-start) is not a stall.
+    // A started child's evidence of life is its last turn; a not-yet-started one
+    // has none, so its spawn time is the only honest reference.
+    if (now - (actor.turnCount === 0 ? actor.time.created : actor.lastTurnTime) > abandonMs) return "idle"
+    // Not-yet-started child (no turn completed): a slow first turn (queued behind
+    // the concurrency gate / cold-start) is not a stall — the leniency is kept,
+    // but bounded by abandonMs above rather than unbounded.
     if (actor.turnCount === 0) return "progressing"
     return now - actor.lastTurnTime <= stallMs ? "progressing" : "stalled"
   }

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { Layer, ManagedRuntime, Effect } from "effect"
 import { ActorRegistry } from "../../src/actor/registry"
-import { deriveLiveness, DEFAULT_LIVENESS_STALL_MS } from "../../src/actor/schema"
+import { deriveLiveness, DEFAULT_LIVENESS_STALL_MS, DEFAULT_LIVENESS_ABANDON_MS } from "../../src/actor/schema"
 import { Bus } from "../../src/bus"
 import { Session } from "../../src/session"
 import { SessionID } from "../../src/session/schema"
@@ -38,14 +38,29 @@ describe("deriveLiveness (T39 derivation rule)", () => {
 
   test("running + recent turn (within window) → progressing", () => {
     expect(
-      deriveLiveness({ status: "running", lastOutcome: undefined, lastTurnTime: now - 1_000, turnCount: 1 }, now),
+      deriveLiveness(
+        {
+          status: "running",
+          lastOutcome: undefined,
+          lastTurnTime: now - 1_000,
+          turnCount: 1,
+          time: { created: now - 2_000, updated: now - 1_000 },
+        },
+        now,
+      ),
     ).toBe("progressing")
   })
 
   test("running + turn older than the window → stalled", () => {
     expect(
       deriveLiveness(
-        { status: "running", lastOutcome: undefined, lastTurnTime: now - (DEFAULT_LIVENESS_STALL_MS + 1), turnCount: 1 },
+        {
+          status: "running",
+          lastOutcome: undefined,
+          lastTurnTime: now - (DEFAULT_LIVENESS_STALL_MS + 1),
+          turnCount: 1,
+          time: { created: now - (DEFAULT_LIVENESS_STALL_MS + 2), updated: now },
+        },
         now,
       ),
     ).toBe("stalled")
@@ -57,13 +72,25 @@ describe("deriveLiveness (T39 derivation rule)", () => {
     // must read progressing, not stalled.
     expect(
       deriveLiveness(
-        { status: "pending", lastOutcome: undefined, lastTurnTime: now - 10 * 60_000, turnCount: 0 },
+        {
+          status: "pending",
+          lastOutcome: undefined,
+          lastTurnTime: now - 10 * 60_000,
+          turnCount: 0,
+          time: { created: now - 10 * 60_000, updated: now - 10 * 60_000 },
+        },
         now,
       ),
     ).toBe("progressing")
     expect(
       deriveLiveness(
-        { status: "running", lastOutcome: undefined, lastTurnTime: now - 10 * 60_000, turnCount: 0 },
+        {
+          status: "running",
+          lastOutcome: undefined,
+          lastTurnTime: now - 10 * 60_000,
+          turnCount: 0,
+          time: { created: now - 10 * 60_000, updated: now - 10 * 60_000 },
+        },
         now,
       ),
     ).toBe("progressing")
@@ -71,17 +98,35 @@ describe("deriveLiveness (T39 derivation rule)", () => {
 
   test("pending is treated as live and split by the same window (once it has run a turn)", () => {
     expect(
-      deriveLiveness({ status: "pending", lastOutcome: undefined, lastTurnTime: now, turnCount: 1 }, now),
+      deriveLiveness(
+        { status: "pending", lastOutcome: undefined, lastTurnTime: now, turnCount: 1, time: { created: now, updated: now } },
+        now,
+      ),
     ).toBe("progressing")
     expect(
-      deriveLiveness({ status: "pending", lastOutcome: undefined, lastTurnTime: now - 10 * 60_000, turnCount: 1 }, now),
+      deriveLiveness(
+        {
+          status: "pending",
+          lastOutcome: undefined,
+          lastTurnTime: now - 10 * 60_000,
+          turnCount: 1,
+          time: { created: now - 11 * 60_000, updated: now - 10 * 60_000 },
+        },
+        now,
+      ),
     ).toBe("stalled")
   })
 
   test("exactly at the threshold boundary is still progressing (<= window)", () => {
     expect(
       deriveLiveness(
-        { status: "running", lastOutcome: undefined, lastTurnTime: now - DEFAULT_LIVENESS_STALL_MS, turnCount: 1 },
+        {
+          status: "running",
+          lastOutcome: undefined,
+          lastTurnTime: now - DEFAULT_LIVENESS_STALL_MS,
+          turnCount: 1,
+          time: { created: now - DEFAULT_LIVENESS_STALL_MS - 1, updated: now },
+        },
         now,
       ),
     ).toBe("progressing")
@@ -89,24 +134,104 @@ describe("deriveLiveness (T39 derivation rule)", () => {
 
   test("custom stallMs overrides the default window", () => {
     // 5s-old turn: stalled under a 1s window, progressing under a 60s window.
-    expect(
-      deriveLiveness({ status: "running", lastOutcome: undefined, lastTurnTime: now - 5_000, turnCount: 1 }, now, 1_000),
-    ).toBe("stalled")
-    expect(
-      deriveLiveness({ status: "running", lastOutcome: undefined, lastTurnTime: now - 5_000, turnCount: 1 }, now, 60_000),
-    ).toBe("progressing")
+    const wedged = {
+      status: "running" as const,
+      lastOutcome: undefined,
+      lastTurnTime: now - 5_000,
+      turnCount: 1,
+      time: { created: now - 6_000, updated: now - 5_000 },
+    }
+    expect(deriveLiveness(wedged, now, 1_000)).toBe("stalled")
+    expect(deriveLiveness(wedged, now, 60_000)).toBe("progressing")
   })
 
   test("terminal outcomes come straight from lastOutcome regardless of turn age", () => {
-    expect(deriveLiveness({ status: "idle", lastOutcome: "success", lastTurnTime: 0, turnCount: 1 }, now)).toBe("success")
-    expect(deriveLiveness({ status: "idle", lastOutcome: "failure", lastTurnTime: 0, turnCount: 1 }, now)).toBe("failure")
-    expect(deriveLiveness({ status: "idle", lastOutcome: "cancelled", lastTurnTime: 0, turnCount: 1 }, now)).toBe(
-      "cancelled",
-    )
+    const terminal = { status: "idle" as const, lastTurnTime: 0, turnCount: 1, time: { created: 0, updated: 0 } }
+    expect(deriveLiveness({ ...terminal, lastOutcome: "success" }, now)).toBe("success")
+    expect(deriveLiveness({ ...terminal, lastOutcome: "failure" }, now)).toBe("failure")
+    expect(deriveLiveness({ ...terminal, lastOutcome: "cancelled" }, now)).toBe("cancelled")
   })
 
   test("idle with no outcome → idle", () => {
-    expect(deriveLiveness({ status: "idle", lastOutcome: undefined, lastTurnTime: 0, turnCount: 0 }, now)).toBe("idle")
+    expect(
+      deriveLiveness(
+        { status: "idle", lastOutcome: undefined, lastTurnTime: 0, turnCount: 0, time: { created: 0, updated: 0 } },
+        now,
+      ),
+    ).toBe("idle")
+  })
+
+  // === Defect B: the turnCount-0 leniency is bounded, not unbounded ===
+  // A child that died BEFORE its first turn used to read `progressing` forever,
+  // because `turnCount === 0` returned early and skipped every staleness check.
+  // The leniency is still there — it is now measured from spawn time and capped
+  // by DEFAULT_LIVENESS_ABANDON_MS.
+  test("never-started child spawned long ago does NOT read progressing", () => {
+    const stillborn = {
+      status: "pending" as const,
+      lastOutcome: undefined,
+      lastTurnTime: now - 24 * 60 * 60_000,
+      turnCount: 0,
+      time: { created: now - 24 * 60 * 60_000, updated: now - 24 * 60 * 60_000 },
+    }
+    expect(deriveLiveness(stillborn, now)).not.toBe("progressing")
+    expect(deriveLiveness(stillborn, now)).toBe("idle")
+    expect(deriveLiveness({ ...stillborn, status: "running" }, now)).toBe("idle")
+  })
+
+  test("the turnCount-0 leniency still holds inside the abandonment bound", () => {
+    // Just under the bound: a queued / cold-starting first turn is still progress.
+    const created = now - (DEFAULT_LIVENESS_ABANDON_MS - 1)
+    expect(
+      deriveLiveness(
+        { status: "pending", lastOutcome: undefined, lastTurnTime: created, turnCount: 0, time: { created, updated: created } },
+        now,
+      ),
+    ).toBe("progressing")
+    // Exactly at the bound is still lenient (> abandonMs, same <= convention as stallMs).
+    const atBound = now - DEFAULT_LIVENESS_ABANDON_MS
+    expect(
+      deriveLiveness(
+        { status: "pending", lastOutcome: undefined, lastTurnTime: atBound, turnCount: 0, time: { created: atBound, updated: atBound } },
+        now,
+      ),
+    ).toBe("progressing")
+  })
+
+  // === Defect A (read side): a row whose process is gone is not routable ===
+  // ActorRegistry's orphan sweep is the only repair for a row whose owner died,
+  // and it runs once at process init for rows of a different instance. Until then
+  // the row keeps claiming running/pending, and both `progressing` and `stalled`
+  // are presented to the orchestrator as "in progress" — routable, and implying
+  // work is already in flight. Past the abandonment bound the derivation stops
+  // believing the claim.
+  test("started child still claiming running long after its last turn is not routable", () => {
+    // The measured fixture: peer "Fix calc.py add() bug", turnCount 26, replayed
+    // a day after its last turn.
+    const dead = {
+      status: "running" as const,
+      lastOutcome: undefined,
+      lastTurnTime: now - 24 * 60 * 60_000,
+      turnCount: 26,
+      time: { created: now - 25 * 60 * 60_000, updated: now - 24 * 60 * 60_000 },
+    }
+    const live = deriveLiveness(dead, now)
+    expect(live).not.toBe("stalled")
+    expect(live).not.toBe("progressing")
+    expect(live).toBe("idle")
+  })
+
+  test("custom abandonMs overrides the default bound", () => {
+    const row = {
+      status: "running" as const,
+      lastOutcome: undefined,
+      lastTurnTime: now - 10 * 60_000,
+      turnCount: 3,
+      time: { created: now - 11 * 60_000, updated: now - 10 * 60_000 },
+    }
+    // 10m-old turn: stalled under the default 30m bound, abandoned under a 5m one.
+    expect(deriveLiveness(row, now)).toBe("stalled")
+    expect(deriveLiveness(row, now, DEFAULT_LIVENESS_STALL_MS, 5 * 60_000)).toBe("idle")
   })
 })
 
