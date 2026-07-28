@@ -35,10 +35,20 @@ export const { use: useProject, provider: ProjectProvider } = createSimpleContex
 
     async function sync() {
       const workspace = store.workspace.current
+      const directory = sdk.directory
       const [path, project] = await Promise.all([
         sdk.client.path.get({ workspace }),
         sdk.client.project.current({ workspace }),
       ])
+
+      // A directory switch (worktree dialog, orchestrator entry) disposes the old
+      // instance and bootstraps the new one, and the resulting
+      // server.instance.disposed event fires a SECOND bootstrap whose requests
+      // were built from the pre-switch client. That stale run can resolve last
+      // and describe a directory the client no longer talks to; writing it makes
+      // instance.path disagree with sdk.directory, which silently drops every
+      // live event in useEvent (it filters on instance.directory()).
+      if (sdk.directory !== directory) return
 
       batch(() => {
         setStore("instance", "path", reconcile(path.data || defaultPath))

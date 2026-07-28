@@ -267,6 +267,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
 
     const fullSyncedSessions = new Set<string>()
     let syncedWorkspace = project.workspace.current()
+    let syncedDirectory = sdk.directory
 
     event.subscribe((event) => {
       switch (event.type) {
@@ -696,10 +697,25 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     async function bootstrap(input: { fatal?: boolean } = {}) {
       const fatal = input.fatal ?? true
       const workspace = project.workspace.current()
-      if (workspace !== syncedWorkspace) {
+      const directory = sdk.directory
+      // fullSyncedSessions exists to keep a re-entered session from refetching its
+      // whole transcript on every navigation. That cache is scoped to the data
+      // source, so it must be dropped whenever the source changes — a workspace
+      // switch OR a directory switch (sdk.switchDirectory). Without the directory
+      // half, a session synced before the switch can never be re-synced, so any
+      // update missed during the switch window stays invisible for the rest of the
+      // session. An unchanged workspace+directory still short-circuits.
+      if (workspace !== syncedWorkspace || directory !== syncedDirectory) {
         fullSyncedSessions.clear()
         syncedWorkspace = workspace
+        syncedDirectory = directory
       }
+      // A bootstrap triggered before a directory switch (e.g. the
+      // server.instance.disposed handler above, which fires while the switch is
+      // mid-flight) issues its requests against the OLD directory. Its responses
+      // must not be written once the client has moved on, or the store ends up
+      // describing a directory sdk no longer talks to.
+      const stale = () => sdk.directory !== directory
       const start = Date.now() - 30 * 24 * 60 * 60 * 1000
       // roots: true so child sessions (subagents, workers) don't crowd root
       // sessions out of the server-side limit
@@ -743,6 +759,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
             configResponse,
             ...(sessionListResponse ? [sessionListResponse] : []),
           ]).then((responses) => {
+            if (stale()) return
             const providers = responses[0]
             const providerList = responses[1]
             const consoleState = responses[2]
@@ -762,6 +779,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           })
         })
         .then(() => {
+          if (stale()) return
           if (store.status !== "complete") setStore("status", "partial")
           // non-blocking
           void Promise.all([
