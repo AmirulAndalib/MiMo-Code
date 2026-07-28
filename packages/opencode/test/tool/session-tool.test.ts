@@ -1397,6 +1397,115 @@ describe("session tool ask (fork-query) functional", () => {
     ),
     60000,
   )
+
+  // DEFECT 2 (a): the topic label is a MODEL-authored free-text key, so exact
+  // string matching made find-or-reuse fail on the near-misses a model actually
+  // types — and every miss is a duplicate child for one theme. The key is now
+  // normalized (case-folded, separators collapsed), so `--topic "PR 1741"` and
+  // `--topic pr_1741` are one topic.
+  askIt.live("DEFECT 2: --topic reuse is robust to casing and separator drift in the label", () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const sessions = yield* Session.Service
+        const actorReg = yield* ActorRegistry.Service
+        const parent = yield* sessions.create({
+          title: "topic-normalization parent",
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        })
+        yield* llm.hang
+
+        const info = yield* SessionTool
+        const tool = yield* info.init()
+
+        const peerCount = () =>
+          Effect.gen(function* () {
+            const kids = yield* sessions.children(parent.id)
+            const enriched = yield* Effect.forEach(kids, (child) =>
+              actorReg.get(child.id, child.id).pipe(Effect.map((a) => ({ child, actor: a }))),
+            )
+            return enriched.filter(({ actor }) => actor?.mode === "peer")
+          })
+
+        const first = yield* tool.execute(
+          { operation: { action: "create", task: "review the roster", mode: "build", topic: "PR 1741" } },
+          ctx(parent.id),
+        )
+        const firstID = first.metadata.sessionID!
+        expect(firstID).toBeDefined()
+        expect((yield* peerCount()).length).toBe(1)
+
+        // Same theme, differently spelled label → MUST reuse, not duplicate.
+        const second = yield* tool.execute(
+          { operation: { action: "create", task: "also fix the drift", mode: "build", topic: "pr_1741" } },
+          ctx(parent.id),
+        )
+        expect(second.metadata.sessionID).toBe(firstID)
+        expect(second.title).toContain("Reused topic")
+        expect((yield* peerCount()).length).toBe(1)
+
+        // And a genuinely different topic still gets its own child — the
+        // normalization forgives spelling, it does not merge distinct themes.
+        const third = yield* tool.execute(
+          { operation: { action: "create", task: "unrelated work", mode: "build", topic: "pr-1782" } },
+          ctx(parent.id),
+        )
+        expect(third.metadata.sessionID).not.toBe(firstID)
+        expect((yield* peerCount()).length).toBe(2)
+      }),
+      { git: true, config: askProviderCfg },
+    ),
+    60000,
+  )
+
+  // DEFECT 2 (b): the <active-sessions> roster is assembled once per REQUEST, so
+  // a child created earlier in the SAME turn is invisible to the model until the
+  // next request — that is how one live turn spawned two children for the same
+  // docs topic and had to cancel one. A tool RESULT, unlike the system prompt, is
+  // read before the model's next tool call, so `session create` now echoes the
+  // routable sibling roster into its own output.
+  askIt.live("DEFECT 2: session create echoes the routable sibling roster so the same turn can route instead", () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const sessions = yield* Session.Service
+        const parent = yield* sessions.create({
+          title: "same-turn dedup parent",
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        })
+        yield* llm.hang
+
+        const info = yield* SessionTool
+        const tool = yield* info.init()
+
+        // First create: nothing else exists yet, so no sibling roster is emitted.
+        const first = yield* tool.execute(
+          { operation: { action: "create", task: "write the docs page", mode: "build", title: "docs page" } },
+          ctx(parent.id),
+        )
+        const firstID = first.metadata.sessionID!
+        expect(firstID).toBeDefined()
+        expect(first.output).not.toContain("ROUTE FIRST")
+
+        // Second create in the SAME turn: the output must hand back the existing
+        // child's id and the route-first instruction, so the model's very next
+        // tool call can `session send` instead of creating a third.
+        const second = yield* tool.execute(
+          { operation: { action: "create", task: "polish the docs page", mode: "build", title: "docs polish" } },
+          ctx(parent.id),
+        )
+        const secondID = second.metadata.sessionID!
+        expect(second.output).toContain("ROUTE FIRST")
+        expect(second.output).toContain(firstID)
+        expect(second.output).toContain("session send <id> <task>")
+        // It advertises the sibling, not itself.
+        expect(second.output.slice(second.output.indexOf("ROUTE FIRST"))).not.toContain(secondID)
+        // Roster shape matches the system-prompt roster: id | title | agent | status
+        expect(second.output).toMatch(new RegExp(`${firstID} \\| .*docs page.* \\| build \\| (progressing|idle)`))
+        expect(secondID).toBeDefined()
+      }),
+      { git: true, config: askProviderCfg },
+    ),
+    60000,
+  )
 })
 
 // === T38: fan-in aggregation (session join) ===

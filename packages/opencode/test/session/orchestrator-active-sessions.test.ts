@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test"
 import path from "path"
 import { Effect, Stream, ManagedRuntime, Layer } from "effect"
-import { LLM } from "../../src/session/llm"
+import { LLM, ROSTER_IDLE_LIMIT } from "../../src/session/llm"
 import { ActorRegistry } from "../../src/actor/registry"
 import { Session as SessionNs } from "../../src/session"
 import { Instance } from "../../src/project/instance"
@@ -160,7 +160,26 @@ function tmpConfig(baseURL: string) {
 /** A real parent session plus real peer children, each with a real registry row. */
 type Child = { id: SessionID; title: string }
 
-async function seedFleet(children: Array<{ title: string; agent: string; terminal?: boolean }>) {
+// orchestrator.txt PROSE also contains the literal "<active-sessions>" (it
+// describes the block), so indexOf would slice from the prose and swallow the
+// whole prompt. The INJECTED block is appended last and is the only thing that
+// emits the closing tag, so anchor on lastIndexOf(open) → indexOf(close).
+function rosterBlock(sys: string): string {
+  const close = sys.indexOf("</active-sessions>")
+  if (close === -1) return ""
+  return sys.slice(sys.lastIndexOf("<active-sessions>", close), close)
+}
+
+async function seedFleet(
+  children: Array<{
+    title: string
+    agent: string
+    /** Finished cleanly (lastOutcome: "success") — idle but still resumable. */
+    terminal?: boolean
+    /** Explicit terminal outcome; overrides `terminal`. */
+    outcome?: "success" | "failure" | "cancelled"
+  }>,
+) {
   const sessionRt = ManagedRuntime.make(SessionNs.defaultLayer)
   let parentID: SessionID
   const created: Child[] = []
@@ -201,10 +220,11 @@ async function seedFleet(children: Array<{ title: string; agent: string; termina
           }),
         ),
       )
+      const outcome = spec.outcome ?? (spec.terminal ? "success" : undefined)
       await regRt.runPromise(
         ActorRegistry.Service.use((svc) =>
-          spec.terminal
-            ? svc.updateStatus(child.id, child.id, { status: "idle", lastOutcome: "success" })
+          outcome
+            ? svc.updateStatus(child.id, child.id, { status: "idle", lastOutcome: outcome })
             : svc.updateStatus(child.id, child.id, { status: "running" }),
         ),
       )
@@ -291,7 +311,13 @@ describe("orchestrator <active-sessions> roster — e2e on the wire", () => {
     })
   })
 
-  test("terminal children are filtered out of the roster", async () => {
+  // DEFECT 1 — was: "terminal children are filtered out of the roster", which
+  // seeded lastOutcome:"success" and asserted the child was ABSENT. That test
+  // encoded the defect: `success` means "its last turn finished cleanly", not
+  // "the session is gone", so it dropped every child the moment it did its job.
+  // The legitimate half of that intent — genuinely dead children stay out — is
+  // preserved below against failure/cancelled, which is what "dead" really is.
+  test("failed and cancelled children are excluded from the roster", async () => {
     const server = queueState.server!
     const fixture = await loadFixture(PROVIDER_ID, MODEL_ID)
     await using tmp = await tmpdir({
@@ -304,7 +330,8 @@ describe("orchestrator <active-sessions> roster — e2e on the wire", () => {
       fn: async () => {
         const fleet = await seedFleet([
           { title: "still working", agent: "build" },
-          { title: "already finished", agent: "build", terminal: true },
+          { title: "blew up", agent: "build", outcome: "failure" },
+          { title: "torn down", agent: "build", outcome: "cancelled" },
         ])
         const sys = await captureSystemPrompt({
           sessionID: fleet.parentID,
@@ -312,11 +339,141 @@ describe("orchestrator <active-sessions> roster — e2e on the wire", () => {
           modelID: fixture.model.id,
         })
 
-        const live = fleet.children[0]!
-        const done = fleet.children[1]!
-        const block = sys.slice(sys.indexOf("<active-sessions>"), sys.indexOf("</active-sessions>"))
+        const [live, failed, cancelled] = [fleet.children[0]!, fleet.children[1]!, fleet.children[2]!]
+        const block = rosterBlock(sys)
         expect(block).toContain(live.id)
-        expect(block).not.toContain(done.id)
+        expect(block).not.toContain(failed.id)
+        expect(block).not.toContain(cancelled.id)
+      },
+    })
+  })
+
+  test("DEFECT 1: a child that finished cleanly stays routable, labelled idle", async () => {
+    const server = queueState.server!
+    const fixture = await loadFixture(PROVIDER_ID, MODEL_ID)
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "mimocode.json"), tmpConfig(`${server.url.origin}/v1`))
+      },
+    })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        // The exact production shape after a successful turn (actor/turn.ts
+        // writes status:"idle" + lastOutcome:"success"). This child is a
+        // persistent peer: `session send` resumes it, same id, history intact.
+        const fleet = await seedFleet([{ title: "owns the docs topic", agent: "build", terminal: true }])
+        const sys = await captureSystemPrompt({
+          sessionID: fleet.parentID,
+          agent: orchestratorAgent(),
+          modelID: fixture.model.id,
+        })
+
+        const done = fleet.children[0]!
+        expect(sys).toContain("</active-sessions>")
+        const block = rosterBlock(sys)
+        // Routable: the id the model needs for `session send` is on the wire.
+        expect(block).toContain(done.id)
+        expect(block).toContain("owns the docs topic")
+        // Honest status: reported as idle, never as progressing.
+        expect(block).toContain(`${done.id} | owns the docs topic | build | idle`)
+        expect(block).not.toContain("progressing")
+      },
+    })
+  })
+
+  test("DEFECT 1: the resumable-idle tail is bounded so the block cannot grow without limit", async () => {
+    const server = queueState.server!
+    const fixture = await loadFixture(PROVIDER_ID, MODEL_ID)
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "mimocode.json"), tmpConfig(`${server.url.origin}/v1`))
+      },
+    })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const finished = Array.from({ length: ROSTER_IDLE_LIMIT + 4 }, (_, i) => ({
+          title: `finished ${i}`,
+          agent: "build",
+          terminal: true,
+        }))
+        const fleet = await seedFleet([{ title: "still working", agent: "build" }, ...finished])
+        const sys = await captureSystemPrompt({
+          sessionID: fleet.parentID,
+          agent: orchestratorAgent(),
+          modelID: fixture.model.id,
+        })
+
+        const block = rosterBlock(sys)
+        const idleLines = block.split("\n").filter((l) => l.trim().endsWith("| idle"))
+        expect(idleLines.length).toBe(ROSTER_IDLE_LIMIT)
+        // The running child is never displaced by the idle tail.
+        expect(block).toContain(fleet.children[0]!.id)
+      },
+    })
+  })
+
+  test("DEFECT 3: the roster's emitted format matches the format the prompt documents", async () => {
+    const server = queueState.server!
+    const fixture = await loadFixture(PROVIDER_ID, MODEL_ID)
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "mimocode.json"), tmpConfig(`${server.url.origin}/v1`))
+      },
+    })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        // agent "plan" is deliberately != the actor MODE, which is always "peer"
+        // for a child. Field 3 must be the agent — that is the routing signal —
+        // and the documented format must say so, on the SAME request.
+        const fleet = await seedFleet([{ title: "refactor router", agent: "plan" }])
+        const sys = await captureSystemPrompt({
+          sessionID: fleet.parentID,
+          agent: orchestratorAgent(),
+          modelID: fixture.model.id,
+        })
+
+        const child = fleet.children[0]!
+        const block = rosterBlock(sys)
+        // What the code EMITS: field 3 is the agent, not "peer".
+        expect(block).toContain(`${child.id} | refactor router | plan | `)
+        expect(block).not.toContain("| peer |")
+        // What the prompt DOCUMENTS, in the same assembled system prompt.
+        expect(sys).toContain("id | title | agent | status")
+        expect(sys).not.toContain("id | title | mode | status")
+      },
+    })
+  })
+
+  test("system-spawned agents (checkpoint-writer) stay out of the roster even when idle", async () => {
+    const server = queueState.server!
+    const fixture = await loadFixture(PROVIDER_ID, MODEL_ID)
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "mimocode.json"), tmpConfig(`${server.url.origin}/v1`))
+      },
+    })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        // Guards the DEFECT-1 widening: now that finished-clean children are
+        // KEPT, a finished checkpoint-writer must not leak in with them.
+        const fleet = await seedFleet([
+          { title: "real work", agent: "build" },
+          { title: "checkpoint-writer: memory", agent: "checkpoint-writer", terminal: true },
+        ])
+        const sys = await captureSystemPrompt({
+          sessionID: fleet.parentID,
+          agent: orchestratorAgent(),
+          modelID: fixture.model.id,
+        })
+
+        const block = rosterBlock(sys)
+        expect(block).toContain(fleet.children[0]!.id)
+        expect(block).not.toContain(fleet.children[1]!.id)
+        expect(block).not.toContain("checkpoint-writer")
       },
     })
   })

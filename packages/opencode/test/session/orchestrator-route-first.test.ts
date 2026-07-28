@@ -90,7 +90,12 @@ describe("orchestrator prompt — route-first dispatch", () => {
 
   test("references active-sessions block for routing decisions", () => {
     expect(PROMPT_ORCHESTRATOR).toContain("<active-sessions>")
-    expect(PROMPT_ORCHESTRATOR).toMatch(/compact format.*id.*title.*mode.*status/i)
+    // Assert the LITERAL documented format, not a loose `.*agent.*` regex: the
+    // surrounding prose also contains the word "AGENT", so a regex matches even
+    // when the format line still says `mode`. Field 3 must be the child's agent,
+    // matching what session/llm.ts actually emits.
+    expect(PROMPT_ORCHESTRATOR).toContain("compact format: id | title | agent | status")
+    expect(PROMPT_ORCHESTRATOR).not.toContain("id | title | mode | status")
   })
 })
 

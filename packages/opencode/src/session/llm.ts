@@ -38,6 +38,14 @@ import { SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
 
 const log = Log.create({ service: "llm" })
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
+
+// How many FINISHED-but-resumable child sessions the `<active-sessions>` roster
+// carries, most-recently-active first. The roster is re-injected on EVERY request,
+// so the idle tail (which grows monotonically as children complete) must be
+// bounded; running children are self-limiting and are never dropped. A count cap
+// rather than a time window, because N children can finish inside one minute and
+// a window would not actually bound the block.
+export const ROSTER_IDLE_LIMIT = 5
 type Result = Awaited<ReturnType<typeof streamText>>
 
 /**
@@ -291,10 +299,12 @@ const live: Layer.Layer<
       }
 
       // Orchestrator active-sessions roster: inject a compact one-line-per-session
-      // list of the orchestrator's live child sessions. Only for the orchestrator
+      // list of the orchestrator's ROUTABLE child sessions. Only for the orchestrator
       // agent — other agents don't manage children. Format is intentionally compact
-      // (~30 tokens/session): id | title | mode | status. Terminal sessions are
-      // filtered out. AI needs details on demand → session status/ask.
+      // (~30 tokens/session): id | title | agent | status. Field 3 is the child's
+      // AGENT (build/plan/compose) — the routing signal the model needs — not its
+      // actor mode, which is always "peer" here and therefore carries no signal.
+      // AI needs details on demand → session status/ask.
       if (input.agent.name === "orchestrator") {
         // listPeerChildren joins through the Session row's parent_id, because a
         // peer child registers its actor row under its OWN session id — a
@@ -304,11 +314,32 @@ const live: Layer.Layer<
           input.agentID ?? "main",
         )
         const now = Date.now()
-        const lines = children
+        const routable = children
           .filter(({ actor }) => !SYSTEM_SPAWNED_AGENT_TYPES.has(actor.agent))
           .map(({ actor, title }) => ({ actor, title, live: deriveLiveness(actor, now) }))
-          .filter(({ live }) => live !== "success" && live !== "failure" && live !== "cancelled")
-          .map(({ actor, title, live }) => `  ${actor.sessionID} | ${title} | ${actor.agent} | ${live}`)
+          // Genuinely dead children stay out: `failure` and `cancelled` mean the
+          // child errored out or was torn down, so routing work into it is wrong.
+          .filter(({ live }) => live !== "failure" && live !== "cancelled")
+        // `success` means "its LAST TURN finished cleanly", NOT "the session is
+        // gone" — a persistent peer child is still resumable by `session send`
+        // (same id, history intact). Dropping those made a child PERMANENTLY
+        // invisible the moment it did its job, degrading "route to this topic's
+        // standing owner" into "route to whatever id I still remember". Report
+        // them honestly as `idle` (the same success→idle mapping `session list`
+        // already uses) rather than as `progressing`.
+        const working = routable.filter(({ live }) => live === "progressing" || live === "stalled")
+        // The idle tail is the only side that grows without bound (children keep
+        // finishing; running ones are capped by the machine), so bound IT: keep
+        // the most recently active few. Older idle children stay reachable via
+        // `session list`, they just don't pay rent in every request.
+        const idle = routable
+          .filter(({ live }) => live === "success" || live === "idle")
+          .sort((a, b) => b.actor.lastTurnTime - a.actor.lastTurnTime)
+          .slice(0, ROSTER_IDLE_LIMIT)
+        const lines = [...working, ...idle].map(
+          ({ actor, title, live }) =>
+            `  ${actor.sessionID} | ${title} | ${actor.agent} | ${live === "success" ? "idle" : live}`,
+        )
         if (lines.length > 0) system.push(`<active-sessions>\n${lines.join("\n")}\n</active-sessions>`)
       }
 

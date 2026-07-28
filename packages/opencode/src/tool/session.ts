@@ -195,6 +195,20 @@ function tagTitle(topic: string, title: string): string {
   return `[topic:${topic}] ${base}`
 }
 
+// The topic label is a MODEL-authored free-text string, so exact-string matching
+// makes find-or-reuse silently fail on the near-misses a model actually produces:
+// `pr-1741` vs `PR 1741` vs `pr_1741` are one topic to a human and three to
+// `===`, and each miss spawns a duplicate child for the same theme. Normalize to
+// a case-folded alphanumeric-run key so those all collide. Deliberately NOT
+// fuzzy/semantic: it only forgives casing and separators, so it cannot merge two
+// genuinely different topics.
+export function topicKey(label: string): string {
+  return label
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+}
+
 
 const createOperation = z.strictObject({
   action: z.literal("create"),
@@ -607,6 +621,43 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
       return Effect.succeed(a)
     }
 
+    // ROUTE-FIRST WITHIN ONE TURN. The `<active-sessions>` roster is assembled
+    // once per REQUEST, so a child created earlier in the SAME turn is invisible
+    // to the model until the next request — which is exactly how one live turn
+    // spawned two children for the same docs topic and then had to cancel one,
+    // burning a worktree. A tool RESULT, unlike the system prompt, is read
+    // before the model's next tool call, so `session create` echoes the live
+    // sibling roster into its own output. That closes the staleness hole with
+    // DATA (the ids needed to `session send`) rather than with prompt wording,
+    // and without any mid-turn system-prompt rebuild.
+    const routableSiblingNotice = Effect.fn("SessionTool.routableSiblings")(function* (
+      parentID: SessionID,
+      excludeID: string,
+    ) {
+      const children = yield* sessions.children(parentID)
+      const enriched = yield* Effect.forEach(
+        children.filter((c) => c.id !== excludeID),
+        (child) => actorReg.get(child.id, child.id).pipe(Effect.map((actor) => ({ child, actor }))),
+      )
+      const now = Date.now()
+      // Same routability rule as the roster in session/llm.ts: real peers only,
+      // dead (failed/cancelled) children excluded, success reported as idle.
+      const lines = enriched
+        .flatMap(({ child, actor }) => (actor ? [{ child, actor }] : []))
+        .filter(({ actor }) => actor.mode !== "subagent" && !SYSTEM_SPAWNED_AGENT_TYPES.has(actor.agent))
+        .map((e) => ({ ...e, live: deriveLiveness(e.actor, now) }))
+        .filter(({ live }) => live !== "failure" && live !== "cancelled")
+        .map(
+          ({ child, actor, live }) =>
+            `  ${child.id} | ${child.title} | ${actor.agent} | ${live === "success" ? "idle" : live}`,
+        )
+      if (lines.length === 0) return ""
+      return (
+        `\n\nROUTE FIRST — you already have these routable child sessions. Send the NEXT related task into one of them ` +
+        `with \`session send <id> <task>\` instead of creating another:\n${lines.join("\n")}`
+      )
+    })
+
     const run = Effect.fn("SessionTool.execute")(function* (input: SessionInput, ctx: Tool.Context<Metadata>) {
       const op = input.operation
 
@@ -624,10 +675,15 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
             actorReg.get(child.id, child.id).pipe(Effect.map((a) => ({ child, actor: a }))),
           )
           const match = enriched.find(
-            ({ child, actor: a }) =>
-              a?.mode !== "subagent" &&
-              !(a && SYSTEM_SPAWNED_AGENT_TYPES.has(a.agent)) &&
-              topicOf(child.title) === op.topic,
+            ({ child, actor: a }) => {
+              if (a?.mode === "subagent") return false
+              if (a && SYSTEM_SPAWNED_AGENT_TYPES.has(a.agent)) return false
+              const existing = topicOf(child.title)
+              // Normalized compare: `--topic "PR 1741"` must find the child
+              // tagged `pr-1741`, otherwise find-or-reuse degrades to
+              // find-or-duplicate on the first label the model retypes.
+              return existing !== undefined && topicKey(existing) === topicKey(op.topic!)
+            },
           )
           if (match) {
             const childID = match.child.id
@@ -728,13 +784,15 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
         } else if (op.title) {
           yield* sessions.setTitle({ sessionID: result.sessionID, title: op.title })
         }
+        const siblingNotice = yield* routableSiblingNotice(ctx.sessionID as SessionID, result.sessionID)
         return {
           title: `Session created: ${result.sessionID}`,
           output:
             `Created child session ${result.sessionID} (mode: ${op.mode ?? "build"}) in ${effectiveDir}.` +
             (op.topic ? ` Tagged with topic '${op.topic}' for reuse.` : ``) +
             (op.isolate && !isolateNotice ? ` Isolated in its own worktree.` : isolateNotice) +
-            ` Running in the background.`,
+            ` Running in the background.` +
+            siblingNotice,
           metadata: { sessionID: result.sessionID } as Metadata,
         }
       }
