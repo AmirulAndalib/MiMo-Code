@@ -9,7 +9,7 @@ import { Log, Filesystem } from "@/util"
 import { Agent } from "@/agent/agent"
 import type { ModelID, ProviderID } from "../provider/schema"
 import { evalScript, type HostFn } from "../workflow/sandbox"
-import { toolScriptRegistry, toolScriptMcp, TOOL_SCRIPT_ALIASES, TOOL_SCRIPT_EXCLUDED } from "./tool-script-ref"
+import { toolScriptRegistry, TOOL_SCRIPT_ALIASES, TOOL_SCRIPT_EXCLUDED } from "./tool-script-ref"
 import DESCRIPTION from "./tool-script.txt"
 import * as Tool from "./tool"
 import * as Truncate from "./truncate"
@@ -378,11 +378,13 @@ export const ToolScriptTool = Tool.define(
             )
           ).filter((def) => !TOOL_SCRIPT_EXCLUDED.has(def.id) && (!whitelist || whitelist.has(def.id)))
           const byId = new Map(defs.map((def) => [def.id, def]))
-          // MCP tools (late-bound ref, populated per-request by SessionPrompt
-          // with the request-scoped view — search-gated tools only appear after
-          // the model loaded them via mcp_tool_search). Builtin ids win on
-          // collision — an MCP server must not shadow `read`/`grep`.
-          const mcpTools = toolScriptMcp.current ? yield* toolScriptMcp.current() : {}
+          // MCP tools (request-scoped view delivered via ctx.extra.execMcp,
+          // filled by SessionPrompt's resolveTools for THIS request — under
+          // mcp_tool_search gating only search-loaded tools appear, so exec
+          // cannot bypass the discovery gate; a module-level ref would be
+          // overwritten by concurrent sessions). Builtin ids win on collision
+          // — an MCP server must not shadow `read`/`grep`.
+          const mcpTools = (ctx.extra?.execMcp as { current?: Record<string, AiTool> } | undefined)?.current ?? {}
           const mcpById = new Map(
             Object.entries(mcpTools).filter(([id]) => !byId.has(id) && (!whitelist || whitelist.has(id))),
           )

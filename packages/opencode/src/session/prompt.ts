@@ -125,7 +125,6 @@ import {
   type McpToolSearchMetadata,
 } from "@/tool/mcp-tool-search"
 import { isMcpToolSearchEnabled } from "@/tool/gpt"
-import { toolScriptMcp } from "@/tool/tool-script-ref"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -945,6 +944,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       const loadedMcpTools = new Set<string>()
       const mcpSearchEntries: McpToolSearchEntry[] = []
       const mcpCatalog = { current: createMcpToolSearchCatalog([]) }
+      // exec's request-scoped MCP view. Holder object (same pattern as
+      // mcpCatalog above): referenced by the context() closure below, filled
+      // at the end of this pass once activeTools is settled. Travels through
+      // ctx.extra — NOT a module-level ref, which concurrent sessions in the
+      // same process would overwrite (request state must never live in a
+      // global; see toolWhitelist/mcpToolSearch precedent).
+      const execMcp: { current: Record<string, AITool> } = { current: {} }
       const useMcpToolSearch = isMcpToolSearchEnabled(
         Flag.MIMOCODE_EXPERIMENTAL_MCP_TOOL_SEARCH,
         input.model.id,
@@ -1014,6 +1020,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           promptOps,
           ...(whitelist ? { toolWhitelist: [...whitelist] } : {}),
           mcpToolSearch: mcpCatalog.current,
+          execMcp,
         },
         agent: input.agent.name,
         actorID: input.agentID,
@@ -1389,18 +1396,15 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       }
       loadedMcpTools.forEach((name) => activeTools.add(name))
 
-      // Populate the exec sandbox's MCP view (late-bound ref, see
-      // tool-script-ref.ts) with the REQUEST-SCOPED set: exactly the MCP tools
+      // Fill exec's request-scoped MCP view (holder declared at the top of
+      // this pass, delivered via ctx.extra.execMcp): exactly the MCP tools
       // active for this request. Under mcp_tool_search gating that means only
-      // search-loaded tools — exec must not bypass the discovery gate. The map
-      // is rebuilt on every resolveTools pass, so the view tracks each turn.
-      const execMcpView: Record<string, AITool> = {}
+      // search-loaded tools — exec must not bypass the discovery gate.
       for (const [key] of mcpTools) {
         if (!tools[key] || !activeTools.has(key)) continue
         if (key === MCP_TOOL_SEARCH_ID) continue
-        execMcpView[key] = tools[key]
+        execMcp.current[key] = tools[key]
       }
-      toolScriptMcp.current = () => Effect.succeed(execMcpView)
 
       return {
         tools,

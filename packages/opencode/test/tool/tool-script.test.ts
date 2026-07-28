@@ -8,7 +8,7 @@ import { evalScript } from "../../src/workflow/sandbox"
 import { Agent } from "../../src/agent/agent"
 import { Truncate, Tool } from "../../src/tool"
 import { ToolScriptTool, renderToolScriptDeclarations } from "../../src/tool/tool-script"
-import { toolScriptRegistry, toolScriptMcp, TOOL_SCRIPT_EXCLUDED } from "../../src/tool/tool-script-ref"
+import { toolScriptRegistry, TOOL_SCRIPT_EXCLUDED } from "../../src/tool/tool-script-ref"
 import { Instance } from "../../src/project/instance"
 
 describe("sandbox non-deterministic mode", () => {
@@ -98,9 +98,7 @@ async function runToolScript(
   },
 ) {
   const prev = toolScriptRegistry.current
-  const prevMcp = toolScriptMcp.current
   toolScriptRegistry.current = () => Effect.succeed(defs)
-  toolScriptMcp.current = opts?.mcp ? () => Effect.succeed(opts.mcp!) : undefined
   try {
     return await Instance.provide({
       directory: tmp,
@@ -120,7 +118,10 @@ async function runToolScript(
               agent: "build",
               abort: abort ?? new AbortController().signal,
               callID: "call_test",
-              extra: opts?.toolWhitelist ? { toolWhitelist: opts.toolWhitelist } : undefined,
+              extra: {
+                ...(opts?.toolWhitelist ? { toolWhitelist: opts.toolWhitelist } : {}),
+                ...(opts?.mcp ? { execMcp: { current: opts.mcp } } : {}),
+              },
               messages: [],
               metadata: () => Effect.void,
               ask: opts?.ask ?? (() => Effect.void),
@@ -131,7 +132,6 @@ async function runToolScript(
     })
   } finally {
     toolScriptRegistry.current = prev
-    toolScriptMcp.current = prevMcp
   }
 }
 
