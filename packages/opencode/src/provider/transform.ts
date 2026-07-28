@@ -47,6 +47,28 @@ function sdkKey(npm: string): string | undefined {
   return undefined
 }
 
+// Providers that hard-reject an empty text/reasoning BLOCK inside an otherwise
+// non-empty message ("text content blocks must be non-empty"). The AI SDK's own
+// filter does not save us here: its user branch drops empty text parts, but its
+// assistant branch KEEPS an empty text part that carries providerOptions, and it
+// never inspects `reasoning` parts at all — so an empty reasoning block reaches
+// the provider untouched for every npm package.
+//
+// The original list was `@ai-sdk/anthropic` + `@ai-sdk/amazon-bedrock` only,
+// which missed the two other ways to reach the same Anthropic API:
+// `@ai-sdk/google-vertex/anthropic` and Claude via `@openrouter/ai-sdk-provider`.
+// Stripping an empty block is information-preserving for any provider, so the
+// list errs on the side of including a provider rather than excluding one.
+function stripsEmptyParts(model: Provider.Model): boolean {
+  return [
+    "@ai-sdk/anthropic",
+    "@ai-sdk/amazon-bedrock",
+    "@ai-sdk/google-vertex/anthropic",
+    "@openrouter/ai-sdk-provider",
+    "@ai-sdk/openai-compatible",
+  ].includes(model.api.npm)
+}
+
 function normalizeMessages(
   msgs: ModelMessage[],
   model: Provider.Model,
@@ -54,7 +76,7 @@ function normalizeMessages(
 ): ModelMessage[] {
   // Anthropic rejects messages with empty content - filter out empty string messages
   // and remove empty text/reasoning parts from array content
-  if (model.api.npm === "@ai-sdk/anthropic" || model.api.npm === "@ai-sdk/amazon-bedrock") {
+  if (stripsEmptyParts(model)) {
     msgs = msgs
       .map((msg) => {
         if (typeof msg.content === "string") {
@@ -398,7 +420,26 @@ export function ensureTrailingUserMessage(msgs: ModelMessage[]): ModelMessage[] 
   if (!last || last.role !== "assistant") return trimmed
   // A content-bearing assistant is legitimately last: keep it and append a
   // minimal user turn so the request ends with a user message.
-  return [...trimmed, { role: "user", content: CONTINUATION_PROMPT }]
+  //
+  // The content MUST be an array of parts, never a bare string. `message()` is
+  // typed for `ModelMessage[]` (where `content: string` is legal) but it does not
+  // run on `ModelMessage[]` — it runs inside the `wrapLanguageModel` middleware on
+  // `args.params.prompt`, a `LanguageModelV3Prompt`, whose user content is
+  // `Array<TextPart | FilePart>`. That mismatch is silenced by the
+  // `@ts-expect-error` at session/llm.ts:670 (and session/prompt.ts:596).
+  //
+  // A bare string there is not merely untidy, it is THE producer of the 400:
+  // @ai-sdk/anthropic's user branch does `for (let j = 0; j < content.length; j++)`
+  // and `switch (part.type)` with cases for only `text`/`file` and NO default
+  // (dist/index.mjs:2320-2408 on 3.0.82), so a string is iterated as individual
+  // characters whose `.type` is `undefined`, nothing is pushed, and the message
+  // goes out as `{"role":"user","content":[]}` — the exact trailing message in the
+  // observed failing request.
+  //
+  // `ensureNonEmptyContent` cannot save this: per the ordering contract it runs
+  // BEFORE this function, and "Continue." is not empty by any predicate, so the
+  // append is never re-inspected.
+  return [...trimmed, { role: "user", content: [{ type: "text", text: CONTINUATION_PROMPT }] } as ModelMessage]
 }
 
 // Hard prune of the trailing assistant run, discarding its content. Unlike

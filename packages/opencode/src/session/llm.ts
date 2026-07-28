@@ -667,7 +667,12 @@ const live: Layer.Layer<
             {
               specificationVersion: "v3" as const,
               async transformParams(args) {
-                if (args.type === "stream") {
+                // `generate || stream`, matching session/prompt.ts:597. This file's
+                // only SDK entrypoint is `streamText` (:599), so narrowing to
+                // "stream" is not an active hole today — but it would silently drop
+                // the whole transform, including the empty-content invariant, the
+                // moment a non-streaming call is added here.
+                if (args.type === "generate" || args.type === "stream") {
                   // @ts-expect-error
                   args.params.prompt = ProviderTransform.message(args.params.prompt, input.model, options)
                 }
