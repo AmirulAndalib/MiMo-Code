@@ -216,10 +216,13 @@ describe("Manual /rebuild: on-the-spot rebuild driven through SessionPrompt.comm
     async () => {
       const llm = startLLM("rebuilt-reply-from-model")
       const seen: Array<string | undefined> = []
+      const lifecycle: Array<string | undefined> = []
       const onEvent = (e: {
         payload?: { type?: string; properties?: { status?: { type?: string; message?: string } } }
       }) => {
-        if (e?.payload?.type === "session.status" && e.payload.properties?.status?.type === "busy") {
+        if (e?.payload?.type !== "session.status") return
+        lifecycle.push(e.payload.properties?.status?.type)
+        if (e.payload.properties?.status?.type === "busy") {
           seen.push(e.payload.properties.status.message)
         }
       }
@@ -327,6 +330,10 @@ describe("Manual /rebuild: on-the-spot rebuild driven through SessionPrompt.comm
                 expect(
                   seen.some((m) => m?.includes("Context rebuilt from the latest checkpoint")),
                 ).toBe(true)
+
+                // …and the status is CLEARED again: /rebuild must settle to idle
+                // so the outcome text cannot leak into the following turn.
+                expect(lifecycle.at(-1)).toBe("idle")
               }),
             ),
         })
