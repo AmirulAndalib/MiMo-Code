@@ -57,10 +57,17 @@ export const { use: useProject, provider: ProjectProvider } = createSimpleContex
     }
 
     async function syncWorkspace() {
+      const directory = sdk.directory
       const listed = await sdk.client.experimental.workspace.list().catch(() => undefined)
       if (!listed?.data) return
       const status = await sdk.client.experimental.workspace.status().catch(() => undefined)
       const next = Object.fromEntries((status?.data ?? []).map((item) => [item.workspaceID, item.status]))
+      // Same generation check as sync() above: this runs unguarded inside
+      // bootstrap's non-blocking Promise.all, so a directory switch landing
+      // during either await would otherwise write the old directory's workspace
+      // list — and worse, clear workspace.current because the pre-switch list
+      // does not contain it.
+      if (sdk.directory !== directory) return
 
       batch(() => {
         setStore("workspace", "list", reconcile(listed.data))
