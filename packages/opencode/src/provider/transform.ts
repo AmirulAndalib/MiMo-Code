@@ -591,8 +591,10 @@ function applyCaching(msgs: ModelMessage[], model: Provider.Model): ModelMessage
   return msgs
 }
 
-// Minimal crash guard: ensure msg.content is never a non-string non-array value
-// (object, undefined, null) that would blow up downstream `.map()` calls.
+// Minimal crash guard: for the roles it can repair, ensure msg.content is never a
+// non-string non-array value (object, undefined, null) that would blow up
+// downstream `.map()` calls. NOT a blanket guarantee — `tool` is deliberately
+// exempt (see below), so downstream code must still not assume array content.
 // Strings are valid ModelMessage content (the AI SDK accepts content: string |
 // Array) and are left untouched. Only genuinely-invalid types are normalized.
 //
@@ -608,6 +610,11 @@ function applyCaching(msgs: ModelMessage[], model: Provider.Model): ModelMessage
 // per-role policy: injecting a text part into a tool message breaks tool_use /
 // tool_result pairing, which trades one 400 for another, and emitting `content:
 // []` is itself illegal for a tool result. Only `user` gets the backfill.
+// "Exactly as-is" is the load-bearing part: `[]` is NOT an acceptable substitute,
+// and leaving the value untouched is what makes this guard and
+// `ensureNonEmptyContent` reach the same outcome on the same input
+// (`hasNoSendableContent` returns true for non-array content, and the tool branch
+// there re-pushes the message unchanged).
 function normalizeContentArray(msgs: ModelMessage[]): ModelMessage[] {
   return msgs.map((msg) => {
     if (typeof msg.content === "string" || Array.isArray(msg.content)) return msg

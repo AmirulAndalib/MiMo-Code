@@ -4624,6 +4624,32 @@ describe("ProviderTransform.message - non-array content guard (j.map is not a fu
     expect(tool).toBeDefined()
     expect(Array.isArray(tool!.content) && tool!.content.some((p: any) => p.type === "text")).toBe(false)
   })
+
+  // Strengthens the pin above, which only rules out a TEXT part and would still
+  // pass if tool content were rewritten to `[]` — the other outcome the policy
+  // rejects (an empty tool content is itself illegal for providers that require
+  // the result block). Assert the value is the SAME reference, i.e. untouched.
+  test("POLICY PIN: non-array tool content is left byte-identical, not rewritten to [] (all invalid shapes)", () => {
+    for (const content of [undefined, null, { type: "tool-result", value: "x" }]) {
+      const msgs = [
+        { role: "user", content: [{ type: "text", text: "run it" }] },
+        { role: "assistant", content: [{ type: "tool-call", toolCallId: "c1", toolName: "bash", input: {} }] },
+        { role: "tool", content },
+      ] as any[]
+      const tool = ProviderTransform.message(msgs, genericModel, {}).find((m) => m.role === "tool")
+      expect(tool).toBeDefined()
+      expect(tool!.content).toBe(content as any)
+    }
+  })
+
+  // The two guards in this file that decide what to do with a provider-rejectable
+  // message must not disagree about the tool role — that disagreement was the
+  // finding. Pin the agreement itself, so changing only one of them fails here.
+  test("POLICY PIN: normalizeContentArray and ensureNonEmptyContent agree on a non-array tool message", () => {
+    const msgs = [{ role: "tool", content: undefined }] as any[]
+    expect(ProviderTransform.ensureNonEmptyContent(msgs)[0].content).toBeUndefined()
+    expect(ProviderTransform.message(msgs, genericModel, {}).find((m) => m.role === "tool")?.content).toBeUndefined()
+  })
 })
 
 describe("ProviderTransform.message - interleaved field: openrouter exclusion", () => {
