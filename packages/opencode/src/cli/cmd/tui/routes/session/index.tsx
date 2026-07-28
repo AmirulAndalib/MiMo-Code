@@ -2286,14 +2286,14 @@ function WorkItemTask(props: ToolProps<typeof TaskTool>) {
   )
 }
 
-// Renderer for the `exec` batch-orchestration tool, shaped like <Bash>: once the
-// script source has streamed in it lives in a BlockTool, and collapsing only caps
-// how much of the script and its output are shown (head + "…") instead of hiding
-// both behind a one-line summary. The title carries the live aggregated call
-// counts published through ctx.metadata.
+// Renderer for the `exec` batch-orchestration tool. Collapsed view is a compact
+// BlockTool: summary title (spinner + live aggregated call counts published
+// through ctx.metadata) plus the last few sub-calls — one bordered clickable
+// unit, visible while running and kept after completion. Clicking swaps to the
+// full BlockTool with code, result, logs and trace. Before any sub-call lands
+// it stays a one-line InlineTool.
 function ToolScript(props: ToolProps<typeof ToolScriptTool>) {
   const { theme } = useTheme()
-  const ctx = use()
   const [expanded, setExpanded] = createSignal(false)
   const isRunning = createMemo(() => props.part.state.status === "running")
   const meta = createMemo(() =>
@@ -2316,48 +2316,75 @@ function ToolScript(props: ToolProps<typeof ToolScriptTool>) {
     if (isRunning()) return base
     return failed() ? `${status()} · ${base}` : base
   })
-
-  const code = createMemo(() => ((props.input.code as string | undefined) ?? "").trim())
+  // Per-call trace tail published live via ctx.metadata (see publishProgress
+  // in tool-script.ts). Shown under the summary line while running AND after
+  // completion — the terminal returns re-publish it (completeToolCall replaces
+  // part metadata) so the trace doesn't vanish the moment a run finishes.
+  type RecentCall = { name: string; status: string; durationMs: number; error?: string }
+  const recent = createMemo(() => {
+    const r = meta().recent as RecentCall[] | undefined
+    return Array.isArray(r) ? r : []
+  })
+  const recentLines = createMemo(() =>
+    recent()
+      .slice(-5)
+      .map(
+        (t) =>
+          `  ${t.status === "error" ? "✗" : "✓"} ${t.name} [${t.durationMs}ms]${t.error ? ` ${t.error.slice(0, 80)}` : ""}`,
+      ),
+  )
   // exec embeds nested tool output (a `bash` call's stdout) into <return_value>
   // and <logs>, so escape sequences reach this renderer raw.
   const output = createMemo(() => stripAnsi(props.output?.trim() ?? ""))
-  const columns = createMemo(() => Collapse.columns(ctx.width))
-  const overflow = createMemo(
-    () =>
-      Collapse.rows(code(), columns()) > TOOL_BLOCK_COLLAPSE_MAX_ROWS ||
-      Collapse.rows(output(), columns()) > TOOL_BLOCK_COLLAPSE_MAX_ROWS,
-  )
-  const clip = (content: string) => {
-    if (expanded()) return content
-    return Collapse.clip(content, columns(), TOOL_BLOCK_COLLAPSE_MAX_ROWS)
-  }
 
   return (
-    <Switch>
-      <Match when={code()}>
-        <BlockTool
-          title={`# exec · ${summary()}`}
-          part={props.part}
-          spinner={isRunning()}
-          onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}
+    <Show
+      when={expanded()}
+      fallback={
+        // Collapsed: ONE compact BlockTool holding the summary title and the
+        // sub-call trace — a single bordered, hover-highlighted, clickable
+        // unit. An InlineTool with a loose text underneath read as two
+        // elements and the click target was easy to miss.
+        <Show
+          when={recentLines().length > 0}
+          fallback={
+            <InlineTool
+              icon="»"
+              pending="Writing script..."
+              complete={!isRunning()}
+              spinner={isRunning()}
+              part={props.part}
+              onClick={() => setExpanded(true)}
+            >
+              exec {summary()}
+            </InlineTool>
+          }
         >
-          <box gap={1}>
-            <text fg={theme.textMuted}>{clip(code())}</text>
-            <Show when={output()}>
-              <text fg={failed() ? theme.error : theme.text}>{clip(output())}</text>
-            </Show>
-            <Show when={overflow()}>
-              <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
-            </Show>
-          </box>
-        </BlockTool>
-      </Match>
-      <Match when={true}>
-        <InlineTool icon="»" pending="Writing script..." complete={false} part={props.part}>
-          exec
-        </InlineTool>
-      </Match>
-    </Switch>
+          <BlockTool
+            title={`# exec · ${summary()}`}
+            part={props.part}
+            spinner={isRunning()}
+            onClick={() => setExpanded(true)}
+          >
+            <text fg={theme.textMuted}>{recentLines().join("\n")}</text>
+            <text fg={theme.textMuted}>Click to expand</text>
+          </BlockTool>
+        </Show>
+      }
+    >
+      <BlockTool title={`# exec · ${summary()}`} part={props.part} onClick={() => setExpanded(false)}>
+        <box gap={1}>
+          <text fg={theme.textMuted}>{((props.input.code as string | undefined) ?? "").trim()}</text>
+          <Show when={recentLines().length > 0}>
+            <text fg={theme.textMuted}>{recentLines().join("\n")}</text>
+          </Show>
+          <Show when={output()}>
+            <text fg={failed() ? theme.error : theme.text}>{output()}</text>
+          </Show>
+          <text fg={theme.textMuted}>Click to collapse</text>
+        </box>
+      </BlockTool>
+    </Show>
   )
 }
 

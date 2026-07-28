@@ -3,6 +3,7 @@ import os from "os"
 import fs from "fs"
 import path from "path"
 import { Effect } from "effect"
+import type { Tool as AiTool } from "ai"
 import { EffectBridge, InstanceState } from "@/effect"
 import { Log, Filesystem } from "@/util"
 import { Agent } from "@/agent/agent"
@@ -25,6 +26,7 @@ const MAX_RESULT_BYTES = 256 * 1024
 const MAX_LOG_BYTES = 64 * 1024
 const MAX_CODE_BYTES = 128 * 1024
 const MAX_FILE_BYTES = 10 * 1024 * 1024
+const TRACE_TAIL_ENTRIES = 20
 
 /** JSON Schema (zod v4 toJSONSchema output) → compact TS type text. Best-effort:
  * anything unrecognized renders as `unknown`, which is safe for declarations. */
@@ -82,10 +84,12 @@ export function renderToolScriptDeclarations(defs: Tool.Def[]): string {
   })
   return [
     "```ts",
-    "type ToolResult = { title: string; output: string; metadata: Record<string, unknown> }",
+    "type ToolResult = { title: string; output: string; metadata: Record<string, unknown>; structured?: unknown }",
     "declare const tools: {",
     ...lines,
     ...aliasLines,
+    "  /** Active MCP tools (if any) are also callable as tools.<name>(input). MCP results carry parsed structuredContent in `structured` when the server provides it. */",
+    "  [mcpToolName: string]: (input: Record<string, unknown>) => Promise<ToolResult>",
     "}",
     "// Raw file IO for machine-to-machine data (pipelines across executions).",
     "declare const files: {",
@@ -340,10 +344,21 @@ export const ToolScriptTool = Tool.define(
             }
             return counts
           }
+          // Bounded per-call trace tail for the TUI (last N calls, error text
+          // truncated) — kept small so metadata deltas stay cheap on 500-call
+          // runs. Re-published on terminal returns for the same reason as
+          // tally(): completeToolCall replaces part metadata.
+          const recentTail = () =>
+            trace.slice(-TRACE_TAIL_ENTRIES).map((t) => ({
+              name: t.name,
+              status: t.status,
+              durationMs: t.durationMs,
+              ...(t.error && { error: t.error.slice(0, 200) }),
+            }))
           if (Buffer.byteLength(params.code, "utf8") > MAX_CODE_BYTES) {
             return {
               title: "code too large",
-              metadata: { status: "code_error", toolCalls: 0, counts: tally() },
+              metadata: { status: "code_error", toolCalls: 0, counts: tally(), recent: recentTail() },
               output: `<exec status="code_error">\n<error_message>\ncode exceeds ${MAX_CODE_BYTES} bytes\n</error_message>\n</exec>`,
             }
           }
@@ -363,6 +378,16 @@ export const ToolScriptTool = Tool.define(
             )
           ).filter((def) => !TOOL_SCRIPT_EXCLUDED.has(def.id) && (!whitelist || whitelist.has(def.id)))
           const byId = new Map(defs.map((def) => [def.id, def]))
+          // MCP tools (request-scoped view delivered via ctx.extra.execMcp,
+          // filled by SessionPrompt's resolveTools for THIS request — under
+          // mcp_tool_search gating only search-loaded tools appear, so exec
+          // cannot bypass the discovery gate; a module-level ref would be
+          // overwritten by concurrent sessions). Builtin ids win on collision
+          // — an MCP server must not shadow `read`/`grep`.
+          const mcpTools = (ctx.extra?.execMcp as { current?: Record<string, AiTool> } | undefined)?.current ?? {}
+          const mcpById = new Map(
+            Object.entries(mcpTools).filter(([id]) => !byId.has(id) && (!whitelist || whitelist.has(id))),
+          )
           // Non-git projects report worktree === "/" (see Instance.containsPath) —
           // "/" as a jail root would allow EVERYTHING. Fall back to the project
           // directory in that case. Relative guest paths resolve against roots[0].
@@ -406,7 +431,7 @@ export const ToolScriptTool = Tool.define(
           if (typeof transpiled === "object") {
             return {
               title: "transpile error",
-              metadata: { status: "code_error", toolCalls: 0, counts: tally() },
+              metadata: { status: "code_error", toolCalls: 0, counts: tally(), recent: recentTail() },
               output: `<exec status="code_error">\n<error_message>\n${transpiled.error}\n</error_message>\n</exec>`,
             }
           }
@@ -417,12 +442,18 @@ export const ToolScriptTool = Tool.define(
           const withSlot = makeSemaphore(MAX_CONCURRENT)
 
           // Live progress for the TUI: after each settled call, publish the
-          // aggregated per-tool counts through the OUTER part's metadata (each
-          // ctx.metadata fires a part delta the ToolScript view renders
-          // reactively). Fire-and-forget — progress must never fail a call.
+          // aggregated per-tool counts plus a bounded tail of per-call trace
+          // entries through the OUTER part's metadata (each ctx.metadata fires
+          // a part delta the ToolScript view renders reactively). The tail is
+          // capped so metadata deltas stay small on 500-call runs.
+          // Fire-and-forget — progress must never fail a call.
           const publishProgress = () => {
             bridge
-              .promise(ctx.metadata({ metadata: { running: true, toolCalls: trace.length, counts: tally() } }))
+              .promise(
+                ctx.metadata({
+                  metadata: { running: true, toolCalls: trace.length, counts: tally(), recent: recentTail() },
+                }),
+              )
               .catch(() => {})
           }
 
@@ -430,7 +461,8 @@ export const ToolScriptTool = Tool.define(
             const id = String(name)
             const alias = TOOL_SCRIPT_ALIASES[id as keyof typeof TOOL_SCRIPT_ALIASES]
             const def = byId.get(alias ?? id)
-            if (!def) return Promise.reject(new Error(`unknown tool: ${id}`))
+            const mcpDef = def ? undefined : mcpById.get(id)
+            if (!def && !mcpDef) return Promise.reject(new Error(`unknown tool: ${id}`))
             calls++
             if (calls > maxToolCalls)
               return Promise.reject(new Error(`tool call budget exceeded (${maxToolCalls} per execution)`))
@@ -443,14 +475,58 @@ export const ToolScriptTool = Tool.define(
               // title in the UI — swallow it; the trace covers observability.
               metadata: () => Effect.void,
             }
+            // MCP path: the map holds SessionPrompt's WRAPPED executes, so the
+            // full direct-call pipeline applies unchanged — permission ask,
+            // plugin before/after hooks, metrics, normalizeToolResult folding,
+            // truncation. Here we only adapt the wrapped result shape for the
+            // guest: structuredContent (when the server sent it) crosses as a
+            // parsed value under `structured` so scripts can filter/aggregate
+            // without re-parsing text; media attachments cannot cross the
+            // sandbox string boundary and are dropped with a note.
+            const executeMcp = (tool: AiTool) =>
+              Effect.tryPromise({
+                try: () =>
+                  Promise.resolve(
+                    tool.execute!(args ?? {}, {
+                      toolCallId: subCtx.callID,
+                      messages: [],
+                      abortSignal: ctx.abort,
+                    }),
+                  ),
+                catch: (err) => (err instanceof Error ? err : new Error(String(err))),
+              }).pipe(
+                Effect.map((result) => {
+                  const r = result as {
+                    output?: unknown
+                    metadata?: { mcp?: { structuredContent?: unknown } }
+                    attachments?: unknown[]
+                  }
+                  const structured = r?.metadata?.mcp?.structuredContent
+                  const dropped = Array.isArray(r?.attachments) && r.attachments.length
+                    ? `\n[note: ${r.attachments.length} non-text attachment(s) dropped — binary content cannot cross the exec sandbox]`
+                    : ""
+                  return {
+                    title: id,
+                    output: String(r?.output ?? "") + dropped,
+                    metadata: (r?.metadata ?? {}) as Record<string, unknown>,
+                    ...(structured !== undefined && { structured }),
+                  }
+                }),
+              )
             return withSlot(() =>
               bridge
-                .promise(def.execute(args, subCtx))
+                .promise(def ? def.execute(args, subCtx) : executeMcp(mcpDef!))
                 .then(
                   (result) => {
                     trace.push({ name: id, status: "success", durationMs: Date.now() - start })
                     publishProgress()
-                    return { title: result.title, output: result.output, metadata: result.metadata }
+                    const structured = (result as { structured?: unknown }).structured
+                    return {
+                      title: result.title,
+                      output: result.output,
+                      metadata: result.metadata,
+                      ...(structured !== undefined && { structured }),
+                    }
                   },
                   (err) => {
                     const message = err instanceof Error ? err.message : String(err)
@@ -554,7 +630,7 @@ return { __undef: __out.value === undefined, json: __out.value === undefined ? "
             log.warn("exec failed", { status, message: explained.slice(0, 500) })
             return {
               title: status,
-              metadata: { status, toolCalls: trace.length, counts: tally() },
+              metadata: { status, toolCalls: trace.length, counts: tally(), recent: recentTail() },
               output: `<exec status="${status}">\n<error_message>\n${explained}\n</error_message>\n${logBlock}${traceBlock}</exec>`,
             }
           }
@@ -573,14 +649,14 @@ return { __undef: __out.value === undefined, json: __out.value === undefined ? "
           if (returnedBytes > MAX_RESULT_BYTES) {
             return {
               title: "result too large",
-              metadata: { status: "budget_exceeded", toolCalls: trace.length, counts: tally() },
+              metadata: { status: "budget_exceeded", toolCalls: trace.length, counts: tally(), recent: recentTail() },
               output: `<exec status="budget_exceeded">\n<error_message>\nreturned value is ${returnedBytes} bytes (max ${MAX_RESULT_BYTES}). Aggregate or slice the data before returning.\n</error_message>\n${warningsBlock}${logBlock}${traceBlock}</exec>`,
             }
           }
 
           return {
             title: `${trace.length} tool calls`,
-            metadata: { status: "completed", toolCalls: trace.length, counts: tally() },
+            metadata: { status: "completed", toolCalls: trace.length, counts: tally(), recent: recentTail() },
             output: `<exec status="completed">\n<return_value>\n${returnedText}\n</return_value>\n${warningsBlock}${logBlock}${traceBlock}</exec>`,
           }
         }).pipe(Effect.orDie),

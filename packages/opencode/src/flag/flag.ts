@@ -220,6 +220,9 @@ export const Flag = {
   MIMOCODE_EXPERIMENTAL_OXFMT: MIMOCODE_EXPERIMENTAL || truthy("MIMOCODE_EXPERIMENTAL_OXFMT"),
   MIMOCODE_EXPERIMENTAL_LSP_TY: truthy("MIMOCODE_EXPERIMENTAL_LSP_TY"),
   MIMOCODE_EXPERIMENTAL_LSP_TOOL: MIMOCODE_EXPERIMENTAL || truthy("MIMOCODE_EXPERIMENTAL_LSP_TOOL"),
+  // Defaults to OFF: exec (tool_script orchestration) is registered only for
+  // GPT-toolset models. Opt in here to expose it to every model.
+  MIMOCODE_ENABLE_EXEC_TOOL: truthy("MIMOCODE_ENABLE_EXEC_TOOL"),
   // Defaults to OFF for non-GPT models. GPT models enable MCP Tool Search in
   // SessionPrompt regardless of this flag. Opt in here to enable it for every
   // function-calling model.
