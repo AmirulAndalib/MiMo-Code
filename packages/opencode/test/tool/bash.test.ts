@@ -239,7 +239,7 @@ describe("tool.bash git identity floor", () => {
     }
   })
 
-  each("falls back to the stable fallback identity for a non-git project (worktree=/)", async () => {
+  each("injects NO GIT_* vars for a non-git project (worktree=/), leaving authorship to git", async () => {
     const saved = savedEnv()
     restoreEnv({
       GIT_AUTHOR_NAME: undefined,
@@ -258,10 +258,13 @@ describe("tool.bash git identity floor", () => {
           const result = await Effect.runPromise(
             bash.execute({ command: printGitEnv, description: "print git env" }, ctx),
           )
-          expect(result.metadata.output).toContain(`GIT_AUTHOR_NAME=${Git.FALLBACK_IDENTITY.name}`)
-          expect(result.metadata.output).toContain(`GIT_AUTHOR_EMAIL=${Git.FALLBACK_IDENTITY.email}`)
-          expect(result.metadata.output).toContain(`GIT_COMMITTER_NAME=${Git.FALLBACK_IDENTITY.name}`)
-          expect(result.metadata.output).toContain(`GIT_COMMITTER_EMAIL=${Git.FALLBACK_IDENTITY.email}`)
+          // There is no project repo to inherit from, so injecting anything would
+          // override the config of whatever repo the command actually runs in
+          // (GIT_AUTHOR_*/GIT_COMMITTER_* env outrank `user.name`/`user.email`).
+          for (const key of ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"]) {
+            const line = result.metadata.output.split("\n").find((l) => l.trim().startsWith(`${key}=`))
+            expect(line?.trim()).toBe(`${key}=`)
+          }
         },
       })
     } finally {

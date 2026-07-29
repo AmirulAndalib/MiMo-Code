@@ -16,18 +16,6 @@ const cfg = [
   "core.quotepath=false",
 ] as const
 
-// Single source of truth for the agent's fallback git identity, used only when
-// neither the repo's nor the global config supplies one. Without it `git commit`
-// autodetects `user@hostname` (e.g. `MI <mi@host.local>`), leaking the machine
-// hostname and wrong authorship into pushed commits. Two independent layers
-// consume this: the worktree-creation local-config pin (src/worktree/index.ts)
-// and the bash env floor (src/tool/bash.ts). Keep it here so a rename can never
-// land in one layer and silently drift in the other.
-export const FALLBACK_IDENTITY = {
-  name: "MiMo",
-  email: "mimo@xiaomi.com",
-} as const
-
 const out = (result: { text(): string }) => result.text().trim()
 const nuls = (text: string) => text.split("\0").filter(Boolean)
 const fail = (err: unknown) =>

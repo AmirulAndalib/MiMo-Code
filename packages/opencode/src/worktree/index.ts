@@ -279,20 +279,30 @@ export const layer: Layer.Layer<
 
           // A separate worktree checkout shares the object/ref store but has its
           // own config, so it does NOT inherit the parent repo's LOCAL identity.
-          // If global identity is also empty, `git commit` here would autodetect
-          // `user@hostname` (e.g. `MI <mi@host.local>`), leaking the machine
-          // hostname + wrong authorship into pushed commits. Resolve the parent's
-          // identity (walks local->global->system) and pin it into the new
-          // worktree's own local config; fall back to Git.FALLBACK_IDENTITY (the
-          // one shared source of truth, also used by the bash env floor) so the
-          // worktree is NEVER left without one. Reading an unset key exits
-          // non-zero / empty, which the `git()` runner returns as empty text.
+          // Copy the parent's resolved identity (`git config` walks
+          // local->global->system) into the new worktree's own local config, so a
+          // commit made here is attributed exactly as a commit in the parent repo
+          // would be. Reading an unset key exits non-zero / empty, which the
+          // `git()` runner returns as empty text.
+          //
+          // When the parent has no identity we pin NOTHING, deliberately. A
+          // hardcoded substitute would attribute the user's commits to an address
+          // they never chose, and `git config` cannot see the rest of git's own
+          // resolution chain anyway (`EMAIL`, then git's `user@hostname`
+          // autodetect), so substituting here would pre-empt a value git could
+          // still resolve. Abstaining leaves the worktree resolving authorship
+          // exactly as the parent repo does, and leaves the fallback to git.
           const parentName = (yield* git(["config", "user.name"], { cwd: ctx.worktree })).text.trim()
           const parentEmail = (yield* git(["config", "user.email"], { cwd: ctx.worktree })).text.trim()
-          const name = parentName || Git.FALLBACK_IDENTITY.name
-          const email = parentEmail || Git.FALLBACK_IDENTITY.email
-          yield* git(["config", "user.name", name], { cwd: info.directory })
-          yield* git(["config", "user.email", email], { cwd: info.directory })
+          if (parentName) yield* git(["config", "user.name", parentName], { cwd: info.directory })
+          if (parentEmail) yield* git(["config", "user.email", parentEmail], { cwd: info.directory })
+          if (!parentName || !parentEmail)
+            log.warn("worktree created without a fully pinned git identity; git resolves authorship itself", {
+              directory: info.directory,
+              parent: ctx.worktree,
+              name: parentName ? "inherited" : "unset",
+              email: parentEmail ? "inherited" : "unset",
+            })
         }),
       )
 
