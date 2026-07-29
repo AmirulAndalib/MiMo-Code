@@ -937,6 +937,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       messages: MessageV2.WithParts[]
       agentID?: string
       task_id?: string
+      mcpContext: MCP.TurnContext
     }) {
       using _ = log.time("resolveTools")
       const tools: Record<string, AITool> = {}
@@ -1165,7 +1166,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       }
 
       const localToolNames = new Set(Object.keys(tools))
-      const mcpTools = Object.entries(yield* mcp.tools())
+      const mcpTools = Object.entries(yield* mcp.tools(input.mcpContext))
       const agentToolAllowlist = input.agent.toolAllowlist ? new Set(input.agent.toolAllowlist) : undefined
       const disabledMcpTools = Permission.disabled(
         mcpTools.map(([key]) => key),
@@ -2356,6 +2357,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         // into the same loop.
         let hardHalt = false
         const resolvedAgentID = agentID ?? "main"
+        const mcpContext: MCP.TurnContext = {
+          sessionId: sessionID,
+          turnId: ulid(),
+          actorId: resolvedAgentID,
+        }
         // Tracks plugin-driven cancellation (session.pre OR any session.userQuery.pre)
         // so session.post reports outcome="cancelled" instead of "error".
         let cancelled = false
@@ -2395,20 +2401,36 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 : finalAsst
                   ? sessionErrorText(finalAsst.error)
                   : undefined
-            yield* plugin.trigger(
-              "session.post",
-              {
-                sessionID,
-                agentID: resolvedAgentID,
-                task_id,
-                outcome,
-                error,
-                finalText: finalAsst ? assistantFinalText(finalAsst, finalParts) : undefined,
-                assistantMessageID: finalAsst?.id,
-                trajectory: serializeTrajectoryMessages(sliceMsgs),
-                systemPrompt: lastSystemPrompt,
-              },
-              {},
+            const interrupted = Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)
+            const lifecycleStatus: MCP.TurnStatus =
+              cancelled || interrupted ? "cancelled" : failed || finalIsError ? "error" : "completed"
+            yield* Effect.all(
+              [
+                plugin
+                  .trigger(
+                    "session.post",
+                    {
+                      sessionID,
+                      agentID: resolvedAgentID,
+                      task_id,
+                      outcome,
+                      error,
+                      finalText: finalAsst ? assistantFinalText(finalAsst, finalParts) : undefined,
+                      assistantMessageID: finalAsst?.id,
+                      trajectory: serializeTrajectoryMessages(sliceMsgs),
+                      systemPrompt: lastSystemPrompt,
+                    },
+                    {},
+                  )
+                  .pipe(Effect.ignore),
+                mcp
+                  .clients()
+                  .pipe(
+                    Effect.flatMap((clients) => MCP.notifyTurnLifecycle(clients, mcpContext, lifecycleStatus)),
+                    Effect.ignore,
+                  ),
+              ],
+              { concurrency: "unbounded", discard: true },
             )
           }).pipe(Effect.ignore)
 
@@ -3440,6 +3462,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               messages: msgs,
               agentID: lastUser.agentID,
               task_id,
+              mcpContext,
             })
             const tools = resolvedTools.tools
             const activeTools = resolvedTools.activeTools
