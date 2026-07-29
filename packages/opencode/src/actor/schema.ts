@@ -73,13 +73,41 @@ export type Actor = z.infer<typeof Actor>
 export const Liveness = z.enum(["progressing", "stalled", "success", "failure", "cancelled", "idle"])
 export type Liveness = z.infer<typeof Liveness>
 
-// Default staleness threshold: a running child with no activity for this long is
-// reported `stalled` (still routable — a display distinction, not a verdict).
-// 90s was chosen against the per-step cadence; against the activity signal it is
-// if anything more meaningful, because measured inter-activity gaps for real peer
-// children are p50 994ms / p90 6.7s / p99 38s, so 90s of true silence is already
-// past the 99th percentile.
-export const DEFAULT_LIVENESS_STALL_MS = 90_000
+// Default staleness threshold: a running child with no ACTIVITY for this long is
+// reported `stalled` (still routable — a display distinction, not a verdict) and
+// is the condition the T40 watchdog notifies the child's parent about.
+//
+// 6 minutes, not the 90s this was. 90s was picked against the per-step cadence,
+// where it meant "no COMPLETED STEP for 90s". Read against activity the same
+// number means "no PART WRITE for 90s", a far stronger claim of silence, and the
+// measured distribution says that claim is false too often: across 43,120 real
+// inter-activity gaps on a 172-child roster the gaps run p50 994ms / p90 6.7s /
+// p99 38.0s / p99.9 296.8s, so 90s lands strictly BETWEEN p99 and p99.9 —
+// between 0.1% and 1% of gaps produced by perfectly HEALTHY children exceed it.
+// That was not hypothetical: two children sitting inside single long steps (`bun
+// ci`, a full test suite, `git worktree add`) emitted a dozen-plus "appears
+// stalled" notifications at ~90-130s of apparent silence while writing parts
+// continuously. A channel that cries wolf teaches its reader to ignore it, which
+// costs exactly the true stall the channel exists to surface.
+//
+// Bounded from below by two measurements, not by taste:
+//   - the deepest measured natural silence, p99.9 = 296,811ms. A threshold at or
+//     under that fires on healthy children by construction.
+//   - plus ACTIVITY_COALESCE_MS (below). Recorded activity lags reality by up to
+//     one coalesce interval, so apparent age is the real gap plus up to 5s; the
+//     threshold has to clear p99.9 + 5s = 301,811ms or the coalescing lag ALONE
+//     can flip a tail-but-healthy row. That is what disqualifies the otherwise
+//     tidy 300_000 (== registry.ts STUCK_THRESHOLD_MS): 300,000 < 301,811.
+// Bounded from above by DEFAULT_LIVENESS_ABANDON_MS (600s), which must stay the
+// larger of the two or `stalled` becomes unreachable.
+//
+// 360_000 is 1.21x p99.9, clears p99.9 + coalesce by 58.2s (11.6 coalesce
+// intervals), is 72x ACTIVITY_COALESCE_MS, and is 0.6x the abandonment bound —
+// leaving a 240s `stalled` band, ~5 scans at WATCHDOG_SCAN_INTERVAL_MS (45s).
+// The cost is accepted deliberately: a genuine stall now surfaces within ~6
+// minutes instead of ~90 seconds. The abandonment bound still catches a row whose
+// owner is actually gone, and a signal believed late beats one not believed.
+export const DEFAULT_LIVENESS_STALL_MS = 6 * 60_000
 
 // Abandonment bound: how long a row may keep CLAIMING `running`/`pending` before
 // we stop believing it. `progressing` and `stalled` both read as "in progress" to
@@ -126,10 +154,10 @@ export const DEFAULT_LIVENESS_ABANDON_MS = 10 * 60_000
 //
 // 5 seconds, derived from the two consumers of the column, both of which are
 // three orders of magnitude coarser than that write rate:
-//   - DEFAULT_LIVENESS_STALL_MS (90s, above): the progressing/stalled display.
+//   - DEFAULT_LIVENESS_STALL_MS (360s, above): the progressing/stalled display.
 //     An actively-writing actor's recorded activity now lags reality by at most
-//     this interval, so worst-case apparent age is 5s against a 90s threshold —
-//     18x of margin, and the flip is unreachable by coalescing alone.
+//     this interval, so worst-case apparent age is 5s against a 360s threshold —
+//     72x of margin, and the flip is unreachable by coalescing alone.
 //   - DEFAULT_LIVENESS_ABANDON_MS (600s, above): the routable/idle bound. 120x
 //     of margin.
 // Also sits above the measured p50 inter-activity gap (994ms) so it actually

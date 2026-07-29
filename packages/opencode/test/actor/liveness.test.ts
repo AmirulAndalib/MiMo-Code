@@ -136,6 +136,11 @@ describe("deriveLiveness (T39 derivation rule)", () => {
     ).toBe("progressing")
   })
 
+  // REWRITTEN (the stalled leg was `lastActivityTime: now - 5 * 60_000`). That
+  // 5-minute age was a bare number chosen when the window was 90s; at a 6-minute
+  // window it silently became a `progressing` fixture asserting `stalled`. Stated
+  // against the constant instead, so it pins "past the window" — the thing the
+  // case is about — at any window value. Not a relaxation: the claim is identical.
   test("pending is treated as live and split by the same window", () => {
     expect(
       deriveLiveness(
@@ -148,8 +153,8 @@ describe("deriveLiveness (T39 derivation rule)", () => {
         {
           status: "pending",
           lastOutcome: undefined,
-          lastActivityTime: now - 5 * 60_000,
-          time: { created: now - 6 * 60_000, updated: now - 5 * 60_000 },
+          lastActivityTime: now - (DEFAULT_LIVENESS_STALL_MS + 1),
+          time: { created: now - (DEFAULT_LIVENESS_STALL_MS + 60_000), updated: now - DEFAULT_LIVENESS_STALL_MS },
         },
         now,
       ),
@@ -245,6 +250,82 @@ describe("deriveLiveness (T39 derivation rule)", () => {
     expect(DEFAULT_LIVENESS_ABANDON_MS).toBeGreaterThan(DEFAULT_LIVENESS_STALL_MS)
   })
 
+  // === The stall window, re-derived for the activity signal ===
+  // Measured inter-activity gaps over 43,120 real gaps on a 172-child roster.
+  // These are the same numbers the abandonment bound was anchored to; the stall
+  // window is now anchored to the same set instead of to the old step cadence.
+  const GAP_P99_MS = 38_048
+  const GAP_P99_9_MS = 296_811
+
+  // THE FALSE POSITIVE THIS CHANGE FIXES, at the age it was actually observed.
+  // Two background children sitting inside single long steps (`bun ci`, a full
+  // test suite, `git worktree add`) emitted "appears stalled" notifications at
+  // ~90-130s of apparent silence while writing parts continuously — a tool's
+  // streaming output calls ctx.metadata per chunk, which reaches updatePart and
+  // advances last_activity_time. Under the old 90s window every one of those was
+  // a lie. lastTurnTime is deliberately ancient to prove the step clock is not
+  // consulted. Fails on a 90s window; passes on the re-derived one.
+  test("a child inside a long step whose activity is 130s old is NOT stalled", () => {
+    for (const silentForMs of [90_001, 100_000, 130_000, GAP_P99_9_MS]) {
+      expect(
+        deriveLiveness(
+          {
+            status: "running",
+            lastOutcome: undefined,
+            lastActivityTime: now - silentForMs,
+            // No completed step for 25 minutes — mid-step the whole time.
+            time: { created: now - 25 * 60_000, updated: now - silentForMs },
+          },
+          now,
+        ),
+      ).toBe("progressing")
+    }
+  })
+
+  // The converse, so widening the window cannot quietly disable the verdict:
+  // genuine silence past the window still reads stalled, and stays routable
+  // (stalled, not idle) until the abandonment bound.
+  test("a child with genuinely no activity past the window IS stalled", () => {
+    const quiet = (silentForMs: number) => ({
+      status: "running" as const,
+      lastOutcome: undefined,
+      lastActivityTime: now - silentForMs,
+      time: { created: now - (silentForMs + 60_000), updated: now - silentForMs },
+    })
+    // Exactly at the window is still progressing (<= convention); one ms past it flips.
+    expect(deriveLiveness(quiet(DEFAULT_LIVENESS_STALL_MS), now)).toBe("progressing")
+    expect(deriveLiveness(quiet(DEFAULT_LIVENESS_STALL_MS + 1), now)).toBe("stalled")
+    // And it stays stalled — not idle — right up to the abandonment bound.
+    expect(deriveLiveness(quiet(DEFAULT_LIVENESS_ABANDON_MS), now)).toBe("stalled")
+    expect(deriveLiveness(quiet(DEFAULT_LIVENESS_ABANDON_MS + 1), now)).toBe("idle")
+  })
+
+  // Pinned as a VALUE so re-narrowing it back toward the step-cadence number is a
+  // test failure, not a review question — the same treatment the abandonment bound
+  // gets above.
+  test("the stall window is 6 minutes", () => {
+    expect(DEFAULT_LIVENESS_STALL_MS).toBe(6 * 60_000)
+  })
+
+  // The two measurements that produced that value, as executable invariants.
+  test("the stall window clears the measured activity tail plus the coalescing lag", () => {
+    // 90s sat strictly between p99 and p99.9, i.e. between 0.1% and 1% of gaps
+    // from HEALTHY children exceeded it. That is what made it a false-positive
+    // generator, and it is the property the window must not have again.
+    expect(90_000).toBeGreaterThan(GAP_P99_MS)
+    expect(90_000).toBeLessThan(GAP_P99_9_MS)
+    // Above the deepest measured natural silence...
+    expect(DEFAULT_LIVENESS_STALL_MS).toBeGreaterThan(GAP_P99_9_MS)
+    // ...and above it by more than one coalesce interval, so the up-to-5s lag
+    // between a real part write and the recorded column cannot by itself flip a
+    // tail-but-healthy row. This is what disqualifies 300_000 (== registry.ts
+    // STUCK_THRESHOLD_MS): 300_000 < 296_811 + 5_000.
+    expect(DEFAULT_LIVENESS_STALL_MS).toBeGreaterThan(GAP_P99_9_MS + ACTIVITY_COALESCE_MS)
+    expect(300_000).toBeLessThan(GAP_P99_9_MS + ACTIVITY_COALESCE_MS)
+    // Still leaves a usable stalled band: the watchdog scans every 45s.
+    expect(DEFAULT_LIVENESS_ABANDON_MS - DEFAULT_LIVENESS_STALL_MS).toBeGreaterThanOrEqual(4 * 45_000)
+  })
+
   // === Defect A (read side): a row whose process is gone is not routable ===
   // ActorRegistry's orphan sweep is the only repair for a row whose owner died,
   // and it runs once at process init for rows of a different instance. Until then
@@ -266,16 +347,24 @@ describe("deriveLiveness (T39 derivation rule)", () => {
     expect(live).toBe("idle")
   })
 
+  // REWRITTEN (was `lastActivityTime: now - 4 * 60_000` with a 2-minute custom
+  // bound). 4 minutes was "past the 90s window but inside the 10m bound"; at a
+  // 6-minute window it fell back inside the window and the default-bound leg would
+  // have read `progressing`. Restated relative to both constants so it keeps
+  // testing the only thing it was ever about — that abandonMs is honoured and
+  // overridable — without re-encoding either threshold's value.
   test("custom abandonMs overrides the default bound", () => {
+    const silentFor = DEFAULT_LIVENESS_STALL_MS + 60_000
     const row = {
       status: "running" as const,
       lastOutcome: undefined,
-      lastActivityTime: now - 4 * 60_000,
-      time: { created: now - 11 * 60_000, updated: now - 4 * 60_000 },
+      lastActivityTime: now - silentFor,
+      time: { created: now - (silentFor + 60_000), updated: now - silentFor },
     }
-    // 4m-old activity: stalled under the default 10m bound, abandoned under a 2m one.
+    // Past the stall window and inside the default 10m bound → stalled; abandoned
+    // under a bound tighter than the silence.
     expect(deriveLiveness(row, now)).toBe("stalled")
-    expect(deriveLiveness(row, now, DEFAULT_LIVENESS_STALL_MS, 2 * 60_000)).toBe("idle")
+    expect(deriveLiveness(row, now, DEFAULT_LIVENESS_STALL_MS, silentFor - 1)).toBe("idle")
   })
 
   // A nullable column arrives as `null`, not `undefined`, for every row written

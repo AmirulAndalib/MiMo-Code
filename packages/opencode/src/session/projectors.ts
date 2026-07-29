@@ -144,7 +144,7 @@ export default [
       // part-write path this hangs off is unthrottled — the bash tool's
       // ctx.metadata fires per decoded stdout chunk — which measured 539-867 of
       // these UPDATEs per second, each running the correlated subquery below,
-      // while the only consumers (deriveLiveness's 90s stall display and 10m
+      // while the only consumers (deriveLiveness's 6m stall display and 10m
       // abandonment bound) cannot resolve anything finer than tens of seconds.
       // The staleness predicate is part of the WHERE rather than a process-local
       // cache so it stays correct across instances and restarts, and it also
