@@ -104,7 +104,12 @@ export function assembleFleet(
       liveness,
       status: actor?.status ?? "unknown",
       turnCount: actor?.turnCount ?? 0,
-      ...(actor ? { lastActivityMs: Math.max(0, now - actor.lastTurnTime) } : {}),
+      // Age of the last thing that actually landed, using the same reference
+      // deriveLiveness classifies on (activity, falling back to spawn) so the
+      // displayed age cannot disagree with the displayed liveness. It used to be
+      // computed from lastTurnTime, i.e. the last COMPLETED step, which made a
+      // column named "last activity" report something else.
+      ...(actor ? { lastActivityMs: Math.max(0, now - (actor.lastActivityTime ?? actor.time.created)) } : {}),
       ...(wt ? { worktreeDir: wt.directory, branch: wt.branch, ahead: wt.ahead } : {}),
     }
   })

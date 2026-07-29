@@ -1,8 +1,9 @@
-import { NotFoundError, eq, and } from "../storage"
+import { NotFoundError, eq, and, sql } from "../storage"
 import { SyncEvent } from "@/sync"
 import * as Session from "./session"
 import { MessageV2 } from "./message-v2"
 import { SessionTable, MessageTable, PartTable } from "./session.sql"
+import { ActorRegistryTable } from "@/actor/actor.sql"
 import { Log } from "../util"
 
 const log = Log.create({ service: "session.projector" })
@@ -128,6 +129,26 @@ export default [
           data: rest,
         })
         .onConflictDoUpdate({ target: PartTable.id, set: { data: rest } })
+        .run()
+      // Activity heartbeat for actor liveness (actor/schema.ts deriveLiveness).
+      // This projector is the single writer of `part` rows, so it is the one
+      // place that already fires on every part write — no new hook in the session
+      // loop. Sequenced after the insert so activity is recorded only if the part
+      // actually landed. `part` carries no agent id (the agent slice lives on
+      // `message`), so the owning actor is resolved through the message's primary
+      // key; together with session_id that hits actor_registry's PK directly. A
+      // 0-row no-op when the session has no registry row, exactly like updateTurn.
+      db.update(ActorRegistryTable)
+        .set({ last_activity_time: data.time })
+        .where(
+          and(
+            eq(ActorRegistryTable.session_id, sessionID),
+            eq(
+              ActorRegistryTable.actor_id,
+              sql`(SELECT ${MessageTable.agent_id} FROM ${MessageTable} WHERE ${MessageTable.id} = ${messageID})`,
+            ),
+          ),
+        )
         .run()
     } catch (err) {
       if (!foreign(err)) throw err

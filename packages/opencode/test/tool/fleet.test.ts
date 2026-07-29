@@ -33,15 +33,22 @@ function sess(id: string, title: string, directory: string): FleetActorInput["se
 describe("assembleFleet", () => {
   test("correlates liveness, turn telemetry, and worktree mapping into grouped rows", () => {
     const inputs: FleetActorInput[] = [
-      // progressing: running, turn advanced just now
+      // progressing: running, something landed just now. lastTurnTime is kept in
+      // sync only so the fixture stays readable — the derivation reads activity.
       {
         session: sess("ses_a", "port parser", "/wt/a"),
-        actor: actor({ agent: "build", status: "running", lastTurnTime: NOW - 1_000, turnCount: 5 }),
+        actor: actor({ agent: "build", status: "running", lastActivityTime: NOW - 1_000, lastTurnTime: NOW - 1_000, turnCount: 5 }),
       },
-      // stalled: running but no turn advance for longer than the window
+      // stalled: running but nothing has landed for longer than the window
       {
         session: sess("ses_b", "billing schema", "/wt/b"),
-        actor: actor({ agent: "compose", status: "running", lastTurnTime: NOW - DEFAULT_LIVENESS_STALL_MS - 5_000, turnCount: 2 }),
+        actor: actor({
+          agent: "compose",
+          status: "running",
+          lastActivityTime: NOW - DEFAULT_LIVENESS_STALL_MS - 5_000,
+          lastTurnTime: NOW - DEFAULT_LIVENESS_STALL_MS - 5_000,
+          turnCount: 2,
+        }),
       },
       // terminal success → idle bucket
       {
@@ -150,7 +157,7 @@ describe("renderFleetTable", () => {
     const inputs: FleetActorInput[] = [
       {
         session: sess("ses_a", "port parser", "/wt/a"),
-        actor: actor({ agent: "build", status: "running", lastTurnTime: NOW - 2_000, turnCount: 5 }),
+        actor: actor({ agent: "build", status: "running", lastActivityTime: NOW - 2_000, lastTurnTime: NOW - 2_000, turnCount: 5 }),
       },
       { session: sess("ses_z", "idle one", "/shared"), actor: null },
     ]

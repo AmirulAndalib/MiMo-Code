@@ -933,7 +933,11 @@ export const layer = Layer.effect(
         if (live === "stalled") {
           if (notified.has(key)) continue // already warned this episode — debounce
           notified.add(key)
-          yield* notifyStalled(actor, now - actor.lastTurnTime)
+          // Report the quantity the classification actually used — silence since
+          // the last part write, or since spawn when nothing has landed — not
+          // time since the last completed step, which deriveLiveness no longer
+          // reads. A number that disagrees with its own predicate is a bug.
+          yield* notifyStalled(actor, now - (actor.lastActivityTime ?? actor.time.created))
           continue
         }
         // Not stalled (progressing/terminal) → re-arm so a future re-stall notifies.

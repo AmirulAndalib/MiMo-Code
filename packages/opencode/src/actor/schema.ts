@@ -36,6 +36,10 @@ export const Actor = z
     tools: ToolWhitelist.optional(),
     lastTurnTime: z.number(),
     turnCount: z.number(),
+    // Last part write for this actor's slice. Optional because the column is
+    // nullable — see actor.sql.ts. This is the liveness evidence; lastTurnTime
+    // and turnCount are step bookkeeping and are NOT read by deriveLiveness.
+    lastActivityTime: z.number().optional(),
     lastError: z.string().optional(),
     time: z.object({
       created: z.number(),
@@ -47,16 +51,20 @@ export const Actor = z
 export type Actor = z.infer<typeof Actor>
 
 // Derived liveness: a pull-side signal computed from an actor row's honest
-// registry fields (status, lastOutcome, lastTurnTime). It answers the question
-// raw `status` cannot — is a running child PROGRESSING or STALLED?
-//   - progressing: running/pending AND its last turn advanced within the
-//     staleness window (updateTurn bumps last_turn_time per step, so a recent
-//     last_turn_time == recent progress). Also covers a not-yet-started child
-//     (turnCount === 0): its last_turn_time is the spawn time, so a slow first
-//     turn (queued behind the concurrency gate, model cold-start) must NOT be
-//     mistaken for a stall — it has not had the chance to run even once.
-//   - stalled: running/pending, HAS run at least one turn, BUT no turn advance
-//     for longer than the window.
+// registry fields (status, lastOutcome, lastActivityTime). It answers the
+// question raw `status` cannot — is a running child PROGRESSING or STALLED?
+//
+// The evidence is LAST ACTIVITY, not last completed step. `last_activity_time`
+// advances on every part write for the actor's slice (session/projectors.ts),
+// so a child inside a long tool call, a slow model call or a retry/backoff keeps
+// advancing it; only a child where nothing at all is landing goes quiet. The
+// previous signal was `last_turn_time`, whose sole writer is the per-step
+// heartbeat ActorRegistry.updateTurn — so the finest thing it could see was a
+// COMPLETED step, and a child blocked mid-step was indistinguishable from a dead
+// one. That coarseness is why the bound below used to be 30 minutes.
+//   - progressing: running/pending AND activity within the staleness window.
+//   - stalled: running/pending, but nothing has landed for longer than the
+//     window. Still routable — it means "quiet", not "dead".
 //   - success | failure | cancelled: terminal, taken straight from lastOutcome.
 //   - idle: finished with no recorded outcome, an unknown state, OR a row whose
 //     claim to be running/pending has outlived DEFAULT_LIVENESS_ABANDON_MS — see
@@ -65,11 +73,12 @@ export type Actor = z.infer<typeof Actor>
 export const Liveness = z.enum(["progressing", "stalled", "success", "failure", "cancelled", "idle"])
 export type Liveness = z.infer<typeof Liveness>
 
-// Default staleness threshold: a running child with no turn advance for this
-// long is reported `stalled`. 90s sits between the per-step turn cadence and
-// the 5-minute stuck-detection cutoff, so a briefly-thinking child still reads
-// as progressing while a genuinely wedged one flips to stalled well before the
-// watchdog (T40) would fire.
+// Default staleness threshold: a running child with no activity for this long is
+// reported `stalled` (still routable — a display distinction, not a verdict).
+// 90s was chosen against the per-step cadence; against the activity signal it is
+// if anything more meaningful, because measured inter-activity gaps for real peer
+// children are p50 994ms / p90 6.7s / p99 38s, so 90s of true silence is already
+// past the 99th percentile.
 export const DEFAULT_LIVENESS_STALL_MS = 90_000
 
 // Abandonment bound: how long a row may keep CLAIMING `running`/`pending` before
@@ -80,31 +89,43 @@ export const DEFAULT_LIVENESS_STALL_MS = 90_000
 // ActorRegistry's orphan sweep, and that sweep runs ONCE at process init and only
 // for rows carrying a DIFFERENT instance_id; until it runs — and for any row it
 // cannot reach — the row asserts progress with nothing behind it.
-// 30 minutes, picked the same way DEFAULT_LIVENESS_STALL_MS was: a child that has
-// genuinely begun bumps last_turn_time on EVERY step (updateTurn is the per-step
-// heartbeat), so 30m of silence is an order of magnitude past the 5-minute
-// stuck-detection cutoff and unreachable by a live turn; a child that has not
-// begun is waiting on the concurrency gate, which admits work continuously, so
-// 30m of zero admissions means its process is gone. Past the bound we report
-// `idle` — "finished with no recorded outcome (or an unknown state)", the honest
-// reading and the only non-routable bucket.
-export const DEFAULT_LIVENESS_ABANDON_MS = 30 * 60_000
+//
+// 10 minutes. This replaces a 30-minute bound that existed only because the old
+// signal was step-grained: a single legitimate step in this repo can run 20+
+// minutes (a live test run ~1225s), so any bound had to clear that. Activity
+// granularity removes that constraint, and the number is anchored to measurement
+// rather than to the longest possible step:
+//   - 2x STUCK_THRESHOLD_MS (registry.ts) — the repo's own existing "stuck" cutoff
+//     — rather than a fresh magic number;
+//   - ~16x the measured p99 inter-activity gap (38.0s) and ~2x p99.9 (296.8s) over
+//     43,120 real gaps across a 172-child roster;
+//   - ~345x the worst measured first-activity latency after spawn (1735ms, n=172,
+//     p50 194ms), which is what licensed deleting the old turnCount === 0 case:
+//     the "slow first turn queued behind the concurrency gate" it protected is
+//     empirically under two seconds, not minutes, because the user message that
+//     starts the turn is itself persisted as a part.
+// Direction of error is unchanged and deliberate: prefer a duplicate child
+// (wasteful) over routing into a corpse with re-dispatch suppressed
+// (unrecoverable). Past the bound we report `idle` — "finished with no recorded
+// outcome (or an unknown state)", the honest reading and the only non-routable
+// bucket.
+export const DEFAULT_LIVENESS_ABANDON_MS = 10 * 60_000
 
 export function deriveLiveness(
-  actor: Pick<Actor, "status" | "lastOutcome" | "lastTurnTime" | "turnCount" | "time">,
+  actor: Pick<Actor, "status" | "lastOutcome" | "lastActivityTime" | "time">,
   now: number = Date.now(),
   stallMs: number = DEFAULT_LIVENESS_STALL_MS,
   abandonMs: number = DEFAULT_LIVENESS_ABANDON_MS,
 ): Liveness {
   if (actor.status === "running" || actor.status === "pending") {
-    // A started child's evidence of life is its last turn; a not-yet-started one
-    // has none, so its spawn time is the only honest reference.
-    if (now - (actor.turnCount === 0 ? actor.time.created : actor.lastTurnTime) > abandonMs) return "idle"
-    // Not-yet-started child (no turn completed): a slow first turn (queued behind
-    // the concurrency gate / cold-start) is not a stall — the leniency is kept,
-    // but bounded by abandonMs above rather than unbounded.
-    if (actor.turnCount === 0) return "progressing"
-    return now - actor.lastTurnTime <= stallMs ? "progressing" : "stalled"
+    // One reference for every row, no per-row special case: the last thing that
+    // landed, or — when nothing has landed yet — the spawn time. `?? ` (not
+    // `=== undefined`) because the column is nullable, so this value arrives as
+    // `null` for pre-migration rows and a `!== undefined` guard would silently
+    // pass them through. See AGENTS.md "Reading a nullable column".
+    const since = actor.lastActivityTime ?? actor.time.created
+    if (now - since > abandonMs) return "idle"
+    return now - since <= stallMs ? "progressing" : "stalled"
   }
   if (actor.lastOutcome === "success") return "success"
   if (actor.lastOutcome === "failure") return "failure"
