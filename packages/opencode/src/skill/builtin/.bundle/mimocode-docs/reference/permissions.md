@@ -38,9 +38,21 @@ A bare string at the top level (`"permission": "allow"`) becomes `{ "*": action 
 
 Path/command-keyed (accept the glob-map form): `read`, `edit`, `glob`, `grep`, `list`, `bash`, `task`, `actor`, `external_directory`, `lsp`, `skill`.
 
-Simple action-only: `question`, `webfetch`, `websearch`, `codesearch`, `doom_loop`.
+Simple action-only: `question`, `webfetch`, `websearch`, `codesearch`, `doom_loop`, `mcp_sampling`.
 
 `doom_loop` is the safety gate raised when repeated identical tool calls look like an infinite loop. Keep it at `ask` (the default) unless the surrounding automation has another reliable stop condition.
+
+`mcp_sampling` gates MCP **client-side sampling**: an MCP server asking MiMoCode to run a model call on its behalf (`sampling/createMessage`), so the server needs no API key of its own. The glob argument is the MCP server name, so you can allow one server and keep the rest at `ask`:
+
+```jsonc
+{
+  "permission": {
+    "mcp_sampling": { "*": "ask", "mimo-cut": "allow" }
+  }
+}
+```
+
+The prompt shows which server asked, the model that will run, the content types and audio size, and previews of the system and user prompts. A per-server `mcp.<name>.sampling` value of `deny` refuses before any prompt or model work; `allow` skips the prompt but still enforces size caps, the request timeout, and model capability checks. See @mcp-sampling.md.
 
 Unknown keys fall through to a catch-all record, so future/custom tools can be named too.
 

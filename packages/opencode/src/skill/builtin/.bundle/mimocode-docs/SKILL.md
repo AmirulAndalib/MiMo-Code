@@ -56,6 +56,7 @@ Read only the reference needed for the request, but read it before changing file
 - Task-oriented usage and setup: @reference/guide.md
 - CLI and slash commands: @reference/commands.md
 - Permission rules: @reference/permissions.md
+- MCP client-side sampling (servers borrowing your model, audio transcription): @reference/mcp-sampling.md
 - Dynamic workflows: @reference/workflows.md
 
 ## How-To Guide

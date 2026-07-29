@@ -98,7 +98,7 @@ Prefer a markdown file (`.mimocode/agent/<name>.md`, body = system prompt) for d
 | Key | Purpose |
 |-----|---------|
 | `skills` | `paths[]` extra skill folders + `urls[]` remote skill indexes |
-| `mcp` | MCP servers: `local` (command/env) or `remote` (url/headers/oauth); `{ "enabled": false }` disables one |
+| `mcp` | MCP servers: `local` (command/env) or `remote` (url/headers/oauth); `{ "enabled": false }` disables one; `sampling` sets the client-sampling policy (`deny`/`ask`/`allow`, default `ask`) |
 | `tools` | Record of tool-id → boolean enable/disable |
 | `tool.invocation_style` | `json` (default) or `shell`; `tool.invocation_style_by_tool` for per-tool override |
 | `command` | Custom slash commands |

@@ -30,6 +30,8 @@ import { EffectBridge } from "@/effect"
 import { InstanceState } from "@/effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import * as CrossSpawnSpawner from "@/effect/cross-spawn-spawner"
+import { McpSampling } from "./sampling"
+import { SessionID } from "@/session/schema"
 
 const log = Log.create({ service: "mcp" })
 const DEFAULT_TIMEOUT = 30_000
@@ -77,8 +79,18 @@ export const TURN_LIFECYCLE_NOTIFICATION_TIMEOUT = 1_000
 // on again, so later turns abandon it instead of queueing behind it forever.
 export const TURN_LIFECYCLE_STUCK_TIMEOUT = TURN_LIFECYCLE_NOTIFICATION_TIMEOUT
 
-const turnLifecycleClientOptions = {
+/**
+ * Capabilities MiMoCode declares in `initialize`. Exported so tests assert on the
+ * SAME object the client is constructed with rather than a copy that could drift.
+ */
+export const CLIENT_OPTIONS = {
   capabilities: {
+    // Declared because we register a `sampling/createMessage` request handler
+    // below; the SDK's assertRequestHandlerCapability refuses the registration
+    // without it. Intentionally an empty object: `sampling.tools` and
+    // `sampling.context` are NOT implemented, and declaring them would invite
+    // servers to send `tools`/`includeContext` payloads we would have to reject.
+    sampling: {},
     experimental: {
       [TURN_LIFECYCLE_CAPABILITY]: { version: TURN_LIFECYCLE_VERSION },
     },
@@ -314,6 +326,9 @@ function convertMcpTool(mcpTool: MCPToolDef, client: MCPClient, timeout?: number
     execute: async (args: unknown, options) => {
       const metadata =
         context && supportsTurnLifecycle(client) ? { _meta: { [TURN_LIFECYCLE_CAPABILITY]: context } } : {}
+      // Recorded before the call so a `sampling/createMessage` arriving WHILE
+      // this call is in flight can address its approval prompt at this session.
+      if (context) McpSampling.setActiveSession(client, SessionID.make(context.sessionId))
       return client.callTool(
         {
           name: mcpTool.name,
@@ -425,7 +440,7 @@ export const layer = Layer.effect(
     const auth = yield* McpAuth.Service
     const bus = yield* Bus.Service
     const createClient = () =>
-      new Client({ name: "mimocode", version: InstallationVersion }, turnLifecycleClientOptions)
+      new Client({ name: "mimocode", version: InstallationVersion }, CLIENT_OPTIONS)
 
     type Transport = StdioClientTransport | StreamableHTTPClientTransport | SSEClientTransport
 
@@ -657,6 +672,7 @@ export const layer = Layer.effect(
         s.defs[name] = listed
         await bridge.promise(bus.publish(ToolsChanged, { server: name }).pipe(Effect.ignore))
       })
+      McpSampling.serve(name, client, bridge)
     }
 
     const state = yield* InstanceState.make<State>(
@@ -712,6 +728,7 @@ export const layer = Layer.effect(
                       } catch {}
                     }
                   }
+                  yield* McpSampling.cancelAll(client)
                   yield* Effect.tryPromise(() => client.close()).pipe(Effect.ignore)
                 }),
               { concurrency: "unbounded" },
@@ -728,7 +745,12 @@ export const layer = Layer.effect(
       const client = s.clients[name]
       delete s.defs[name]
       if (!client) return Effect.void
-      return Effect.tryPromise(() => client.close()).pipe(Effect.ignore)
+      // Interrupt sampling still running for this client first: once the
+      // transport is gone its response can never be delivered, so the fiber
+      // would otherwise keep a model call alive with nowhere to send the result.
+      return McpSampling.cancelAll(client).pipe(
+        Effect.andThen(Effect.tryPromise(() => client.close()).pipe(Effect.ignore)),
+      )
     }
 
     const storeClient = Effect.fnUntraced(function* (
