@@ -429,6 +429,111 @@ export const layer = Layer.effect(
       return inserted
     })
 
+    // Upper bound on how long a rebuild may block waiting for a checkpoint
+    // writer it started itself. `waitForWriter` takes NO timeout argument — its
+    // own 5-min bound is hardcoded at checkpoint.ts:986 — so the bound is
+    // applied by wrapping the call below.
+    //
+    // MANUAL: 5 min, matching waitForWriter's internal bound (i.e. unchanged
+    // behaviour). A human just typed /rebuild and is watching a spinner.
+    //
+    // AUTO: 3 min. The auto path fires mid-turn WITHOUT being asked, so the
+    // stall is unsolicited and must not be as generous as the manual one.
+    // 180s is exactly the top of the 60-180s band the writer documents for
+    // itself (checkpoint.ts:981), so it admits every writer that behaves as
+    // designed while refusing to hold an unrequested turn for the extra two
+    // minutes a watching human would tolerate. Abandoning the wait does not
+    // cancel the writer — it keeps running detached — so a bound that is too
+    // tight costs one degraded turn, not the checkpoint itself.
+    const MANUAL_WRITER_WAIT_MS = 300_000
+    const AUTO_WRITER_WAIT_MS = 180_000
+
+    /**
+     * Outcome of a rebuild attempt that is allowed to WRITE a checkpoint first.
+     *
+     * - "rebuilt"       a boundary was inserted; context is freed.
+     * - "no-checkpoint" there was no checkpoint AND the writer failed / never
+     *                   ran / the wait bound expired. This is the ONLY state in
+     *                   which a caller may fall back to compaction.
+     * - "insert-failed" a checkpoint DOES exist but the boundary insert still
+     *                   refused (degraded, e.g. renderRebuildContext empty).
+     *                   Callers must report this honestly and must NOT compact.
+     */
+    type RebuildAttempt = "rebuilt" | "no-checkpoint" | "insert-failed"
+
+    // The single place that decides whether a rebuild may degrade to
+    // compaction. Every caller — both auto context-overflow sites and the
+    // manual /rebuild command — goes through here, so the fallback condition
+    // is ONE condition rather than several lookalikes that can drift apart.
+    //
+    // Ordering matters: we try the on-disk checkpoint FIRST and only start a
+    // writer when there is no checkpoint at all. When a checkpoint already
+    // exists this deliberately does not block on an in-flight writer that is
+    // producing a fresher one — that separate, unchanged policy is documented
+    // on rebuildFromCheckpoint above and is NOT the justification for waiting
+    // here. Waiting here is justified only by the no-checkpoint case, where the
+    // alternative is `compaction.create`, which inserts a bare boundary marker
+    // and therefore drops all pre-boundary history with no summary at all.
+    const rebuildEnsuringCheckpoint = Effect.fn("SessionPrompt.rebuildEnsuringCheckpoint")(function* (input: {
+      sessionID: SessionID
+      msgs: MessageV2.WithParts[]
+      agentID?: string
+      agent: string
+      model: { providerID: string; id: string }
+      /** Upper bound on the writer wait; see {AUTO,MANUAL}_WRITER_WAIT_MS. */
+      writerWaitMs: number
+      /** Run once, immediately before the wait begins, to explain the stall. */
+      onWaitingForWriter?: Effect.Effect<void>
+    }) {
+      // 1. Whatever is already on disk.
+      if (yield* rebuildFromCheckpoint(input).pipe(Effect.catch(() => Effect.succeed(false))))
+        return "rebuilt" as const
+
+      // 2. Distinguish "nothing to rebuild from" (may compact) from "checkpoint
+      //    present but the insert failed" (must not compact).
+      const hasCP = yield* checkpoint
+        .hasCheckpoint(input.sessionID)
+        .pipe(Effect.catch(() => Effect.succeed(false)))
+      if (hasCP) return "insert-failed" as const
+
+      // 3. No checkpoint → produce one on the spot. Reentrancy: the
+      //    isWriterRunning probe skips a redundant request, and
+      //    tryStartCheckpointWriter is itself safe under concurrency — it
+      //    returns "queued" instead of forking a second writer — so this can
+      //    never start two writers for one session even when reached from
+      //    successive runLoop iterations.
+      const writerRunning = yield* checkpoint
+        .isWriterRunning(input.sessionID)
+        .pipe(Effect.catch(() => Effect.succeed(false)))
+      if (!writerRunning) {
+        // promptOps is declared in TryStartCheckpointWriterInput but never read
+        // by the writer (it spawns as a subagent via spawnRef), so a stub
+        // suffices.
+        yield* checkpoint
+          .tryStartCheckpointWriter({
+            sessionID: input.sessionID,
+            model: { providerID: input.model.providerID, modelID: input.model.id },
+            promptOps: {} as never,
+          })
+          .pipe(Effect.catch(() => Effect.succeed<"started" | "queued" | "skipped">("skipped")))
+      }
+
+      if (input.onWaitingForWriter) yield* input.onWaitingForWriter
+
+      const writerOutcome = yield* checkpoint
+        .waitForWriter(input.sessionID)
+        .pipe(
+          Effect.timeout(input.writerWaitMs),
+          Effect.catch(() => Effect.succeed<"success" | "failure" | "no-writer">("failure")),
+        )
+      if (writerOutcome !== "success") return "no-checkpoint" as const
+
+      // 4. Writer wrote a checkpoint — rebuild from it.
+      if (yield* rebuildFromCheckpoint(input).pipe(Effect.catch(() => Effect.succeed(false))))
+        return "rebuilt" as const
+      return "insert-failed" as const
+    })
+
     const resolvePromptParts = Effect.fn("SessionPrompt.resolvePromptParts")(function* (template: string) {
       const ctx = yield* InstanceState.context
       const parts: PromptInput["parts"] = [{ type: "text", text: template }]
@@ -3340,34 +3445,54 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
             // Main-agent overflow: insert a checkpoint boundary marker (never
             // deletes DB messages) so the next iteration rebuilds from the
-            // freshest checkpoint. Shared with the manual `/rebuild` command via
-            // rebuildFromCheckpoint so logic/boundary conditions can't drift.
-            // Falls back to compaction only when no boundary can be produced.
-            const inserted = yield* rebuildFromCheckpoint({
+            // freshest checkpoint. When NO checkpoint exists yet this now starts
+            // a writer and waits for it (bounded) rather than degrading
+            // immediately — the same on-the-spot behaviour the manual /rebuild
+            // command has, via the shared rebuildEnsuringCheckpoint helper so
+            // logic/boundary conditions can't drift.
+            const attempt: RebuildAttempt = yield* rebuildEnsuringCheckpoint({
               sessionID,
               msgs,
               agentID: lastUser.agentID,
               agent: lastUser.agent,
               model: { providerID: model.providerID, id: model.id },
+              writerWaitMs: AUTO_WRITER_WAIT_MS,
+              // The turn is mid-flight, so explain the stall: without this the
+              // TUI would sit on a bare spinner for minutes with no reason.
+              onWaitingForWriter: status
+                .set(sessionID, { type: "busy", message: "Writing checkpoint\u2026" })
+                .pipe(Effect.catch(() => Effect.void)),
             })
-            if (inserted) {
+            if (attempt === "rebuilt") {
               skipOverflowCheck = true
               continue
             }
 
-            // F39: no checkpoint — fall back to compaction (LLM-driven lossy summary).
-            // Better than mechanical trim: preserves semantic content via summary.
-            yield* compaction
-              .create({
-                sessionID,
-                agent: lastUser.agent,
-                model: { providerID: model.providerID, modelID: model.id },
-                auto: true,
-                agentID: lastUser.agentID,
-              })
-              .pipe(Effect.ignore)
-            skipOverflowCheck = true
-            continue
+            if (attempt === "no-checkpoint") {
+              // THE single compaction fallback: no checkpoint existed AND the
+              // writer failed / never ran / the bound expired. Note this is a
+              // bare boundary insert, not an LLM summary — everything before it
+              // is dropped unsummarized (compaction.ts:499, message-v2.ts:1037)
+              // — which is exactly why we tried to write a checkpoint first.
+              yield* compaction
+                .create({
+                  sessionID,
+                  agent: lastUser.agent,
+                  model: { providerID: model.providerID, modelID: model.id },
+                  auto: true,
+                  agentID: lastUser.agentID,
+                })
+                .pipe(Effect.ignore)
+              skipOverflowCheck = true
+              continue
+            }
+
+            // "insert-failed": a checkpoint DOES exist, so compaction is not
+            // permitted here — it would amputate history we hold a usable
+            // checkpoint for. Nothing freed context, so do NOT `continue` into
+            // an identical overflow check; fall through and let the model call
+            // proceed. The provider-signalled overflow handler below is the
+            // backstop if the request is actually rejected.
           }
           skipOverflowCheck = false
 
@@ -3917,30 +4042,36 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               }
 
               // Main-agent provider-signalled overflow: prefer rebuild over
-              // compaction. Shared with the manual `/rebuild` command via
-              // rebuildFromCheckpoint (does not block on the writer; uses the
-              // on-disk checkpoint). Fall back to compaction only when no
-              // boundary can be produced.
-              const inserted2 = yield* rebuildFromCheckpoint({
+              // compaction, via the same shared rebuildEnsuringCheckpoint helper
+              // the token-threshold path and manual /rebuild use — so the
+              // compaction fallback stays ONE condition, not three lookalikes.
+              const attempt2: RebuildAttempt = yield* rebuildEnsuringCheckpoint({
                 sessionID,
                 msgs,
                 agentID: lastUser.agentID,
                 agent: lastUser.agent,
                 model: { providerID: model.providerID, id: model.id },
+                writerWaitMs: AUTO_WRITER_WAIT_MS,
+                onWaitingForWriter: status
+                  .set(sessionID, { type: "busy", message: "Writing checkpoint\u2026" })
+                  .pipe(Effect.catch(() => Effect.void)),
               })
-              if (inserted2) return "continue" as const
+              if (attempt2 === "rebuilt") return "continue" as const
 
-              // F39: no checkpoint — fall back to compaction (LLM-driven lossy summary).
-              yield* compaction
-                .create({
-                  sessionID,
-                  agent: lastUser.agent,
-                  model: { providerID: model.providerID, modelID: model.id },
-                  auto: true,
-                  overflow: true,
-                  agentID: lastUser.agentID,
-                })
-                .pipe(Effect.ignore)
+              if (attempt2 === "no-checkpoint") {
+                // THE single compaction fallback (see the token-threshold site).
+                yield* compaction
+                  .create({
+                    sessionID,
+                    agent: lastUser.agent,
+                    model: { providerID: model.providerID, modelID: model.id },
+                    auto: true,
+                    overflow: true,
+                    agentID: lastUser.agentID,
+                  })
+                  .pipe(Effect.ignore)
+              }
+              // "insert-failed" → a checkpoint exists; must not compact.
             }
             return "continue" as const
           }).pipe(Effect.ensuring(instruction.clear(handle.message.id)))
@@ -4142,6 +4273,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       //   2. No usable checkpoint → start a writer and wait for it, then rebuild.
       //   3. Checkpoint exists + writer in-flight → wait (with timeout), rebuild
       //      with the fresher checkpoint if it arrives, else fall back to existing.
+      // Cases 1-3 live in the shared rebuildEnsuringCheckpoint helper, which the
+      // auto context-overflow paths use too, so the manual and automatic
+      // behaviours cannot drift and there is exactly ONE compaction fallback
+      // condition (no checkpoint AND the writer failed) in this file.
       //
       // Manual /rebuild mirrors the AUTO rebuild/compaction path exactly: it
       // inserts the legitimate rebuild BOUNDARY (a role:"user" message carrying
@@ -4153,9 +4288,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       // question, so after inserting the boundary it simply returns to idle
       // (no model turn, no auto-reply).
       //
-      // The outcome ("context rebuilt" / "no checkpoint available yet") is
-      // surfaced to the user through the SessionStatus / Bus status channel —
-      // the same busy-status mechanism that drives "Rebuilding context…" /
+      // The outcome ("context rebuilt" / "compacted instead because the writer
+      // failed" / "checkpoint written but rebuild failed") is surfaced to the
+      // user through the SessionStatus / Bus status channel — the same
+      // busy-status mechanism that drives "Rebuilding context…" /
       // "Writing checkpoint…" — NOT through a persisted synthetic user message.
       // The busy status is set BEFORE any work so the TUI spinner lights up
       // immediately; because the runLoop is never entered, its onIdle won't
@@ -4173,8 +4309,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           yield* status.set(input.sessionID, { type: "busy", message }).pipe(Effect.catch(() => Effect.void))
           yield* status.set(input.sessionID, { type: "idle" }).pipe(Effect.catch(() => Effect.void))
         })
-        const noCheckpointMsg =
-          "No checkpoint is available to rebuild from yet — continue the conversation and a checkpoint will be written automatically."
+        const compactedInsteadMsg =
+          "No checkpoint could be written (the checkpoint writer failed), so the context was compacted instead — earlier messages were dropped rather than rebuilt from a checkpoint."
+        const rebuildFailedMsg =
+          "A checkpoint was written but the context could not be rebuilt from it. Context is unchanged and nothing was compacted — retry /rebuild, or report this if it repeats."
         const rebuiltMsg =
           "Context rebuilt from the latest checkpoint. Recent messages are preserved; earlier context is now summarized."
 
@@ -4184,65 +4322,57 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           Effect.catch(() => Effect.void),
         )
 
-        // Case 2: no usable checkpoint → actively spawn a writer and wait for
-        // it to finish, THEN rebuild from the freshly-written checkpoint.
-        // This is the user-decided semantics: /rebuild on a cold session
-        // produces the first checkpoint on the spot rather than deferring.
-        const hasCP = yield* checkpoint
-          .hasCheckpoint(input.sessionID)
-          .pipe(Effect.catch(() => Effect.succeed(false)))
-        if (!hasCP) {
-          const writerRunning = yield* checkpoint
-            .isWriterRunning(input.sessionID)
-            .pipe(Effect.catch(() => Effect.succeed(false)))
-          if (!writerRunning) {
-            // No checkpoint and no writer — start one. promptOps is declared
-            // in TryStartCheckpointWriterInput but never read by the writer
-            // (it spawns as a subagent via spawnRef), so a stub suffices.
-            yield* checkpoint
-              .tryStartCheckpointWriter({
-                sessionID: input.sessionID,
-                model: { providerID: model.providerID, modelID: model.modelID },
-                promptOps: {} as never,
-              })
-              .pipe(Effect.catch(() => Effect.succeed<"started" | "queued" | "skipped">("skipped")))
-          }
-          // Wait for the writer to finish. waitForWriter has its own 5-min
-          // safety bound (checkpoint.ts:985). On "success" the checkpoint file
-          // is on disk and the watermark is advanced; on "failure" or
-          // "no-writer" we fall through and let rebuildFromCheckpoint try
-          // whatever exists (or surface the no-checkpoint outcome).
-          yield* status
-            .set(input.sessionID, { type: "busy", message: "Writing checkpoint\u2026" })
-            .pipe(Effect.catch(() => Effect.void))
-          const writerOutcome = yield* checkpoint
-            .waitForWriter(input.sessionID)
-            .pipe(Effect.catch(() => Effect.succeed<"success" | "failure" | "no-writer">("failure")))
-          if (writerOutcome !== "success") {
-            // Writer failed or wasn't running — surface the outcome on the
-            // status channel and return to idle. No boundary was inserted and
-            // NO synthetic user turn is fabricated.
-            yield* settle(noCheckpointMsg)
-            return lastUser ?? msgs[msgs.length - 1]!
-          }
-          // Writer succeeded — fall through to rebuildFromCheckpoint which
-          // will now find the freshly-written checkpoint and insert the
-          // boundary.
-        }
-
-        const inserted = yield* rebuildFromCheckpoint({
+        // Cases 1-3 all run through the shared rebuildEnsuringCheckpoint helper:
+        // it rebuilds from an existing checkpoint, or — on a cold session — spawns
+        // a writer, waits for it (bounded), and rebuilds from the fresh
+        // checkpoint. That is the user-decided semantics: /rebuild on a cold
+        // session produces the first checkpoint on the spot rather than deferring.
+        const attempt: RebuildAttempt = yield* rebuildEnsuringCheckpoint({
           sessionID: input.sessionID,
           msgs,
           agentID: lastUser?.info.agentID ?? "main",
           agent: agentName,
           model: { providerID: model.providerID, id: model.modelID },
-        }).pipe(Effect.catch(() => Effect.succeed(false)))
+          writerWaitMs: MANUAL_WRITER_WAIT_MS,
+          onWaitingForWriter: status
+            .set(input.sessionID, { type: "busy", message: "Writing checkpoint\u2026" })
+            .pipe(Effect.catch(() => Effect.void)),
+        }).pipe(Effect.catch(() => Effect.succeed("insert-failed" as const)))
 
-        if (!inserted) {
-          // Defensive: writer succeeded but boundary insertion still failed
-          // (e.g. renderRebuildContext returned empty — degraded state).
-          // Surface the no-checkpoint outcome and return to idle.
-          yield* settle(noCheckpointMsg)
+        if (attempt === "no-checkpoint") {
+          // No checkpoint AND the writer genuinely failed / never ran / the bound
+          // expired — the ONE fallback condition, shared with the auto overflow
+          // paths. An earlier revision of this branch deliberately did NOT
+          // compact here, reasoning that /rebuild means "rebuild from a
+          // checkpoint" so substituting a lossy summary would misreport what
+          // happened. The user overruled that tradeoff: if the writer genuinely
+          // failed, a truncating compaction beats doing nothing. We keep the
+          // report honest by naming the substitution on the status channel
+          // instead of silently swapping the mechanism, and — per the branch's
+          // existing noReply decision (3244ca732) — fabricate neither an
+          // assistant reply nor a synthetic user turn.
+          yield* compaction
+            .create({
+              sessionID: input.sessionID,
+              agent: agentName,
+              model: { providerID: model.providerID, modelID: model.modelID },
+              // Not user-requested: the user asked for a rebuild, the system
+              // chose this degradation.
+              auto: true,
+              agentID: lastUser?.info.agentID ?? "main",
+            })
+            .pipe(Effect.ignore)
+          yield* settle(compactedInsteadMsg)
+          return lastUser ?? msgs[msgs.length - 1]!
+        }
+
+        if (attempt === "insert-failed") {
+          // A checkpoint EXISTS but the boundary insert refused (e.g.
+          // renderRebuildContext returned empty — degraded state). NOT a
+          // fallback case: compacting would drop history that a usable
+          // checkpoint was available for. Report the degraded state accurately
+          // and return to idle.
+          yield* settle(rebuildFailedMsg)
           return lastUser ?? msgs[msgs.length - 1]!
         }
 
