@@ -13,7 +13,7 @@ import { McpSampling } from "../../src/mcp/sampling"
 import { MCP } from "../../src/mcp/index"
 import { Permission } from "../../src/permission"
 import type { SessionID } from "../../src/session/schema"
-import { wav } from "./sampling.test"
+import { wav } from "./wav-fixture"
 
 /**
  * END-TO-END proof of MCP client-side sampling over a REAL bidirectional
