@@ -95,10 +95,6 @@ export const Flag = {
   get MIMOCODE_FORCE_ANTHROPIC_REASONING_CONTENT() {
     return truthy("MIMOCODE_FORCE_ANTHROPIC_REASONING_CONTENT")
   },
-  // Empty/no-op tool-call loop guard: number of soft nudges (remind → replan)
-  // before the harness hard-halts the turn. N consecutive empty steps beyond
-  // this many recovery attempts terminates the turn. Mirrors TEXT_NGRAM_MAX_RECOVERY.
-  MIMOCODE_EMPTY_STEP_MAX_RECOVERY: number("MIMOCODE_EMPTY_STEP_MAX_RECOVERY") ?? 2,
 
   // Consecutive-block repetition detection for streamed reasoning + text.
   // A block of at least N tokens repeating REPEAT_THRESHOLD times consecutively
