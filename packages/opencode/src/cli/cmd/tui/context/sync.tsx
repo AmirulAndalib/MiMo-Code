@@ -30,6 +30,8 @@ import { useExit } from "./exit"
 import { useArgs } from "./args"
 import { batch, onMount } from "solid-js"
 import { Log } from "@/util"
+import { isDirectoryDeniedError } from "@/server/routes/instance/access"
+import { useToastOptional } from "../ui/toast"
 import { emptyConsoleState, type ConsoleState } from "@/config/console-state"
 
 /**
@@ -279,6 +281,22 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     const event = useEvent()
     const project = useProject()
     const sdk = useSDK()
+    const toast = useToastOptional()
+
+    // A bootstrap that nobody awaits still must not fail silently when the
+    // server's directory whitelist is the reason. `bootstrap` rethrows the
+    // recoverable policy rejection so an interactive caller can restore the
+    // previous directory and explain itself; the two fire-and-forget callers
+    // below have no such caller, so without this the TUI would sit with stale
+    // data and no indication why. Genuinely fatal failures already exited
+    // inside bootstrap, and anything else is logged there.
+    const reportDenied = (e: unknown) => {
+      if (!isDirectoryDeniedError(e)) return
+      toast?.show({
+        message: `Cannot use ${sdk.directory ?? "this directory"}: outside this server's working directory`,
+        variant: "error",
+      })
+    }
 
     const fullSyncedSessions = new Set<string>()
     let syncedWorkspace = project.workspace.current()
@@ -287,7 +305,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     event.subscribe((event) => {
       switch (event.type) {
         case "server.instance.disposed":
-          void bootstrap()
+          void bootstrap().catch(reportDenied)
           break
         case "permission.replied": {
           const requests = store.permission[event.properties.sessionID]
@@ -834,20 +852,28 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         })
         .catch(async (e) => {
           Log.Default.error("tui bootstrap failed", {
-            error: e instanceof Error ? e.message : String(e),
+            error: isDirectoryDeniedError(e) ? e.error : e instanceof Error ? e.message : String(e),
             name: e instanceof Error ? e.name : undefined,
             stack: e instanceof Error ? e.stack : undefined,
           })
-          if (fatal) {
+          // The server's directory whitelist rejecting the requested directory is a
+          // recoverable policy decision, not a broken TUI: exiting here would take
+          // the user's whole session down over a mistyped/untrusted path. Always
+          // rethrow so the switch caller can restore the previous directory and show
+          // the error. Genuinely fatal bootstrap failures still exit.
+          if (fatal && !isDirectoryDeniedError(e)) {
             await exit(e)
-          } else {
-            throw e
+            return
           }
+          throw e
         })
     }
 
     onMount(() => {
-      void bootstrap()
+      // Errors are already logged (and exited on, when fatal) inside bootstrap; the
+      // rethrown recoverable case has no caller here, so swallow it rather than
+      // emitting an unhandled rejection.
+      void bootstrap().catch(reportDenied)
     })
 
     const result = {
