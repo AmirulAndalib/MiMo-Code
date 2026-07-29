@@ -17,6 +17,7 @@ import { Shell } from "@/shell/shell"
 
 import { SessionCwd } from "./session-cwd"
 import * as IsolatedGit from "./isolated-git-guard"
+import * as MergeConflict from "./merge-conflict-notice"
 import { BashArity } from "@/permission/arity"
 import * as Truncate from "./truncate"
 import { Plugin } from "@/plugin"
@@ -789,6 +790,19 @@ export const BashTool = Tool.define(
       if (meta.length > 0) {
         output += "\n\n<bash_metadata>\n" + meta.join("\n") + "\n</bash_metadata>"
       }
+
+      // Conflict-ownership affordance. When this command left git mid-merge with
+      // unmerged paths, the result itself carries the rule (the conflict belongs
+      // to the branch's owner) and the two literal commands that follow it —
+      // because the model reads a tool result before its next tool call, and does
+      // not re-read a system prompt assembled requests ago. Appended LAST so it is
+      // the final thing in the result, and never blocking: see the module header.
+      output += yield* MergeConflict.annotate({
+        git: gitSvc,
+        cwd: input.cwd,
+        command: input.command,
+        output,
+      })
       if (sink) {
         const stream = sink
         yield* Effect.promise(
