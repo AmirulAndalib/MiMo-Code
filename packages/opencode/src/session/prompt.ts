@@ -517,7 +517,15 @@ export const layer = Layer.effect(
       const boundary = hasCP
         ? yield* checkpoint.lastBoundary(input.sessionID).pipe(Effect.catch(() => Effect.succeed(undefined)))
         : undefined
-      if (hasCP && boundary !== undefined) return "insert-failed" as const
+      //    Predicate note: this MUST be the same truthiness test that
+      //    `rebuildFromCheckpoint` applies to the same value (`if (!boundary)`
+      //    at :413), NOT `boundary !== undefined`. `lastBoundary` reads a
+      //    nullable column and returned JS `null` for an unset watermark
+      //    (checkpoint.ts:1422 — its declared `MessageID | undefined` was an
+      //    unchecked cast), so `!== undefined` was true for EVERY session with a
+      //    file on disk and this guard degenerated into the bare
+      //    `hasCheckpoint` check it was written to replace.
+      if (hasCP && boundary) return "insert-failed" as const
 
       // 3. No checkpoint → produce one on the spot. Reentrancy: the
       //    isWriterRunning probe skips a redundant request, and

@@ -411,4 +411,100 @@ describe("Auto context overflow: write a checkpoint before degrading to compacti
     },
     { timeout: 60_000 },
   )
+
+  // The arrival state this guards is NORMAL, not degraded, which is what makes
+  // it easy to misclassify. `prune.fireCheckpoints` (prune.ts:289) runs
+  // immediately BEFORE the overflow check, and `tryStartCheckpointWriter`
+  // scaffolds an EMPTY TEMPLATE (checkpoint.ts:650) *before* spawning the
+  // writer. So by the time the overflow check runs, "checkpoint file on disk,
+  // watermark not yet written" is the ordinary case.
+  //
+  // Two successive bugs lived here, and the second one hid inside the fix for
+  // the first:
+  //
+  //  1. The discriminator keyed on bare `hasCheckpoint` — literally
+  //     `Bun.file(...).exists()` (checkpoint.ts:1021) — so the scaffolded
+  //     template counted as a usable checkpoint and the state was reported as
+  //     `insert-failed`.
+  //  2. Re-keying it on `lastBoundary` was right in substance but was written as
+  //     `boundary !== undefined`, and `lastBoundary` returned JS `null` for an
+  //     unset watermark (a nullable column behind an unchecked
+  //     `as MessageID | undefined` cast, checkpoint.ts:1422). `null !== undefined`
+  //     is true, so the new guard was a NO-OP and behaved exactly like (1).
+  //
+  // Both bugs present identically and silently: `insert-failed` is the one
+  // outcome that neither rebuilds nor compacts (prompt.ts:3515-3521 deliberately
+  // falls through to the model call), so the overflow is simply left unresolved
+  // — zero checkpoints AND zero compactions, no error anywhere. That signature
+  // is why this needs a test rather than a code reading: the sibling test above
+  // passes with either bug in place, because it seeds no file at all.
+  test(
+    "a scaffolded-but-empty checkpoint file still starts and awaits the writer",
+    async () => {
+      const llm = startLLM("post-rebuild-reply")
+      const writer = writerThatWritesCheckpointAfter("SCAFFOLD_THEN_REAL_CHECKPOINT", 400)
+      try {
+        await using tmp = await tmpdir({
+          git: true,
+          init: (dir) => Bun.write(path.join(dir, "mimocode.json"), mimocodeConfig(llm.origin)),
+        })
+
+        await withSpawnRef(writer, () =>
+          Instance.provide({
+            directory: tmp.path,
+            fn: () =>
+              run(
+                Effect.gen(function* () {
+                  const prompt = yield* SessionPrompt.Service
+                  const sessions = yield* Session.Service
+                  const info = yield* sessions.create({ title: "auto-overflow-scaffolded" })
+
+                  const first = yield* Effect.promise(() => seedUserMessage(info.id, "earlier question"))
+                  yield* Effect.promise(() => seedFinishedAssistant(info.id, first.id, 50_000))
+
+                  // Exactly what tryStartCheckpointWriter leaves behind before
+                  // the writer has produced anything: the file exists, the
+                  // watermark does not.
+                  const file = checkpointPath(info.id)
+                  yield* Effect.promise(() => fs.mkdir(path.dirname(file), { recursive: true }))
+                  yield* Effect.promise(() => Bun.write(file, "# Session checkpoint\n"))
+
+                  yield* prompt.prompt({
+                    sessionID: info.id,
+                    parts: [{ type: "text", text: "next question that overflows" }],
+                    agent: "build",
+                  })
+
+                  const after = yield* sessions.messages({ sessionID: info.id })
+
+                  const checkpoints = after.filter((m) => m.parts.some((p) => p.type === "checkpoint"))
+                  const compactions = after.filter((m) => m.parts.some((p) => p.type === "compaction"))
+                  // A writer was started and awaited, and the rebuild used its
+                  // output. Both numbers matter: 0/0 is the silent-fallthrough
+                  // signature of the bug, and 0/1 would mean it degraded.
+                  expect(checkpoints.length).toBe(1)
+                  expect(compactions.length).toBe(0)
+
+                  // The scaffolded file must NOT have been mistaken for a usable
+                  // checkpoint: a watermark exists only because a writer settled.
+                  const watermark = yield* Effect.sync(() =>
+                    Database.use((db) =>
+                      db
+                        .select({ id: SessionTable.last_checkpoint_message_id })
+                        .from(SessionTable)
+                        .where(eq(SessionTable.id, info.id))
+                        .get(),
+                    ),
+                  )
+                  expect(watermark?.id).toBeTruthy()
+                }),
+              ),
+          }),
+        )
+      } finally {
+        await llm.stop()
+      }
+    },
+    { timeout: 60_000 },
+  )
 })

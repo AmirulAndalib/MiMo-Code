@@ -1419,7 +1419,16 @@ export const layer: Layer.Layer<
             .get(),
         ),
       )
-      return row?.last_checkpoint_message_id as MessageID | undefined
+      // `?? undefined` is load-bearing, not cosmetic. The session row always
+      // exists, so `row` is non-null and the column is SQL NULL until a writer
+      // sets the watermark — i.e. this expression is `null`, while the declared
+      // signature (:489) promises `MessageID | undefined`. The `as` cast below
+      // silences the type checker without converting anything, so the declared
+      // type was simply untrue at runtime. Every historical caller happened to
+      // test truthiness (`!boundary` at prompt.ts:413, `watermarkBefore ?` at
+      // :1131, `boundaryID ?` in nudgedSinceBoundary) and so never noticed; the
+      // first caller to write `!== undefined` got a silent no-op instead.
+      return (row?.last_checkpoint_message_id ?? undefined) as MessageID | undefined
     })
 
     const isWriterRunning = Effect.fn("SessionCheckpoint.isWriterRunning")(function* (sessionID: SessionID) {
