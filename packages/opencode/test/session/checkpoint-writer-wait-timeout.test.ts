@@ -116,11 +116,10 @@ function seedAndStartWriter() {
 }
 
 // Drive one writer past the 5-minute bound and re-enter the wait exactly the
-// way prune's retry watcher does (prune.ts:338-349), then settle the writer
-// LATE and return what the re-entered wait reports. This is the seam the
-// prune-side tests cannot cover: they stub waitForWriter, so they ASSUME a
-// late-settling writer yields "timeout" then its real outcome. Here the real
-// service produces it.
+// way prune's settle watcher does, then settle the writer LATE and return what
+// the re-entered wait reports. This is the seam the prune-side tests cannot
+// cover: they stub the checkpoint service, so they ASSUME a late-settling writer
+// yields "timeout" then its real outcome. Here the real service produces it.
 function timeoutThenSettle(settled: AgentOutcome) {
   return Effect.gen(function* () {
     const svc = yield* SessionCheckpoint.Service
@@ -146,6 +145,30 @@ function timeoutThenSettle(settled: AgentOutcome) {
     // The writer finally settles — ~7 minutes in, long past the first bound.
     yield* Deferred.succeed(outcome, settled)
     return yield* Fiber.join(second)
+  })
+}
+
+// Enter waitForWriterSettlement while the writer is still in flight, then settle
+// it, and return the settlement the real service produced.
+//
+// The wait MUST be entered before the Deferred resolves: the settle watcher
+// removes the writers-map entry once the writer settles, so a wait entered
+// afterwards returns { outcome: "no-writer" } — which would pass any assertion
+// about "no failure classification" vacuously, asserting nothing about the
+// failure arm at all.
+function settlementAfterSettle(settled: AgentOutcome) {
+  return Effect.gen(function* () {
+    const svc = yield* SessionCheckpoint.Service
+    const { info, outcome } = yield* seedAndStartWriter()
+
+    const waiting = yield* Effect.forkChild(svc.waitForWriterSettlement(info.id))
+    yield* TestClock.adjust("1 second")
+    // Parked on the Deferred, not returned early — so what comes back below is
+    // the settlement of THIS writer.
+    expect(waiting.pollUnsafe()).toBeUndefined()
+
+    yield* Deferred.succeed(outcome, settled)
+    return yield* Fiber.join(waiting)
   })
 }
 
@@ -210,11 +233,24 @@ describe("SessionCheckpoint.waitForWriter", () => {
     ),
   )
 
-  // The PR claims the writer's REAL outcome is still booked after the bound
-  // expires. Booking happens in prune, whose counter is closure-private — but
-  // prune learns the outcome from exactly one place, waitForWriter's return on
-  // the re-entered wait, and that IS public. These two cases pin it for both
-  // terminal states.
+  // These two cases pin #1938's contract: after the bounded wait expires, the
+  // writer's REAL terminal outcome is still what a re-entered wait reports —
+  // "success" or "failure", never a sticky "timeout" and never "no-writer"
+  // because the settle watcher had already removed the map entry.
+  //
+  // (An earlier revision of this comment justified them by "keeping the failure
+  // cap reachable" so a broken slow writer "would never be counted". The cap and
+  // the counting — MAX_WRITER_FAILURES and the writerFailures map — were deleted
+  // by this branch. Nothing counts writer failures now, so that justification
+  // described machinery the tests no longer touch.)
+  //
+  // What consumes the distinction in production: prune reads it through
+  // waitForWriterSettlement (the same implementation, projected differently) and
+  // arms its final-threshold recovery gate ONLY on a settled "failure" — a
+  // "timeout" must never arm it, because the writer may still be about to
+  // succeed and advance the watermark. The flat three-value `waitForWriter`
+  // asserted below has no production caller of its own; it is the contract these
+  // tests hold still so the settlement shape cannot drift away from it.
   it.effect(
     "a writer that SUCCEEDS after the bound reports 'success' to the re-entered wait",
     provideTmpdirInstance(() =>
@@ -235,11 +271,105 @@ describe("SessionCheckpoint.waitForWriter", () => {
       Effect.gen(function* () {
         const late = yield* timeoutThenSettle({ status: "failure", error: "boom" })
 
-        // This is the direction that keeps the failure cap reachable in the slow
-        // regime: if the late failure were lost (returning "timeout" forever, or
-        // "no-writer" because the settle watcher had already removed the map
-        // entry), a permanently broken slow writer would never be counted.
+        // The failing direction of the same contract: a late failure is reported
+        // as a failure. Losing it (returning "timeout" forever, or "no-writer"
+        // after the settle watcher removed the map entry) would leave a
+        // permanently broken slow writer indistinguishable from a slow healthy
+        // one to every caller, including prune's recovery gate.
         expect(late).toBe("failure")
+      }),
+    ),
+  )
+})
+
+// The real-service half of prune's recovery gate. prune decides whether to
+// re-fire the final threshold from `settlement.failure?.retryable`, and its own
+// tests stub the checkpoint service — so without these the plumbing that carries
+// the classification off AgentOutcome and onto the settlement is asserted
+// nowhere, and every prune-side gate test would be resting on an assumption.
+describe("SessionCheckpoint.waitForWriterSettlement", () => {
+  it.effect(
+    "carries the failure classification off the writer's outcome",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const settlement = yield* settlementAfterSettle({
+          status: "failure",
+          error: "context length exceeded",
+          failure: { kind: "overflow", retryable: false, name: "ContextOverflowError" },
+        })
+
+        expect(settlement.outcome).toBe("failure")
+        // Not just "some object": prune branches on `retryable`, so the exact
+        // field has to survive the AgentOutcome → WriterSettlement hop.
+        expect(settlement.failure).toEqual({
+          kind: "overflow",
+          retryable: false,
+          name: "ContextOverflowError",
+        })
+      }),
+    ),
+  )
+
+  it.effect(
+    "carries a retryable classification through unchanged",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const settlement = yield* settlementAfterSettle({
+          status: "failure",
+          error: "upstream 503",
+          failure: { kind: "transient", retryable: true, name: "APIError" },
+        })
+
+        expect(settlement.outcome).toBe("failure")
+        expect(settlement.failure?.retryable).toBe(true)
+      }),
+    ),
+  )
+
+  it.effect(
+    "reports a CANCELLED writer as an unclassified failure, never a retryable one",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const settlement = yield* settlementAfterSettle({ status: "cancelled" })
+
+        // "cancelled" has no failure arm to classify. It must not acquire one by
+        // default: a shutdown-cancelled writer arming prune's recovery gate would
+        // spend a writer on work the session is no longer doing.
+        expect(settlement.outcome).toBe("failure")
+        expect(settlement.failure == null).toBe(true)
+      }),
+    ),
+  )
+
+  it.effect(
+    "reports an unclassified failure when the outcome carries no classification",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const settlement = yield* settlementAfterSettle({ status: "failure", error: "boom" })
+
+        // Absent means UNKNOWN, not retryable — the distinction prune relies on
+        // to leave a failure it cannot classify alone.
+        expect(settlement.outcome).toBe("failure")
+        expect(settlement.failure == null).toBe(true)
+      }),
+    ),
+  )
+
+  it.effect(
+    "a bound expiry is 'timeout' with no classification attached",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const svc = yield* SessionCheckpoint.Service
+        const { info } = yield* seedAndStartWriter()
+
+        const waiting = yield* Effect.forkChild(svc.waitForWriterSettlement(info.id))
+        yield* TestClock.adjust("6 minutes")
+        const settlement = yield* Fiber.join(waiting)
+
+        // Still in flight. If this arrived as a "failure" — classified or not —
+        // prune's gate would treat a merely slow writer as a settled one.
+        expect(settlement.outcome).toBe("timeout")
+        expect(settlement.failure == null).toBe(true)
       }),
     ),
   )

@@ -7,7 +7,7 @@ import { Memory } from "@/memory"
 import { MemoryFtsTable } from "@/memory/fts.sql"
 import { TaskRegistry } from "@/task/registry"
 import { ActorRegistry } from "@/actor/registry"
-import type { AgentOutcome, ForkContext } from "@/actor/spawn"
+import type { AgentOutcome, FailureInfo, ForkContext } from "@/actor/spawn"
 import { spawnRef } from "@/actor/spawn-ref"
 import { prefixCaptureRef } from "./prefix-capture-ref"
 import { Database, and, eq, or } from "@/storage"
@@ -431,6 +431,20 @@ export interface Interface {
   readonly waitForWriter: (sessionID: SessionID) => Effect.Effect<WriterOutcome | "no-writer">
 
   /**
+   * The same bounded wait as `waitForWriter`, additionally surfacing the
+   * failure classification the writer's outcome already carries.
+   *
+   * `waitForWriter` is #1938's contract — three flat values, one of which
+   * ("timeout") means "still in flight". That contract is deliberately left
+   * alone; this is the shape a caller needs when the CLASS of a failure
+   * changes what it does next (prune's recovery gate). Both are one
+   * implementation: `waitForWriter` projects `.outcome` off this, so the two
+   * can never disagree about what a settled writer did.
+   */
+  readonly waitForWriterSettlement: (sessionID: SessionID) => Effect.Effect<WriterSettlement>
+
+
+  /**
    * Await all in-flight writers across sessions up to `timeoutMs`. Used by
    * the CLI shutdown path so headless `mimo run` invocations don't exit
    * while a forked checkpoint writer is still waiting on its LLM round-trip.
@@ -518,6 +532,22 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Se
 // unsuccessfully). See waitForWriter for why conflating the two silently
 // disables checkpointing for a session whose writers are merely slow.
 export type WriterOutcome = "success" | "failure" | "timeout"
+
+/**
+ * A settled (or bound-expired) writer, plus the classification its
+ * AgentOutcome already carried.
+ *
+ * `failure` is present only when `outcome === "failure"` AND the writer's
+ * error was classifiable at the construction site. It is absent for a
+ * cancelled writer and for a failure whose error never reached
+ * classifyAssistantError — so "absent" means "unknown class", never
+ * "retryable".
+ */
+export type WriterSettlement = {
+  outcome: WriterOutcome | "no-writer"
+  failure?: FailureInfo
+}
+
 
 interface WriterState {
   // Holds the AgentOutcome Deferred returned by Actor.spawn so callers can
@@ -1007,9 +1037,11 @@ export const layer: Layer.Layer<
       return "started" as const
     })
 
-    const waitForWriter = Effect.fn("SessionCheckpoint.waitForWriter")(function* (sessionID: SessionID) {
+    const waitForWriterSettlement = Effect.fn("SessionCheckpoint.waitForWriterSettlement")(function* (
+      sessionID: SessionID,
+    ) {
       const state = writers.get(sessionID)
-      if (!state) return "no-writer" as const
+      if (!state) return { outcome: "no-writer" as const }
 
       // v2 writers manage 3 file types and frequently take 60-180s, so the
       // wait is bounded at 5min rather than left unbounded. AgentOutcome →
@@ -1024,9 +1056,9 @@ export const layer: Layer.Layer<
       // last_checkpoint_message_id after we stop waiting. Reporting "failure"
       // here made a slow-but-working writer indistinguishable from a broken
       // one, which is why the two outcomes stay distinct. Callers must be able
-      // to tell "still in flight" from "settled unsuccessfully"; prune's only
-      // use of this wait is to make the expiry below observable, and it books
-      // no outcome either way (see prune.ts).
+      // to tell "still in flight" from "settled unsuccessfully": prune arms its
+      // recovery gate on a settled TRANSIENT failure only, and "timeout" must
+      // never reach that gate — the writer may still be about to succeed.
       const outcome = yield* Deferred.await(state.writing).pipe(
         Effect.timeout(300_000),
         Effect.catch(() => Effect.succeed("timeout" as const)),
@@ -1039,10 +1071,25 @@ export const layer: Layer.Layer<
           sessionID,
           boundMs: 300_000,
         })
-        return "timeout" as const
+        return { outcome: "timeout" as const }
       }
-      return outcome.status === "success" ? ("success" as const) : ("failure" as const)
+      if (outcome.status === "success") return { outcome: "success" as const }
+      // `failure` is optional and its source is nullable — truthiness, never
+      // `=== undefined` (AGENTS.md, "Reading a nullable column"). A cancelled
+      // outcome has no failure arm at all, so it lands here unclassified.
+      const failure = outcome.status === "failure" ? outcome.failure : undefined
+      return failure ? { outcome: "failure" as const, failure } : { outcome: "failure" as const }
     })
+
+    // #1938's contract, unchanged: three flat values, "timeout" distinct from
+    // "failure". Projected off waitForWriterSettlement rather than duplicated,
+    // so the classification-aware caller and this one can never disagree.
+    const waitForWriter: (sessionID: SessionID) => Effect.Effect<WriterOutcome | "no-writer"> = Effect.fn(
+      "SessionCheckpoint.waitForWriter",
+    )(function* (sessionID: SessionID) {
+      return (yield* waitForWriterSettlement(sessionID)).outcome
+    })
+
 
     const drainWriters = Effect.fn("SessionCheckpoint.drainWriters")(function* (input?: { timeoutMs?: number }) {
       const timeoutMs = input?.timeoutMs ?? 120_000
@@ -1604,6 +1651,7 @@ export const layer: Layer.Layer<
     return Service.of({
       tryStartCheckpointWriter,
       waitForWriter,
+      waitForWriterSettlement,
       drainWriters,
       hasCheckpoint,
       hasMemoryOrTasks,
