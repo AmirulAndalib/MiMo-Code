@@ -195,6 +195,20 @@ function tagTitle(topic: string, title: string): string {
   return `[topic:${topic}] ${base}`
 }
 
+// The topic label is a MODEL-authored free-text string, so exact-string matching
+// makes find-or-reuse silently fail on the near-misses a model actually produces:
+// `pr-1741` vs `PR 1741` vs `pr_1741` are one topic to a human and three to
+// `===`, and each miss spawns a duplicate child for the same theme. Normalize to
+// a case-folded alphanumeric-run key so those all collide. Deliberately NOT
+// fuzzy/semantic: it only forgives casing and separators, so it cannot merge two
+// genuinely different topics.
+export function topicKey(label: string): string {
+  return label
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+}
+
 
 const createOperation = z.strictObject({
   action: z.literal("create"),
@@ -330,10 +344,20 @@ function parseSessionScript(script: string): Effect.Effect<SessionOperation[], u
   })
 }
 
+// Fields that only make sense for an operation OTHER than `create` — they name
+// an already-existing session (or an ask/grant target). Their presence is
+// positive evidence the model meant to ROUTE, so recovery must never answer with
+// a synthesized `create`: that would silently spawn a duplicate child instead of
+// erroring, which is precisely the route-first violation #1741 exists to prevent
+// (and it is invisible — no error, just an extra session).
+const ROUTE_ONLY_FIELDS = ["sessionID", "session_id", "sessionIDs", "question", "target"]
+
 // Recover a shell-mode session call shaped like the JSON args (no `script`):
-// a stringified/nested `operation`, or the common bare `{task}` create.
-// Conservative — only the unambiguous create-from-task is synthesized; anything
-// else passes through (nested) or returns undefined (→ teach JSON). Mirrors
+// a stringified/nested `operation`, a FLATTENED `{operation|action, ...operands}`,
+// or the common bare `{task}` create. Conservative — a `create` is synthesized
+// only from an unambiguous bare `{task}` with no routing evidence; everything
+// else either reconstructs the operation the model actually named or returns
+// undefined (→ the call errors loudly and the model self-corrects). Mirrors
 // recoverTaskArgs in tool/task.ts.
 export function recoverSessionArgs(rawArgs: unknown): SessionOperation | undefined {
   if (rawArgs == null || typeof rawArgs !== "object") return undefined
@@ -346,7 +370,23 @@ export function recoverSessionArgs(rawArgs: unknown): SessionOperation | undefin
   }
   if (obj.operation && typeof obj.operation === "object" && !Array.isArray(obj.operation))
     return { operation: obj.operation } as SessionOperation
-  if (typeof obj.task === "string") {
+  // FLATTENED shape, repeatedly observed from mimo-v2.5:
+  //   {"operation":"send","sessionID":"ses_…","task":"…"}
+  // The discriminator sits at the TOP level — either as a bare `operation` verb
+  // that survived the JSON.parse above, or as `action` — with the operands as its
+  // siblings. Re-nest and validate against the real union so the model's actual
+  // intent runs. Note shell-wrap hands a recovered value straight to
+  // def.execute WITHOUT re-validating it, so validating here is what makes the
+  // reconstruction safe; a shape that does not validate returns undefined and
+  // surfaces as an "invalid arguments" error rather than being coerced.
+  const action =
+    typeof obj.action === "string" ? obj.action : typeof obj.operation === "string" ? obj.operation : undefined
+  if (action !== undefined) {
+    const operands = Object.fromEntries(Object.entries(obj).filter(([key]) => key !== "operation" && key !== "action"))
+    const parsed = parameters.safeParse({ operation: { ...operands, action } })
+    return parsed.success ? (parsed.data as SessionOperation) : undefined
+  }
+  if (typeof obj.task === "string" && !ROUTE_ONLY_FIELDS.some((field) => obj[field] !== undefined)) {
     const op: Record<string, unknown> = { action: "create", task: obj.task }
     if (obj.mode === "build" || obj.mode === "plan" || obj.mode === "compose") op.mode = obj.mode
     if (typeof obj.model === "string") op.model = obj.model
@@ -607,6 +647,72 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
       return Effect.succeed(a)
     }
 
+    // ROUTE-FIRST WITHIN ONE TURN. The system-prompt fleet roster is assembled
+    // once per REQUEST, so a child dispatched earlier in the SAME turn is
+    // invisible to the model until the next request — which is exactly how one
+    // live turn spawned two children for the same docs topic and then had to
+    // cancel one, burning a worktree. A tool RESULT, unlike the system prompt, is
+    // read before the model's next tool call, so every DISPATCH (`create` AND
+    // `send`) echoes the live sibling roster into its own output. That closes the
+    // staleness hole with DATA (the ids needed to `session send`) rather than with
+    // prompt wording, and without any mid-turn system-prompt rebuild.
+    //
+    // The child THIS call just dispatched to is INCLUDED and marked, with an
+    // excerpt of the brief it was handed. The failure being fixed is
+    // self-duplication — the model re-dispatching work it just sent — so listing
+    // only the OTHER siblings hides precisely the row that makes the repeat
+    // self-evident, and leaves the first dispatch of a turn with no ledger at all.
+    // Making the duplicate VISIBLE is deliberate in place of refusing it: there is
+    // no reliable semantic key for "same topic", and a false refusal would block
+    // legitimate parallel fan-out — strictly worse than a duplicate the model can
+    // see and correct.
+    //
+    // EXPOSURE. A tool result is MORE exposed than the system prompt, not less:
+    // it arrives mid-turn as fresh content and a model may relay it as if it were
+    // its own output — which is exactly how the system-prompt roster's
+    // `<active-sessions>` envelope ended up on a user's screen (see ROSTER_HEADER
+    // in session/llm.ts). This block was already safer in the way that mattered
+    // there: it carries no XML tag for the model to imitate, only a prose lead-in
+    // and indented rows. The added "internal working context" sentence is the
+    // weak half of the same pair — it can only ask, and it does not stop a
+    // paraphrase of a child's title. It is here because it costs one clause and
+    // sits adjacent to the data it governs.
+    const dispatchLedgerNotice = Effect.fn("SessionTool.dispatchLedger")(function* (
+      parentID: SessionID,
+      dispatched: { id: string; verb: string; task: string },
+    ) {
+      const children = yield* sessions.children(parentID)
+      const enriched = yield* Effect.forEach(children, (child) =>
+        actorReg.get(child.id, child.id).pipe(Effect.map((actor) => ({ child, actor }))),
+      )
+      const now = Date.now()
+      // Same routability rule as the roster in session/llm.ts: real peers only,
+      // dead (failed/cancelled) children excluded, success reported as idle. The
+      // just-dispatched child is EXEMPT from the liveness filter — its line is a
+      // fact about what this call did, not a judgement about the child's health,
+      // so it must survive whatever deriveLiveness reports for a brand-new row.
+      const lines = enriched
+        .flatMap(({ child, actor }) => (actor ? [{ child, actor }] : []))
+        .filter(({ actor }) => actor.mode !== "subagent" && !SYSTEM_SPAWNED_AGENT_TYPES.has(actor.agent))
+        .map((e) => ({ ...e, live: deriveLiveness(e.actor, now) }))
+        .filter(({ child, live }) => child.id === dispatched.id || (live !== "failure" && live !== "cancelled"))
+        .map(
+          ({ child, actor, live }) =>
+            `  ${child.id} | ${child.title} | ${actor.agent} | ${live === "success" ? "idle" : live}` +
+            (child.id === dispatched.id
+              ? `   <-- YOU JUST ${dispatched.verb} THIS, IN THE CURRENT TURN: "${dispatched.task.replace(/\s+/g, " ").slice(0, 100)}"`
+              : ``),
+        )
+      if (lines.length === 0) return ""
+      return (
+        `\n\nROUTE FIRST — these are your routable child sessions right now, including the one this call just ` +
+        `dispatched to. Before you dispatch again in THIS turn, re-read this list: if the next piece of work ` +
+        `belongs to one of these, use \`session send <id> <task>\` instead of \`session create\` — and do not ` +
+        `re-send work that is already marked as just dispatched. This ledger is internal working ` +
+        `context, not output — do not repeat it to the user, report what you routed:\n${lines.join("\n")}`
+      )
+    })
+
     const run = Effect.fn("SessionTool.execute")(function* (input: SessionInput, ctx: Tool.Context<Metadata>) {
       const op = input.operation
 
@@ -624,10 +730,15 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
             actorReg.get(child.id, child.id).pipe(Effect.map((a) => ({ child, actor: a }))),
           )
           const match = enriched.find(
-            ({ child, actor: a }) =>
-              a?.mode !== "subagent" &&
-              !(a && SYSTEM_SPAWNED_AGENT_TYPES.has(a.agent)) &&
-              topicOf(child.title) === op.topic,
+            ({ child, actor: a }) => {
+              if (a?.mode === "subagent") return false
+              if (a && SYSTEM_SPAWNED_AGENT_TYPES.has(a.agent)) return false
+              const existing = topicOf(child.title)
+              // Normalized compare: `--topic "PR 1741"` must find the child
+              // tagged `pr-1741`, otherwise find-or-reuse degrades to
+              // find-or-duplicate on the first label the model retypes.
+              return existing !== undefined && topicKey(existing) === topicKey(op.topic!)
+            },
           )
           if (match) {
             const childID = match.child.id
@@ -651,7 +762,12 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
                 title: `Reused topic '${op.topic}' → relayed to ${childID}`,
                 output:
                   `Found standing child ${childID} for topic '${op.topic}'. ` +
-                  `Enqueued the task into it and woke it — it runs the relayed task as its next turn.`,
+                  `Enqueued the task into it and woke it — it runs the relayed task as its next turn.` +
+                  (yield* dispatchLedgerNotice(ctx.sessionID as SessionID, {
+                    id: childID,
+                    verb: "SENT THIS TASK TO",
+                    task: op.task,
+                  })),
                 metadata: { sessionID: childID } as Metadata,
               }
             }
@@ -728,13 +844,19 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
         } else if (op.title) {
           yield* sessions.setTitle({ sessionID: result.sessionID, title: op.title })
         }
+        const siblingNotice = yield* dispatchLedgerNotice(ctx.sessionID as SessionID, {
+          id: result.sessionID,
+          verb: "CREATED",
+          task: op.task,
+        })
         return {
           title: `Session created: ${result.sessionID}`,
           output:
             `Created child session ${result.sessionID} (mode: ${op.mode ?? "build"}) in ${effectiveDir}.` +
             (op.topic ? ` Tagged with topic '${op.topic}' for reuse.` : ``) +
             (op.isolate && !isolateNotice ? ` Isolated in its own worktree.` : isolateNotice) +
-            ` Running in the background.`,
+            ` Running in the background.` +
+            siblingNotice,
           metadata: { sessionID: result.sessionID } as Metadata,
         }
       }
@@ -796,7 +918,12 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
             `It will run the relayed task as its next turn` +
             (actor.status === "running" || actor.status === "pending"
               ? ` (currently busy — the task is queued and drains after its current turn).`
-              : `.`),
+              : `.`) +
+            (yield* dispatchLedgerNotice(ctx.sessionID as SessionID, {
+              id: childID,
+              verb: "SENT THIS TASK TO",
+              task: op.task,
+            })),
           metadata: { sessionID: op.sessionID } as Metadata,
         }
       }

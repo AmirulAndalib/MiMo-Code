@@ -3,6 +3,7 @@ import { Database, inArray, eq, and, lte, sql } from "@/storage"
 import { Bus } from "@/bus"
 import type { SessionID, MessageID } from "@/session/schema"
 import { ActorRegistryTable } from "./actor.sql"
+import { SessionTable } from "@/session/session.sql"
 import type { Actor, ActorStatus, ActorOutcome, ContextMode, Lifecycle, SpawnMode, ToolWhitelist, Liveness } from "./schema"
 import { deriveLiveness } from "./schema"
 import * as Events from "./events"
@@ -87,6 +88,13 @@ export interface Interface {
   readonly listBySession: (sessionID: SessionID) => Effect.Effect<Actor[]>
   readonly listActive: () => Effect.Effect<Actor[]>
   readonly listByParent: (sessionID: SessionID, parentActorID: string) => Effect.Effect<Actor[]>
+  // Peer CHILD sessions of a parent session, joined to their session title.
+  // Peers key their registry row by their own child session id, so the parent
+  // link lives on the Session row (parent_id) — not on session_id here.
+  readonly listPeerChildren: (
+    parentSessionID: SessionID,
+    parentActorID: string,
+  ) => Effect.Effect<{ actor: Actor; title: string }[]>
   readonly renderForAgent: (sessionID: SessionID) => Effect.Effect<string>
   readonly agentTypeFor: (sessionID: SessionID, actorID: string) => Effect.Effect<string>
   readonly isSystemSpawned: (sessionID: SessionID, actorID: string) => Effect.Effect<boolean>
@@ -322,6 +330,36 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
       return rows.map(fromRow)
     })
 
+    // Peer children register with session_id === actor_id === their OWN child
+    // session id (Actor.spawnPeer), so listByParent — which filters on
+    // session_id === the parent's id — can never match them. The reliable
+    // parent link is the Session row's parent_id. Join on it so a caller with
+    // no Session.Service (e.g. the LLM layer building the orchestrator's
+    // fleet roster) can still enumerate its peer children, and
+    // carry the child's title along since that is the routing signal.
+    const listPeerChildren = Effect.fn("ActorRegistry.listPeerChildren")(function* (
+      parentSessionID: SessionID,
+      parentActorID: string,
+    ) {
+      const rows = yield* Effect.sync(() =>
+        Database.use((db) =>
+          db
+            .select({ actor: ActorRegistryTable, title: SessionTable.title })
+            .from(ActorRegistryTable)
+            .innerJoin(SessionTable, eq(SessionTable.id, ActorRegistryTable.session_id))
+            .where(
+              and(
+                eq(SessionTable.parent_id, parentSessionID),
+                eq(ActorRegistryTable.mode, "peer"),
+                eq(ActorRegistryTable.parent_actor_id, parentActorID),
+              ),
+            )
+            .all(),
+        ),
+      )
+      return rows.map((row) => ({ actor: fromRow(row.actor), title: row.title }))
+    })
+
     const renderForAgent = Effect.fn("ActorRegistry.renderForAgent")(function* (sessionID: SessionID) {
       const actors = yield* listBySession(sessionID)
       const active = actors.filter((actor) => actor.background && (actor.status === "pending" || actor.status === "running"))
@@ -476,6 +514,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
       listBySession,
       listActive,
       listByParent,
+      listPeerChildren,
       renderForAgent,
       agentTypeFor,
       isSystemSpawned,
