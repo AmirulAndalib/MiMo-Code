@@ -993,13 +993,11 @@ export const layer: Layer.Layer<
       // advance (see tryStartCheckpointWriter) awaits the SAME Deferred with no
       // bound — so a slow-but-successful writer still advances
       // last_checkpoint_message_id after we stop waiting. Reporting "failure"
-      // here made the prune retry watcher count a working writer as broken,
-      // and MAX_WRITER_FAILURES such waits then tripped "gave up after max
-      // consecutive failures", permanently disabling checkpointing for a
-      // session whose every writer had actually succeeded. Report "timeout" so
-      // callers can distinguish "still in flight" from "settled unsuccessfully";
-      // prune's `result !== "failure"` guard skips the counter, and prune keeps
-      // waiting so the writer's real outcome is still booked (see prune.ts).
+      // here made a slow-but-working writer indistinguishable from a broken
+      // one, which is why the two outcomes stay distinct. Callers must be able
+      // to tell "still in flight" from "settled unsuccessfully"; prune's only
+      // use of this wait is to make the expiry below observable, and it books
+      // no outcome either way (see prune.ts).
       const outcome = yield* Deferred.await(state.writing).pipe(
         Effect.timeout(300_000),
         Effect.catch(() => Effect.succeed("timeout" as const)),

@@ -225,9 +225,9 @@ describe("SessionPrune.prune", () => {
   )
 })
 
-describe("SessionPrune.fireCheckpoints writer-failure retry", () => {
-  // A programmable stub of SessionCheckpoint.Service drives the retry
-  // counter: tryStartCheckpointWriter always returns "started" (counted in
+describe("SessionPrune.fireCheckpoints writer failure is not retried in place", () => {
+  // A programmable stub of SessionCheckpoint.Service drives the writer
+  // outcomes: tryStartCheckpointWriter always returns "started" (counted in
   // stubEnqueueCount), waitForWriter returns pre-seeded outcomes in order.
   // Each test constructs a fresh harness so module state is per-test.
   function makeRetryHarness() {
@@ -288,41 +288,34 @@ describe("SessionPrune.fireCheckpoints writer-failure retry", () => {
     cache: { read: 0, write: 0 },
   })
 
-  test("three writer failures retry below cap, stop at cap", async () => {
-    const harness = makeRetryHarness()
-    const promptOps = {} as any
-
-    await runWithHarness(
-      harness,
-      Effect.gen(function* () {
-        const svc = yield* SessionPrune.Service
-        const ssn = yield* SessionNs.Service
-        const info = yield* ssn.create({})
-        const model = createModel({ context: 100_000, output: 32_000 })
-
-        // Pre-seed 3 failure outcomes — one per expected watcher.
-        harness.outcomes.push("failure", "failure", "failure")
-
-        // Fires 1-3: each fire enqueues (crossed was cleared by the prior
-        // watcher), watcher sees failure, counter increments 1→2→3.
-        // Fire 3's watcher hits cap (counter === 3) and does NOT clear crossed.
-        for (let i = 0; i < 3; i++) {
-          yield* svc.fireCheckpoints({ sessionID: info.id, model, tokens: makeTokens(), promptOps })
-          yield* Effect.sleep(100)
-        }
-        expect(harness.state.enqueueCount).toBe(3)
-
-        // Fire 4: crossed still holds the 50% threshold (not cleared at cap)
-        // so the loop skips without enqueuing.
-        yield* svc.fireCheckpoints({ sessionID: info.id, model, tokens: makeTokens(), promptOps })
-        yield* Effect.sleep(100)
-        expect(harness.state.enqueueCount).toBe(3)
-      }),
-      { checkpoint: { thresholds: ["50%"] } },
-    )
+  const makeTokensAt = (n: number) => ({
+    input: n,
+    output: 0,
+    reasoning: 0,
+    cache: { read: 0, write: 0 },
   })
 
-  test("success outcome resets failure counter", async () => {
+  // These cases replace the six that pinned the deleted accounting
+  // (writerFailures / MAX_WRITER_FAILURES / MAX_WRITER_WAIT_EXTENSIONS). What
+  // they used to assert, and why it is no longer the requirement:
+  //
+  //   - "three writer failures retry below cap, stop at cap" and "success
+  //     outcome resets failure counter" asserted that a failure BELOW the cap
+  //     re-armed the same threshold (enqueue 1->2->3) and that a success
+  //     cleared the counter. Both encoded in-place retry as the requirement.
+  //   - "a timed-out wait never ticks the counter..." and "a writer that fails
+  //     past the wait bound is still counted, so the cap stays reachable"
+  //     asserted the watcher kept re-entering the bounded wait so a late
+  //     outcome still reached the counter.
+  //   - the pair bracketing MAX_WRITER_WAIT_EXTENSIONS pinned the 13-call
+  //     boundary of that re-entry loop exactly.
+  //
+  // None of it is required now, because a failed write is self-healing:
+  // ensureCheckpointTemplate only writes when the file is ABSENT and the
+  // watermark advances only on success, so a failure leaves file and watermark
+  // consistent at the last good checkpoint. The requirement is the inverse --
+  // a failure must NOT retry in place, and the next crossing must still fire.
+  test("a failed writer does not re-arm its own threshold — no in-place retry", async () => {
     const harness = makeRetryHarness()
     const promptOps = {} as any
 
@@ -334,188 +327,88 @@ describe("SessionPrune.fireCheckpoints writer-failure retry", () => {
         const info = yield* ssn.create({})
         const model = createModel({ context: 100_000, output: 32_000 })
 
-        // Phase 1: two failures, then success. Success does NOT clear
-        // crossed (the checkpoint was written), so the next fire on the
-        // same threshold is a no-op. But it DOES reset the counter.
-        harness.outcomes.push("failure", "failure", "success")
-        for (let i = 0; i < 3; i++) {
-          yield* svc.fireCheckpoints({ sessionID: info.id, model, tokens: makeTokens(), promptOps })
-          yield* Effect.sleep(100)
-        }
-        expect(harness.state.enqueueCount).toBe(3)
+        harness.outcomes.push("failure")
 
-        // Manually reset so the session "re-crosses" the threshold. This
-        // simulates the operator-visible case where a new checkpoint boundary
-        // is reached. The failure counter remains 0 (was reset by Phase 1's
-        // final success).
-        yield* svc.resetThresholds(info.id)
-
-        // Phase 2: three more failures. Because the counter was reset, all
-        // three fires land before the cap. Enqueue count goes 3→6.
-        harness.outcomes.push("failure", "failure", "failure")
-        for (let i = 0; i < 3; i++) {
-          yield* svc.fireCheckpoints({ sessionID: info.id, model, tokens: makeTokens(), promptOps })
-          yield* Effect.sleep(100)
-        }
-        expect(harness.state.enqueueCount).toBe(6)
-
-        // Seventh fire: counter === 3 again, crossed stays → no enqueue.
-        yield* svc.fireCheckpoints({ sessionID: info.id, model, tokens: makeTokens(), promptOps })
-        yield* Effect.sleep(100)
-        expect(harness.state.enqueueCount).toBe(6)
-      }),
-      { checkpoint: { thresholds: ["50%"] } },
-    )
-  })
-
-  // The PR's whole thesis lives here, not in waitForWriter's return value: a
-  // bounded wait that expires must not be booked as a writer failure, and must
-  // not lose the writer's real outcome either. The stub's outcome queue is
-  // shifted once per waitForWriter call, so a "timeout" entry models one
-  // expired 5-minute bound followed by whatever comes next.
-  test("a timed-out wait never ticks the counter, and the writer's real success clears it", async () => {
-    const harness = makeRetryHarness()
-    const promptOps = {} as any
-
-    await runWithHarness(
-      harness,
-      Effect.gen(function* () {
-        const svc = yield* SessionPrune.Service
-        const ssn = yield* SessionNs.Service
-        const info = yield* ssn.create({})
-        const model = createModel({ context: 100_000, output: 32_000 })
-
-        // Fires 1-2 fail fast → counter 1, 2 (each clears crossed, so the next
-        // fire re-enqueues). Fire 3's writer blows through two bound expiries
-        // and THEN succeeds: the counter must be cleared, not frozen at 2.
-        harness.outcomes.push("failure", "failure", "timeout", "timeout", "success")
-        for (let i = 0; i < 3; i++) {
-          yield* svc.fireCheckpoints({ sessionID: info.id, model, tokens: makeTokens(), promptOps })
-          yield* Effect.sleep(100)
-        }
-        expect(harness.state.enqueueCount).toBe(3)
-
-        // Re-cross the threshold and fail fast twice more. Because fire 3's
-        // late success reset the counter, these land at 1 and 2 — below the cap
-        // — so each clears crossed and the following fire enqueues again.
-        // If a post-timeout success did NOT clear the counter (the gap this
-        // test pins), the first of these would land at 3, trip "gave up", keep
-        // crossed set, and the final fire would not enqueue → 5, not 6.
-        yield* svc.resetThresholds(info.id)
-        harness.outcomes.push("failure", "failure", "failure")
-        for (let i = 0; i < 3; i++) {
-          yield* svc.fireCheckpoints({ sessionID: info.id, model, tokens: makeTokens(), promptOps })
-          yield* Effect.sleep(100)
-        }
-        expect(harness.state.enqueueCount).toBe(6)
-      }),
-      { checkpoint: { thresholds: ["50%"] } },
-    )
-  })
-
-  test("a writer that fails past the wait bound is still counted, so the cap stays reachable", async () => {
-    const harness = makeRetryHarness()
-    const promptOps = {} as any
-
-    await runWithHarness(
-      harness,
-      Effect.gen(function* () {
-        const svc = yield* SessionPrune.Service
-        const ssn = yield* SessionNs.Service
-        const info = yield* ssn.create({})
-        const model = createModel({ context: 100_000, output: 32_000 })
-
-        // Three writers, each slow enough to blow the bound and then genuinely
-        // failing — the realistic shape for a writer doing ~13 sequential LLM
-        // round-trips. If the watcher gave up at the bound instead of waiting,
-        // no failure would ever be booked: crossed would never be cleared, so
-        // fire 2 would not even enqueue and this would read 1.
-        harness.outcomes.push("timeout", "failure", "timeout", "failure", "timeout", "failure")
-        for (let i = 0; i < 3; i++) {
-          yield* svc.fireCheckpoints({ sessionID: info.id, model, tokens: makeTokens(), promptOps })
-          yield* Effect.sleep(100)
-        }
-        expect(harness.state.enqueueCount).toBe(3)
-
-        // Fire 3's watcher hit the cap, so crossed was left set → no enqueue.
-        // A permanently-broken-but-slow writer now gives up like a fast one.
-        yield* svc.fireCheckpoints({ sessionID: info.id, model, tokens: makeTokens(), promptOps })
-        yield* Effect.sleep(100)
-        expect(harness.state.enqueueCount).toBe(3)
-      }),
-      { checkpoint: { thresholds: ["50%"] } },
-    )
-  })
-
-  // MAX_WRITER_WAIT_EXTENSIONS (prune.ts:32) caps the watcher fiber at ~1h:
-  // one initial waitForWriter plus at most 12 re-entries of the 5-minute bound,
-  // so 13 calls total. These two cases sit on either side of that boundary, and
-  // the leftover length of the stub's queue counts the calls exactly — so
-  // moving the constant by one breaks one of them.
-  test("12 extensions is still inside the ~1h cap — the writer's real outcome is booked", async () => {
-    const harness = makeRetryHarness()
-    const promptOps = {} as any
-
-    await runWithHarness(
-      harness,
-      Effect.gen(function* () {
-        const svc = yield* SessionPrune.Service
-        const ssn = yield* SessionNs.Service
-        const info = yield* ssn.create({})
-        const model = createModel({ context: 100_000, output: 32_000 })
-
-        // 12 expired bounds (~60min) and then a real failure on the 13th call.
-        harness.outcomes.push(...Array(12).fill("timeout" as const), "failure")
-        yield* svc.fireCheckpoints({ sessionID: info.id, model, tokens: makeTokens(), promptOps })
+        // Fire 1 crosses 30K and enqueues; its writer fails.
+        yield* svc.fireCheckpoints({ sessionID: info.id, model, tokens: makeTokensAt(35_000), promptOps })
         yield* Effect.sleep(100)
         expect(harness.state.enqueueCount).toBe(1)
 
-        // Every seeded outcome was consumed ⇒ the 13th call happened, i.e. the
-        // 12th extension was still permitted.
-        expect(harness.outcomes.length).toBe(0)
+        // Fires 2-4 at the same token level must NOT re-enqueue: the threshold
+        // stays in `crossed`. The deleted watcher did `crossed.delete()` on a
+        // sub-cap failure, so under the old code these three fires would have
+        // read 2, then 3, then stopped at the 3-failure cap.
+        for (let i = 0; i < 3; i++) {
+          yield* svc.fireCheckpoints({ sessionID: info.id, model, tokens: makeTokensAt(35_000), promptOps })
+          yield* Effect.sleep(100)
+        }
+        expect(harness.state.enqueueCount).toBe(1)
+      }),
+      { checkpoint: { thresholds: ["30K", "45K"] } },
+    )
+  })
 
-        // The failure was booked (counter 1, below the 3-failure cap), so crossed
-        // was cleared and this fire enqueues again. If the watcher had bailed at
-        // extension 12 instead, nothing would have been booked and this would
-        // still read 1.
-        yield* svc.fireCheckpoints({ sessionID: info.id, model, tokens: makeTokens(), promptOps })
+  test("a failed writer at the max threshold leaves maxThresholdCrossed set", async () => {
+    const harness = makeRetryHarness()
+    const promptOps = {} as any
+
+    await runWithHarness(
+      harness,
+      Effect.gen(function* () {
+        const svc = yield* SessionPrune.Service
+        const ssn = yield* SessionNs.Service
+        const info = yield* ssn.create({})
+        const model = createModel({ context: 100_000, output: 32_000 })
+
+        harness.outcomes.push("failure", "failure")
+
+        // Cross BOTH thresholds in one fire so the max threshold is crossed and
+        // the observed outcome is a failure.
+        yield* svc.fireCheckpoints({ sessionID: info.id, model, tokens: makeTokensAt(50_000), promptOps })
+        yield* Effect.sleep(150)
+
+        // The old watcher paired `crossed.delete` with `maxCrossed.delete` on a
+        // sub-cap failure, which withdrew the already-raised discard+rebuild
+        // signal that prompt.ts consumes. Overflow readiness must not depend on
+        // whether the checkpoint writer happened to succeed, so the signal
+        // stands: under the old code this read false.
+        expect(yield* svc.maxThresholdCrossed(info.id)).toBe(true)
+      }),
+      { checkpoint: { thresholds: ["30K", "45K"] } },
+    )
+  })
+
+  test("the next threshold crossing still fires after a failure", async () => {
+    const harness = makeRetryHarness()
+    const promptOps = {} as any
+
+    await runWithHarness(
+      harness,
+      Effect.gen(function* () {
+        const svc = yield* SessionPrune.Service
+        const ssn = yield* SessionNs.Service
+        const info = yield* ssn.create({})
+        const model = createModel({ context: 100_000, output: 32_000 })
+
+        harness.outcomes.push("failure", "failure")
+
+        // 30K crosses and fails.
+        yield* svc.fireCheckpoints({ sessionID: info.id, model, tokens: makeTokensAt(35_000), promptOps })
+        yield* Effect.sleep(100)
+        expect(harness.state.enqueueCount).toBe(1)
+
+        // Tokens grow past 45K: the failure must not have suppressed the
+        // session, so this crossing fires. This is the retry the design relies
+        // on instead of an in-place one, and it carries fresher context than a
+        // re-fire of 30K would have. The old code reached a SECOND enqueue too
+        // -- the counter never gated a NEW threshold -- but it reached a THIRD,
+        // because the failure had also re-armed 30K. So the exact count, not
+        // just "it still fires", is what pins the absence of in-place retry.
+        yield* svc.fireCheckpoints({ sessionID: info.id, model, tokens: makeTokensAt(50_000), promptOps })
         yield* Effect.sleep(100)
         expect(harness.state.enqueueCount).toBe(2)
       }),
-      { checkpoint: { thresholds: ["50%"] } },
-    )
-  })
-
-  test("the 13th extension is past the cap — the watcher stops waiting and books nothing", async () => {
-    const harness = makeRetryHarness()
-    const promptOps = {} as any
-
-    await runWithHarness(
-      harness,
-      Effect.gen(function* () {
-        const svc = yield* SessionPrune.Service
-        const ssn = yield* SessionNs.Service
-        const info = yield* ssn.create({})
-        const model = createModel({ context: 100_000, output: 32_000 })
-
-        // One expired bound more than the cap allows, then a failure that the
-        // watcher must never reach.
-        harness.outcomes.push(...Array(13).fill("timeout" as const), "failure")
-        yield* svc.fireCheckpoints({ sessionID: info.id, model, tokens: makeTokens(), promptOps })
-        yield* Effect.sleep(100)
-        expect(harness.state.enqueueCount).toBe(1)
-
-        // The trailing "failure" is still queued ⇒ waitForWriter was called
-        // exactly 13 times and the watcher then gave up, so a permanently stuck
-        // writer cannot pin the fiber for the life of the process.
-        expect(harness.outcomes.length).toBe(1)
-
-        // Nothing was booked, so crossed stayed set → no further enqueue.
-        yield* svc.fireCheckpoints({ sessionID: info.id, model, tokens: makeTokens(), promptOps })
-        yield* Effect.sleep(100)
-        expect(harness.state.enqueueCount).toBe(1)
-      }),
-      { checkpoint: { thresholds: ["50%"] } },
+      { checkpoint: { thresholds: ["30K", "45K"] } },
     )
   })
 })

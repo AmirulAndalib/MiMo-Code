@@ -196,10 +196,10 @@ describe("SessionCheckpoint.waitForWriter", () => {
         yield* TestClock.adjust("2 minutes")
         const result = yield* Fiber.join(fiber)
 
-        // Regression: this used to be "failure", which made the prune retry
-        // watcher tick writerFailures and (after MAX_WRITER_FAILURES) trip
-        // "gave up after max consecutive failures" — permanently disabling
-        // checkpointing for a session whose writers were only slow.
+        // Regression: this used to be "failure", which made a slow-but-working
+        // writer indistinguishable from a broken one. The accounting that used
+        // to act on that confusion is gone, but the distinction itself is #1938's
+        // contract and is what keeps the expiry log below honest.
         expect(result).toBe("timeout")
 
         // The expiry must not have cancelled or retired the writer: it is still
@@ -222,8 +222,8 @@ describe("SessionCheckpoint.waitForWriter", () => {
         const late = yield* timeoutThenSettle({ status: "success" } as AgentOutcome)
 
         // Not "timeout" and not "no-writer": the late success survives the
-        // expiry, which is what lets prune clear writerFailures instead of
-        // leaving a healthy-but-slow session stuck near the failure cap.
+        // expiry, so the outcome a caller observes after re-entering the wait is
+        // the writer's real one rather than the mere fact that it was slow.
         expect(late).toBe("success")
       }),
     ),

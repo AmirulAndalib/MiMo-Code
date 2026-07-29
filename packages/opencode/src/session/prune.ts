@@ -24,12 +24,6 @@ const DEFAULT_CACHE_TTL = 300_000
 // Default safety buffer subtracted from windowSize to derive maxAllowed for
 // checkpoint thresholds. Users can override via cfg.checkpoint.reserved.
 const CHECKPOINT_RESERVED = 13_000
-const MAX_WRITER_FAILURES = 3
-// How many times the retry watcher re-enters the bounded waitForWriter (5min
-// each) before it stops waiting for a writer that has not settled. Caps the
-// watcher fiber's lifetime at ~1h so a permanently stuck writer cannot pin it
-// for the life of the process.
-const MAX_WRITER_WAIT_EXTENSIONS = 12
 
 /**
  * Default checkpoint thresholds by context window size.
@@ -175,11 +169,6 @@ export const layer: Layer.Layer<
     // Per-session signal: the max threshold was just crossed; prompt.ts should
     // trigger discard+rebuild on the next loop iteration.
     const maxCrossed = new Set<SessionID>()
-    // Per-session consecutive writer-failure count. Resets on success.
-    // After the configured `max_writer_failures` (default MAX_WRITER_FAILURES)
-    // consecutive failures, the session stops retrying checkpoint writes
-    // until the process restarts.
-    const writerFailures = new Map<SessionID, number>()
 
     const stripNonEssential = Effect.fn("SessionPrune.stripNonEssential")(function* (input: {
       sessionID: SessionID
@@ -277,8 +266,6 @@ export const layer: Layer.Layer<
       const thresholds = resolveThresholds(raw, windowSize, cfg.checkpoint?.reserved)
       if (thresholds.length === 0) return
 
-      const maxFailures = cfg.checkpoint?.max_writer_failures ?? MAX_WRITER_FAILURES
-
       const currentTokens =
         input.tokens.total ||
         input.tokens.input + input.tokens.output + input.tokens.cache.read + input.tokens.cache.write
@@ -299,79 +286,31 @@ export const layer: Layer.Layer<
           .pipe(Effect.catch(() => Effect.succeed<"started" | "queued" | "skipped">("skipped")))
 
         if (outcome === "started") {
-          // Fork a watcher that settles after the detached writer fiber
-          // finishes. On success, clear the failure counter. On failure,
-          // increment the counter; if below MAX_WRITER_FAILURES, clear the
-          // session's crossed thresholds so the next iteration retries. The
-          // wait is extended across bound expiries so what gets booked is the
-          // writer's REAL outcome, never the mere fact that it was slow.
+          // Observation only — no accounting, no in-place retry. A failed
+          // write is self-healing, so there is nothing to book:
+          //   - ensureCheckpointTemplate (checkpoint.ts:117-121) writes the
+          //     template ONLY when the file is absent, so a failed writer
+          //     cannot clobber the previous checkpoint.
+          //   - last_checkpoint_message_id advances ONLY on success
+          //     (checkpoint.ts:918-934).
+          // A failure therefore leaves file and watermark mutually consistent,
+          // both pointing at the last good checkpoint, and a rebuild uses that
+          // automatically. The cost of a failure is a STALER checkpoint, never
+          // a missing one, and the next threshold crossing is a natural retry
+          // with fresher context than an in-place one. Repeated failures mean
+          // the provider is broken — in which case the foreground turns are
+          // failing too and the user already knows. The writer's LLM calls run
+          // through the same retry ladder as the foreground (retry.ts), so any
+          // failure reaching here is already post-retry; counting it again adds
+          // nothing.
           //
-          // Known narrow race: between tryStartCheckpointWriter returning "started" and
-          // the watcher's forkDetach scheduling, a very-fast writer fiber can
-          // complete and delete itself from the writers map. waitForWriter
-          // then returns "no-writer" and the watcher exits without touching
-          // the counter. Impact is low — real writers run an LLM round-trip
-          // (seconds) vs. microseconds to schedule the fork, so observable
-          // failures tick the counter in practice. Proper fix: have
-          // tryStartCheckpointWriter return the Deferred handle so the watcher doesn't
-          // re-read the writers map.
-          yield* Effect.gen(function* () {
-            // waitForWriter is bounded (5min). Expiry means "still in flight",
-            // not "failed" — but returning here would book the writer's real
-            // outcome NOWHERE: this fiber is the only thing holding the
-            // per-fire accounting, and writerFailures is private to this
-            // layer, so the checkpoint settle watcher cannot reach it. A
-            // writer that genuinely fails at, say, 400s would then never tick
-            // the counter (making the cap unreachable for exactly the slow
-            // regime that motivated the "timeout" outcome), and a writer that
-            // succeeds at 400s would never CLEAR a counter left at 1-2 by
-            // earlier fast failures. So keep waiting across bound expiries and
-            // account for the settled result.
-            //
-            // Each extension re-enters waitForWriter, which re-reads the
-            // writers map. Two microsecond-wide windows are accepted rather
-            // than papered over: (1) the writer settles between our expiry and
-            // the re-entry, so the entry is gone and we get "no-writer" — no
-            // outcome to attribute, same as the pre-existing fast-writer race
-            // noted above; (2) a queued writer was drained into a fresh entry in
-            // that window, so we book ITS outcome instead — still a real
-            // outcome for this session. Extensions are capped so a permanently
-            // stuck writer cannot hold this fiber forever.
-            let result = yield* checkpoint.waitForWriter(input.sessionID)
-            for (let extension = 1; result === "timeout"; extension++) {
-              if (extension > MAX_WRITER_WAIT_EXTENSIONS) {
-                log.warn("checkpoint writer still in flight after max wait extensions — stopped waiting", {
-                  sessionID: input.sessionID,
-                  extensions: MAX_WRITER_WAIT_EXTENSIONS,
-                })
-                return
-              }
-              result = yield* checkpoint.waitForWriter(input.sessionID)
-            }
-            if (result === "success") {
-              writerFailures.delete(input.sessionID)
-              return
-            }
-            // Only "no-writer" reaches here besides "failure": the writer
-            // settled before we could observe it, so there is nothing to book.
-            if (result !== "failure") return
-            const next = (writerFailures.get(input.sessionID) ?? 0) + 1
-            writerFailures.set(input.sessionID, next)
-            if (next < maxFailures) {
-              crossed.delete(input.sessionID)
-              maxCrossed.delete(input.sessionID)
-              log.info("checkpoint writer failed — cleared thresholds for retry", {
-                sessionID: input.sessionID,
-                attempt: next,
-                maxAttempts: maxFailures,
-              })
-            } else {
-              log.warn("checkpoint writer gave up after max consecutive failures", {
-                sessionID: input.sessionID,
-                maxAttempts: maxFailures,
-              })
-            }
-          }).pipe(Effect.forkDetach)
+          // The wait is kept for ONE reason: the bound-expiry log inside
+          // waitForWriter (checkpoint.ts:1007-1015). A writer stuck past the
+          // 5min bound otherwise leaves no trace at all until it settles, and a
+          // log line exactly like it is what diagnosed #1938. Terminal outcomes
+          // are already logged by the settle watcher (checkpoint.ts:920-934),
+          // so the returned outcome is deliberately discarded here.
+          yield* checkpoint.waitForWriter(input.sessionID).pipe(Effect.forkDetach)
         }
 
         already.add(t)
