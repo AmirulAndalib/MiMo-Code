@@ -927,10 +927,39 @@ export const layer: Layer.Layer<
             ),
           )
         } else {
-          log.warn("checkpoint writer did not succeed — leaving watermark unchanged so the delta is re-covered", {
-            sessionID: input.sessionID,
-            status: outcome.status,
-          })
+          // Classify instead of count. This is the replacement for the failure
+          // accounting deleted earlier in this branch: the same "is this writer
+          // broken?" question, answered by reading the outcome the writer already
+          // carries instead of accumulating a tally across thresholds.
+          //
+          // A TRANSIENT failure needs nothing here — the writer's LLM calls run
+          // through SessionRetry's ladder (session/retry.ts), so it is already
+          // post-retry, and the next threshold crossing re-covers the delta with
+          // fresher context. A DETERMINISTIC one (overflow / auth / bad request)
+          // will recur identically at every future threshold, so it is reported
+          // as the distinct thing it is rather than as one more copy of an
+          // undifferentiated line.
+          //
+          // Deliberately STATELESS: no per-session memory of previous failures.
+          // Such memory is a trend detector, and the trend is the deferred
+          // user-facing-warning change's own state — accumulating it here under a
+          // new name is precisely what this branch removed.
+          // `failure` is optional and its source is nullable — truthiness, never
+          // `=== undefined` (AGENTS.md, "Reading a nullable column").
+          const failure = outcome.status === "failure" ? outcome.failure : undefined
+          const classified = failure ? { kind: failure.kind, cause: failure.name } : {}
+          if (failure && !failure.retryable) {
+            log.warn(
+              "checkpoint writer failed deterministically — this will recur at every threshold until the cause is fixed; leaving watermark unchanged so the delta is re-covered",
+              { sessionID: input.sessionID, status: outcome.status, ...classified },
+            )
+          } else {
+            log.warn("checkpoint writer did not succeed — leaving watermark unchanged so the delta is re-covered", {
+              sessionID: input.sessionID,
+              status: outcome.status,
+              ...classified,
+            })
+          }
         }
 
         // F40: capture pending before deleting the slot so a queued writer
