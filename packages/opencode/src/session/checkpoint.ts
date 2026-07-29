@@ -1436,7 +1436,36 @@ export const layer: Layer.Layer<
             .get(),
         ),
       )
-      return row?.last_checkpoint_message_id as MessageID | undefined
+      // Two independent absences meet in this one expression, and only one of
+      // them is `undefined`:
+      //
+      //   row is undefined      -> no such session row. Drizzle normalises the
+      //                            driver's null to undefined here (measured:
+      //                            bun:sqlite's .get() returns null, Drizzle
+      //                            returns undefined), so this half is honest.
+      //   column is null        -> the session exists but no writer has set the
+      //                            watermark yet. SQL NULL, faithfully mapped to
+      //                            JS null, because the column is nullable
+      //                            (session.sql.ts: text().$type<MessageID>()
+      //                            with no .notNull()).
+      //
+      // So `row?.last_checkpoint_message_id` is `MessageID | null | undefined`.
+      // Callers only ever ask "is there a boundary to rebuild from", for which
+      // the last two are the same answer, so flattening to `undefined` is right
+      // — it also matches Drizzle's own row-level convention.
+      //
+      // The flattening is written as an ANNOTATION rather than an `as` cast on
+      // purpose. A cast would let the union be narrowed by assertion, which is
+      // how this went wrong before: the previous version claimed
+      // `as MessageID | undefined` while returning `null`, and a caller that
+      // then wrote `boundary !== undefined` got a condition that is always true
+      // — a guard that typechecks, reads correctly, and does nothing. Every
+      // other caller happened to test truthiness (`!boundary` at prompt.ts:413,
+      // `watermarkBefore ?` at :1131, `boundaryID ?` in nudgedSinceBoundary) and
+      // so never noticed. With an annotation, dropping the `?? undefined` is a
+      // compile error instead of a silent lie.
+      const boundary: MessageID | undefined = row?.last_checkpoint_message_id ?? undefined
+      return boundary
     })
 
     const isWriterRunning = Effect.fn("SessionCheckpoint.isWriterRunning")(function* (sessionID: SessionID) {

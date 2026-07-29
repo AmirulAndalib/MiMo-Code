@@ -18,6 +18,7 @@ import { useKeybind } from "@tui/context/keybind"
 import { usePromptHistory, type PromptInfo } from "./history"
 import { assign, expandPlaceholders } from "./part"
 import { usePromptStash } from "./stash"
+import { clampStatusMessage } from "./footer"
 import { DialogStash } from "../dialog-stash"
 import { type AutocompleteRef, Autocomplete } from "./autocomplete"
 import { useCommandDialog } from "../dialog-command"
@@ -1897,11 +1898,13 @@ export function Prompt(props: PromptProps) {
                 {(() => {
                   const busyMessage = createMemo(() => {
                     const s = status()
-                    return s.type === "busy" ? s.message : undefined
+                    return s.type === "busy" ? clampStatusMessage(s.message) : undefined
                   })
                   return (
                     <Show when={busyMessage()}>
-                      <text fg={theme.textMuted}>{busyMessage()}</text>
+                      <text fg={theme.textMuted} wrapMode="none" flexShrink={1}>
+                        {busyMessage()}
+                      </text>
                     </Show>
                   )
                 })()}
@@ -1992,7 +1995,10 @@ export function Prompt(props: PromptProps) {
                   <box gap={2} flexDirection="row">
                     <Show when={usage()}>
                       {(item) => (
-                        <text fg={theme.textMuted} wrapMode="none">
+                        // flexShrink=0: the context counter is the one number the
+                        // footer must never clip (`52.4K/96` instead of
+                        // `52.4K/960K`); the hints beside it can give way first.
+                        <text fg={theme.textMuted} wrapMode="none" flexShrink={0}>
                           {[item().context, item().cost].filter(Boolean).join(" · ")}
                         </text>
                       )}

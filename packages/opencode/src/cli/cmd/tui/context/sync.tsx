@@ -155,6 +155,21 @@ export function bucketMessages<M extends { agentID?: string | null }>(
   return out
 }
 
+/**
+ * A `session.status` event is authoritative for the WHOLE status object.
+ *
+ * Solid's store setter merges plain objects into the existing node
+ * (`mergeStoreNode` only writes `Object.keys(next)`), so writing a bare
+ * `{ type: "busy" }` — which is what the runner emits at the start of every turn
+ * (session/run-state.ts:74) — inherits the `message` of whatever status was
+ * written before it. That latched `/rebuild` outcome text
+ * (session/prompt.ts:4173) into the following turn's spinner. `reconcile()`
+ * drops the fields the new status omits, so each status stands alone.
+ */
+export function nextSessionStatus(status: SessionStatus) {
+  return reconcile(status)
+}
+
 export const { use: useSync, provider: SyncProvider } = createSimpleContext({
   name: "Sync",
   init: () => {
@@ -453,7 +468,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         }
 
         case "session.status": {
-          setStore("session_status", event.properties.sessionID, event.properties.status)
+          setStore("session_status", event.properties.sessionID, nextSessionStatus(event.properties.status))
           break
         }
 
