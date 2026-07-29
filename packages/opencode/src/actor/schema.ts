@@ -111,6 +111,34 @@ export const DEFAULT_LIVENESS_STALL_MS = 90_000
 // bucket.
 export const DEFAULT_LIVENESS_ABANDON_MS = 10 * 60_000
 
+// Write-coalescing interval for the `last_activity_time` heartbeat, applied as a
+// staleness guard in the PartUpdated projector's WHERE (session/projectors.ts):
+// the row is touched only when it records no activity yet, or when the activity
+// it records is already older than this. At most one UPDATE per actor per
+// interval. The column's meaning is unchanged — only its resolution is capped.
+//
+// Needed because the heartbeat rides the part-write path, which is unthrottled.
+// `ctx.metadata` in the bash tool (tool/bash.ts, per decoded stdout chunk)
+// reaches Session.updatePart via SessionProcessor.updateToolCall
+// (session/processor.ts) with no interval check anywhere on the way, so a chatty
+// command drove a measured 539-867 registry UPDATEs/sec — each carrying a
+// correlated subquery over `message` — strictly 1:1 with part upserts.
+//
+// 5 seconds, derived from the two consumers of the column, both of which are
+// three orders of magnitude coarser than that write rate:
+//   - DEFAULT_LIVENESS_STALL_MS (90s, above): the progressing/stalled display.
+//     An actively-writing actor's recorded activity now lags reality by at most
+//     this interval, so worst-case apparent age is 5s against a 90s threshold —
+//     18x of margin, and the flip is unreachable by coalescing alone.
+//   - DEFAULT_LIVENESS_ABANDON_MS (600s, above): the routable/idle bound. 120x
+//     of margin.
+// Also sits above the measured p50 inter-activity gap (994ms) so it actually
+// coalesces the dense traffic it targets, while staying below p90 (6.7s) so an
+// ordinarily-paced child still records very nearly every activity it has.
+// Updating more often than this buys no consumer anything: nothing reads the
+// column at a finer resolution than tens of seconds.
+export const ACTIVITY_COALESCE_MS = 5_000
+
 export function deriveLiveness(
   actor: Pick<Actor, "status" | "lastOutcome" | "lastActivityTime" | "time">,
   now: number = Date.now(),

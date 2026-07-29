@@ -4,6 +4,7 @@ import * as Session from "./session"
 import { MessageV2 } from "./message-v2"
 import { SessionTable, MessageTable, PartTable } from "./session.sql"
 import { ActorRegistryTable } from "@/actor/actor.sql"
+import { ACTIVITY_COALESCE_MS } from "@/actor/schema"
 import { Log } from "../util"
 
 const log = Log.create({ service: "session.projector" })
@@ -138,6 +139,20 @@ export default [
       // `message`), so the owning actor is resolved through the message's primary
       // key; together with session_id that hits actor_registry's PK directly. A
       // 0-row no-op when the session has no registry row, exactly like updateTurn.
+      //
+      // Coalesced to at most one write per actor per ACTIVITY_COALESCE_MS. The
+      // part-write path this hangs off is unthrottled — the bash tool's
+      // ctx.metadata fires per decoded stdout chunk — which measured 539-867 of
+      // these UPDATEs per second, each running the correlated subquery below,
+      // while the only consumers (deriveLiveness's 90s stall display and 10m
+      // abandonment bound) cannot resolve anything finer than tens of seconds.
+      // The staleness predicate is part of the WHERE rather than a process-local
+      // cache so it stays correct across instances and restarts, and it also
+      // makes the column monotonic: an out-of-order event carrying an older
+      // `data.time` no longer drags it backwards. `IS NULL` is the first
+      // disjunct because the column is nullable and a fresh row records NULL,
+      // which must still take its first write (AGENTS.md, "Reading a nullable
+      // column").
       db.update(ActorRegistryTable)
         .set({ last_activity_time: data.time })
         .where(
@@ -147,6 +162,7 @@ export default [
               ActorRegistryTable.actor_id,
               sql`(SELECT ${MessageTable.agent_id} FROM ${MessageTable} WHERE ${MessageTable.id} = ${messageID})`,
             ),
+            sql`(${ActorRegistryTable.last_activity_time} IS NULL OR ${ActorRegistryTable.last_activity_time} < ${data.time - ACTIVITY_COALESCE_MS})`,
           ),
         )
         .run()

@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { Layer, ManagedRuntime, Effect } from "effect"
 import { ActorRegistry } from "../../src/actor/registry"
-import { deriveLiveness, DEFAULT_LIVENESS_STALL_MS, DEFAULT_LIVENESS_ABANDON_MS } from "../../src/actor/schema"
+import {
+  deriveLiveness,
+  DEFAULT_LIVENESS_STALL_MS,
+  DEFAULT_LIVENESS_ABANDON_MS,
+  ACTIVITY_COALESCE_MS,
+} from "../../src/actor/schema"
 import { Bus } from "../../src/bus"
 import { Session } from "../../src/session"
 import { SessionID, MessageID, PartID } from "../../src/session/schema"
@@ -460,4 +465,141 @@ describe("ActorRegistry.liveness (T39 integration)", () => {
       expect(found).toBeUndefined()
     })
   })
+
+  // The heartbeat rides the part-write path, and that path is unthrottled: the
+  // bash tool's ctx.metadata fires once per decoded stdout chunk and reaches
+  // Session.updatePart with no interval check, measured at 453-575 registry row
+  // writes/sec for a chatty command. ACTIVITY_COALESCE_MS caps the column's
+  // resolution via a staleness predicate in the projector's WHERE, so redundant
+  // writes inside the interval match 0 rows instead of rewriting the row.
+  test("coalescing: repeated part writes inside ACTIVITY_COALESCE_MS do not re-advance the column", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await withRegistry(tmp.path, async (rt) => {
+      const child = await rt.runPromise(Session.Service.use((s) => s.create()))
+      await rt.runPromise(ActorRegistry.Service.use((reg) => register(reg, child.id)))
+      await rt.runPromise(ActorRegistry.Service.use((reg) => reg.updateStatus(child.id, child.id, { status: "running" })))
+
+      const messageID = MessageID.ascending()
+      await rt.runPromise(
+        Session.Service.use((s) =>
+          s.updateMessage({
+            id: messageID,
+            role: "user" as const,
+            sessionID: child.id,
+            agentID: child.id,
+            agent: "build",
+            model: { providerID: ProviderID.make("test"), modelID: ModelID.make("test-model") },
+            time: { created: Date.now() },
+          }),
+        ),
+      )
+      const writePart = (text: string) => {
+        const partID = PartID.ascending()
+        return rt
+          .runPromise(
+            Session.Service.use((s) => s.updatePart({ id: partID, messageID, sessionID: child.id, type: "text", text })),
+          )
+          .then(() => partID)
+      }
+
+      // First write: the column is NULL, and the `IS NULL` disjunct must let it
+      // through — a fresh row has to record its first activity.
+      await writePart("first")
+      const first = await rt.runPromise(ActorRegistry.Service.use((reg) => reg.get(child.id, child.id)))
+      expect(first!.lastActivityTime).toBeDefined()
+
+      // Now a burst well inside the interval. Every one of these is a part write
+      // that previously rewrote the registry row.
+      const BURST = 40
+      let lastPartID = ""
+      for (let i = 0; i < BURST; i++) lastPartID = await writePart(`chunk ${i}`)
+
+      const after = await rt.runPromise(ActorRegistry.Service.use((reg) => reg.get(child.id, child.id)))
+      // Pinned to the first write: all BURST redundant registry writes suppressed.
+      expect(after!.lastActivityTime).toBe(first!.lastActivityTime)
+
+      // The suppression is specific to the registry heartbeat — the parts
+      // themselves still landed, so nothing was lost from the session.
+      const stored = await rt.runPromise(
+        Session.Service.use((s) => s.getPart({ sessionID: child.id, messageID, partID: lastPartID as any })),
+      )
+      expect(stored).toBeDefined()
+
+      // And the coalesced row is still classified live, not stalled or idle.
+      const live = await rt.runPromise(ActorRegistry.Service.use((reg) => reg.liveness(child.id, child.id)))
+      expect(live!.liveness).toBe("progressing")
+    })
+  }, 60_000)
+
+  // Semantics-preservation: coalescing must not let a genuinely active actor
+  // drift out of `progressing`. Runs longer than ACTIVITY_COALESCE_MS with parts
+  // arriving continuously and samples liveness at EVERY step, so a guard that
+  // froze the column would surface as a stalled/idle sample rather than only at
+  // the end.
+  test("continuous activity keeps reading progressing across an interval longer than ACTIVITY_COALESCE_MS", async () => {
+    // The safety of coalescing rests entirely on the interval being far below
+    // the stall window: worst-case apparent age equals ACTIVITY_COALESCE_MS, so
+    // the progressing/stalled flip is unreachable while this holds.
+    expect(ACTIVITY_COALESCE_MS * 2).toBeLessThan(DEFAULT_LIVENESS_STALL_MS)
+    expect(ACTIVITY_COALESCE_MS * 2).toBeLessThan(DEFAULT_LIVENESS_ABANDON_MS)
+
+    await using tmp = await tmpdir({ git: true })
+    await withRegistry(tmp.path, async (rt) => {
+      const child = await rt.runPromise(Session.Service.use((s) => s.create()))
+      await rt.runPromise(ActorRegistry.Service.use((reg) => register(reg, child.id)))
+      await rt.runPromise(ActorRegistry.Service.use((reg) => reg.updateStatus(child.id, child.id, { status: "running" })))
+
+      const messageID = MessageID.ascending()
+      await rt.runPromise(
+        Session.Service.use((s) =>
+          s.updateMessage({
+            id: messageID,
+            role: "user" as const,
+            sessionID: child.id,
+            agentID: child.id,
+            agent: "build",
+            model: { providerID: ProviderID.make("test"), modelID: ModelID.make("test-model") },
+            time: { created: Date.now() },
+          }),
+        ),
+      )
+
+      const SPAN_MS = ACTIVITY_COALESCE_MS + 1_500
+      const CADENCE_MS = 250
+      const started = Date.now()
+      const observed = new Set<number>()
+      let samples = 0
+
+      while (Date.now() - started < SPAN_MS) {
+        await rt.runPromise(
+          Session.Service.use((s) =>
+            s.updatePart({
+              id: PartID.ascending(),
+              messageID,
+              sessionID: child.id,
+              type: "text",
+              text: `t+${Date.now() - started}`,
+            }),
+          ),
+        )
+        const found = await rt.runPromise(ActorRegistry.Service.use((reg) => reg.liveness(child.id, child.id)))
+        samples++
+        // The whole point: an actor that never stops emitting parts is never
+        // reported as anything but progressing, however coarse the column is.
+        expect(found!.liveness).toBe("progressing")
+        // The recorded activity is allowed to lag by the coalescing interval and
+        // at most one more write cadence — never more.
+        expect(Date.now() - found!.actor.lastActivityTime!).toBeLessThanOrEqual(ACTIVITY_COALESCE_MS + CADENCE_MS * 4)
+        observed.add(found!.actor.lastActivityTime!)
+        await new Promise((r) => setTimeout(r, CADENCE_MS))
+      }
+
+      // Real coverage of the window, not one lucky iteration.
+      expect(samples).toBeGreaterThan(SPAN_MS / CADENCE_MS / 2)
+      expect(Date.now() - started).toBeGreaterThan(ACTIVITY_COALESCE_MS)
+      // The column is coalesced, not frozen: it advanced at least once more
+      // after its first value now that the span exceeded the interval.
+      expect(observed.size).toBeGreaterThanOrEqual(2)
+    })
+  }, 120_000)
 })
