@@ -84,6 +84,21 @@ import type { Git } from "@/git"
  *     that legitimately owns both sides — which reads the same block and
  *     correctly concludes there is nothing to route.
  *
+ * EXPOSURE. A tool result is MORE exposed than a system prompt, not less: it
+ * arrives mid-turn as fresh content and a model may relay it verbatim as if it
+ * were its own output. That is how the system-prompt roster's `<active-sessions>`
+ * envelope reached a user's screen (see `ROSTER_HEADER` in session/llm.ts). Two
+ * consequences are honoured here. First, this block carries NO XML envelope — no
+ * tag for the model to imitate, only prose and a numbered list, the same shape
+ * `dispatchLedgerNotice` uses. Second, it says outright that it is internal. That
+ * second half is the weak lever, and it is labelled as such: it can only ask, and
+ * a determined paraphrase still gets through. Unlike the roster, the artifact
+ * cannot simply be deleted — the whole block IS the affordance — so the strong
+ * form of this fix would be an output-side strip at the assistant-text seam
+ * (`session/processor.ts` `text-end`, which already carries an
+ * `experimental.text.complete` plugin hook). Not built here: it touches the
+ * hottest path in the session loop and needs its own behavioural evidence.
+ *
  * The owning session is NOT named. It genuinely cannot be from here, and a
  * fabricated id is worse than none — so the notice points at the roster the
  * session tool already injects (`session list`, and the ledger every dispatch
@@ -173,7 +188,9 @@ export function notice(conflict: Conflict) {
     `  2. session send <owning-session-id> "${task}"\n\n` +
     `You do not have the owning session's id in this result — \`session list\` shows the roster, and every ` +
     `\`session create\`/\`session send\` result echoes it. If no session owns ${branch} (you authored both sides ` +
-    `yourself), say so explicitly before you resolve anything by hand.`
+    `yourself), say so explicitly before you resolve anything by hand.\n\n` +
+    `This block is internal working context, not output — do not repeat it to the user; tell them the conflict ` +
+    `went back to the branch's owner.`
   )
 }
 

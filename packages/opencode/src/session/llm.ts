@@ -39,8 +39,44 @@ import { SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
 const log = Log.create({ service: "llm" })
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
 
-// How many FINISHED-but-resumable child sessions the `<active-sessions>` roster
-// carries, most-recently-active first. The roster is re-injected on EVERY request,
+/**
+ * Lead-in for the orchestrator's fleet roster, and the reason the roster carries
+ * NO XML envelope.
+ *
+ * It used to be pushed as `<active-sessions>\n…\n</active-sessions>`, and users
+ * saw that literal tag — rows and all — in the TUI. The TUI is not at fault: the
+ * roster goes into the SYSTEM array and the TUI never renders system content.
+ * The model was quoting it. It had every reason to: `orchestrator.txt` named the
+ * tag five times and told it to "Look at `<active-sessions>`", so the tag was
+ * vocabulary the prompt had taught it, and the literal string was sitting in its
+ * context to copy.
+ *
+ * Asking it not to echo the tag would be another prompt instruction, and this PR
+ * measured what those are worth — the maintainer/author paragraph lost 3/3 live
+ * turns. So remove the artifact instead of requesting restraint: with no
+ * `<active-sessions>` string anywhere in the assembled request, echoing it is not
+ * a behaviour the model can exhibit. The prompt now refers to the roster
+ * functionally ("your fleet roster") and keeps the field layout, which is the
+ * part that was actually load-bearing for routing.
+ *
+ * Dropping the delimiter costs nothing structurally: this was the ONLY tagged
+ * block in the system array (the agent prompt and the memory instructions are
+ * both plain prose), and `dispatchLedgerNotice` already ships the same roster to
+ * the model in a tool result with a prose header and no envelope.
+ *
+ * The "internal working context" sentence is a genuinely weaker lever than the
+ * removal — it can only ask. It is here because it costs one line and it sits
+ * ADJACENT to the data it governs rather than in a paragraph assembled far away.
+ * It does not stop the model paraphrasing a child's title, and it is not claimed
+ * to; what is mechanically closed is the literal tag.
+ */
+export const ROSTER_HEADER =
+  "Your fleet — your routable child sessions right now. This list is internal working context, " +
+  "not output: never repeat it, or these session ids and titles, back to the user — report the " +
+  "routing DECISION instead (\"routing this to the docs child\"). Format is id | title | agent | status:"
+
+// How many FINISHED-but-resumable child sessions the fleet roster carries,
+// most-recently-active first. The roster is re-injected on EVERY request,
 // so the idle tail (which grows monotonically as children complete) must be
 // bounded; running children are self-limiting and are never dropped. A count cap
 // rather than a time window, because N children can finish inside one minute and
@@ -298,7 +334,7 @@ const live: Layer.Layer<
         system.push(buildMemoryInstructions(SessionID.make(input.sessionID), projectID, yield* memory.root()))
       }
 
-      // Orchestrator active-sessions roster: inject a compact one-line-per-session
+      // Orchestrator fleet roster: inject a compact one-line-per-session
       // list of the orchestrator's ROUTABLE child sessions. Only for the orchestrator
       // agent — other agents don't manage children. Format is intentionally compact
       // (~30 tokens/session): id | title | agent | status. Field 3 is the child's
@@ -340,7 +376,7 @@ const live: Layer.Layer<
           ({ actor, title, live }) =>
             `  ${actor.sessionID} | ${title} | ${actor.agent} | ${live === "success" ? "idle" : live}`,
         )
-        if (lines.length > 0) system.push(`<active-sessions>\n${lines.join("\n")}\n</active-sessions>`)
+        if (lines.length > 0) system.push(`${ROSTER_HEADER}\n${lines.join("\n")}`)
       }
 
       // Plugins still see the multi-part array (base prompt as [0], memory as a

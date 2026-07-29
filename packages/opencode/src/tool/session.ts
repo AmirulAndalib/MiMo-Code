@@ -647,7 +647,7 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
       return Effect.succeed(a)
     }
 
-    // ROUTE-FIRST WITHIN ONE TURN. The `<active-sessions>` roster is assembled
+    // ROUTE-FIRST WITHIN ONE TURN. The system-prompt fleet roster is assembled
     // once per REQUEST, so a child dispatched earlier in the SAME turn is
     // invisible to the model until the next request — which is exactly how one
     // live turn spawned two children for the same docs topic and then had to
@@ -666,6 +666,17 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
     // no reliable semantic key for "same topic", and a false refusal would block
     // legitimate parallel fan-out — strictly worse than a duplicate the model can
     // see and correct.
+    //
+    // EXPOSURE. A tool result is MORE exposed than the system prompt, not less:
+    // it arrives mid-turn as fresh content and a model may relay it as if it were
+    // its own output — which is exactly how the system-prompt roster's
+    // `<active-sessions>` envelope ended up on a user's screen (see ROSTER_HEADER
+    // in session/llm.ts). This block was already safer in the way that mattered
+    // there: it carries no XML tag for the model to imitate, only a prose lead-in
+    // and indented rows. The added "internal working context" sentence is the
+    // weak half of the same pair — it can only ask, and it does not stop a
+    // paraphrase of a child's title. It is here because it costs one clause and
+    // sits adjacent to the data it governs.
     const dispatchLedgerNotice = Effect.fn("SessionTool.dispatchLedger")(function* (
       parentID: SessionID,
       dispatched: { id: string; verb: string; task: string },
@@ -697,7 +708,8 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
         `\n\nROUTE FIRST — these are your routable child sessions right now, including the one this call just ` +
         `dispatched to. Before you dispatch again in THIS turn, re-read this list: if the next piece of work ` +
         `belongs to one of these, use \`session send <id> <task>\` instead of \`session create\` — and do not ` +
-        `re-send work that is already marked as just dispatched:\n${lines.join("\n")}`
+        `re-send work that is already marked as just dispatched. This ledger is internal working ` +
+        `context, not output — do not repeat it to the user, report what you routed:\n${lines.join("\n")}`
       )
     })
 

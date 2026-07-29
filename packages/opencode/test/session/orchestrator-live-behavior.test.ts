@@ -390,9 +390,29 @@ const dispatches = (turn: Turn) =>
 const ANALYSIS_TOOLS = new Set(["read", "grep", "glob", "list", "bash", "multiedit", "edit", "write", "apply_patch"])
 const analysisCalls = (turn: Turn) => turn.calls.filter((call) => ANALYSIS_TOOLS.has(call.tool))
 
+/**
+ * Internal scaffolding that must never reach the user. Recorded per turn because a
+ * text assertion on a prompt file cannot prove a model did not echo something —
+ * only a real turn can. Reported, not asserted: a live turn is the wrong place to
+ * gate CI, and an assertion here would go flaky for reasons unrelated to leaking.
+ *
+ * `<active-sessions>` is the tag users actually saw in the TUI. It has since been
+ * removed from the assembled request outright (ROSTER_HEADER, session/llm.ts), so
+ * a hit here would mean the model INVENTED it — worth knowing either way. The
+ * other two are the tool-result blocks, which cannot be deleted because they ARE
+ * the affordance and so rely on a weaker "this is internal" instruction.
+ */
+const LEAKABLE: ReadonlyArray<[string, string]> = [
+  ["active-sessions-tag", "<active-sessions>"],
+  ["roster-ledger", "ROUTE FIRST"],
+  ["conflict-notice", "THE CONFLICT IS NOT YOURS TO RESOLVE"],
+]
+
 function report(label: string, turn: Turn) {
   const rendered = turn.calls.map((call) => `${call.tool}${call.action ? ":" + call.action : ""}`).join(", ") || "(none)"
   console.log(`[live:${label}] tools=[${rendered}] text=${JSON.stringify(turn.text.slice(0, 220))}`)
+  const leaked = LEAKABLE.filter(([, needle]) => turn.text.includes(needle)).map(([name]) => name)
+  console.log(`[live:${label}] echoed-internal-scaffolding=${leaked.length === 0 ? "(none)" : leaked.join(",")}`)
   for (const call of turn.calls) console.log(`[live:${label}]   raw[${call.status}] ${call.tool} ${JSON.stringify(call.input).slice(0, 200)} => ${call.output.slice(0, 220)}`)
 }
 

@@ -335,7 +335,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
     // session_id === the parent's id — can never match them. The reliable
     // parent link is the Session row's parent_id. Join on it so a caller with
     // no Session.Service (e.g. the LLM layer building the orchestrator's
-    // <active-sessions> roster) can still enumerate its peer children, and
+    // fleet roster) can still enumerate its peer children, and
     // carry the child's title along since that is the routing signal.
     const listPeerChildren = Effect.fn("ActorRegistry.listPeerChildren")(function* (
       parentSessionID: SessionID,

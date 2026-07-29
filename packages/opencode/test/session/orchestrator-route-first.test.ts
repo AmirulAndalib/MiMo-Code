@@ -54,7 +54,7 @@ describe("orchestrator prompt — four core duties", () => {
 
   test("duty 1: Dispatch — route work", () => {
     expect(PROMPT_ORCHESTRATOR).toMatch(/Dispatch.*route work/i)
-    expect(PROMPT_ORCHESTRATOR).toContain("<active-sessions>")
+    expect(PROMPT_ORCHESTRATOR).toContain("FLEET ROSTER")
     expect(PROMPT_ORCHESTRATOR).toContain("session send")
     expect(PROMPT_ORCHESTRATOR).toContain("session create")
   })
@@ -88,8 +88,14 @@ describe("orchestrator prompt — route-first dispatch", () => {
     expect(PROMPT_ORCHESTRATOR).toMatch(/primary dispatch verb/)
   })
 
-  test("references active-sessions block for routing decisions", () => {
-    expect(PROMPT_ORCHESTRATOR).toContain("<active-sessions>")
+  test("references the fleet roster functionally, never by its internal tag", () => {
+    expect(PROMPT_ORCHESTRATOR).toContain("fleet roster")
+    // TEXT PIN, not a behavioural assertion: it pins the wording of a prose file.
+    // The mechanism that actually stops the tag being echoed is that the tag no
+    // longer exists in the assembled request at all — asserted on the WIRE in
+    // `orchestrator-active-sessions.test.ts` ("not.toContain(\"<active-sessions>\")").
+    // This assertion exists so the prompt cannot re-teach the tag as vocabulary.
+    expect(PROMPT_ORCHESTRATOR).not.toContain("<active-sessions>")
     // Assert the LITERAL documented format, not a loose `.*agent.*` regex: the
     // surrounding prose also contains the word "AGENT", so a regex matches even
     // when the format line still says `mode`. Field 3 must be the child's agent,

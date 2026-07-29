@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test"
 import path from "path"
 import { Effect, Stream, ManagedRuntime, Layer } from "effect"
-import { LLM, ROSTER_IDLE_LIMIT } from "../../src/session/llm"
+import { LLM, ROSTER_HEADER, ROSTER_IDLE_LIMIT } from "../../src/session/llm"
 import { ActorRegistry } from "../../src/actor/registry"
 import { Session as SessionNs } from "../../src/session"
 import { Instance } from "../../src/project/instance"
@@ -15,7 +15,7 @@ import { SessionID, MessageID } from "../../src/session/schema"
 import { AppRuntime } from "../../src/effect/app-runtime"
 import PROMPT_ORCHESTRATOR from "../../src/session/prompt/orchestrator.txt"
 
-// e2e BEHAVIOR tests for the orchestrator's <active-sessions> roster.
+// e2e BEHAVIOR tests for the orchestrator's fleet roster.
 //
 // These are not prompt-text assertions. Each test drives the REAL LLM layer
 // (LLM.defaultLayer) against a local HTTP provider, with real Session rows and
@@ -160,14 +160,15 @@ function tmpConfig(baseURL: string) {
 /** A real parent session plus real peer children, each with a real registry row. */
 type Child = { id: SessionID; title: string }
 
-// orchestrator.txt PROSE also contains the literal "<active-sessions>" (it
-// describes the block), so indexOf would slice from the prose and swallow the
-// whole prompt. The INJECTED block is appended last and is the only thing that
-// emits the closing tag, so anchor on lastIndexOf(open) → indexOf(close).
+// The roster no longer carries an XML envelope (see ROSTER_HEADER in
+// session/llm.ts: the literal `<active-sessions>` tag was what users saw echoed
+// into the TUI, so it was removed rather than prohibited). ROSTER_HEADER is
+// imported from the source of truth so this extractor cannot drift from it, and
+// the rows run to the end of the pushed block.
 function rosterBlock(sys: string): string {
-  const close = sys.indexOf("</active-sessions>")
-  if (close === -1) return ""
-  return sys.slice(sys.lastIndexOf("<active-sessions>", close), close)
+  const open = sys.lastIndexOf(ROSTER_HEADER)
+  if (open === -1) return ""
+  return sys.slice(open)
 }
 
 async function seedFleet(
@@ -271,7 +272,7 @@ async function captureSystemPrompt(input: { sessionID: SessionID; agent: Agent.I
     .join("\n")
 }
 
-describe("orchestrator <active-sessions> roster — e2e on the wire", () => {
+describe("orchestrator fleet roster — e2e on the wire", () => {
   test("live peer children appear in the roster the orchestrator model receives", async () => {
     const server = queueState.server!
     const fixture = await loadFixture(PROVIDER_ID, MODEL_ID)
@@ -295,8 +296,10 @@ describe("orchestrator <active-sessions> roster — e2e on the wire", () => {
 
         // The roster block is really injected into the request, not just
         // described by the prompt file.
-        expect(sys).toContain("<active-sessions>")
-        expect(sys).toContain("</active-sessions>")
+        expect(sys).toContain(ROSTER_HEADER)
+        // And the internal-scaffolding tag the model used to echo into the TUI is
+        // not in the assembled request at all, so it cannot be echoed.
+        expect(sys).not.toContain("<active-sessions>")
 
         // Every live child is addressable: its session id is on the wire, so
         // `session send <id>` is a route the model can actually take.
@@ -370,7 +373,7 @@ describe("orchestrator <active-sessions> roster — e2e on the wire", () => {
         })
 
         const done = fleet.children[0]!
-        expect(sys).toContain("</active-sessions>")
+        expect(sys).toContain(ROSTER_HEADER)
         const block = rosterBlock(sys)
         // Routable: the id the model needs for `session send` is on the wire.
         expect(block).toContain(done.id)
@@ -510,10 +513,9 @@ describe("orchestrator <active-sessions> roster — e2e on the wire", () => {
           agent: plainAgent("build"),
           modelID: fixture.model.id,
         })
-        // NOTE: orchestrator.txt itself mentions the literal "<active-sessions>"
-        // when describing the block, so absence must be asserted on the CLOSING
-        // tag, which only the injected roster emits.
-        expect(sys).not.toContain("</active-sessions>")
+        // orchestrator.txt no longer names the roster with a literal tag, so
+        // absence can be asserted directly on the injected header.
+        expect(sys).not.toContain(ROSTER_HEADER)
       },
     })
   })
@@ -535,10 +537,9 @@ describe("orchestrator <active-sessions> roster — e2e on the wire", () => {
           agent: orchestratorAgent(),
           modelID: fixture.model.id,
         })
-        // NOTE: orchestrator.txt itself mentions the literal "<active-sessions>"
-        // when describing the block, so absence must be asserted on the CLOSING
-        // tag, which only the injected roster emits.
-        expect(sys).not.toContain("</active-sessions>")
+        // orchestrator.txt no longer names the roster with a literal tag, so
+        // absence can be asserted directly on the injected header.
+        expect(sys).not.toContain(ROSTER_HEADER)
       },
     })
   })
@@ -564,7 +565,7 @@ describe("orchestrator <active-sessions> roster — e2e on the wire", () => {
         // instruction ("route to an existing session first") AND the data the
         // instruction refers to (the roster). Prompt-file tests can only prove
         // the former; this proves they arrive together on one request.
-        expect(sys).toContain("<active-sessions>")
+        expect(sys).toContain(ROSTER_HEADER)
         expect(sys).toContain("session send")
         expect(sys.indexOf("session send")).toBeGreaterThan(-1)
         expect(sys).toContain(fleet.children[0]!.id)
