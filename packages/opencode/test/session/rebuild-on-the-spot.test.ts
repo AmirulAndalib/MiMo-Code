@@ -437,8 +437,26 @@ describe("Manual /rebuild: on-the-spot rebuild driven through SessionPrompt.comm
     { timeout: 30_000 },
   )
 
+  // DELIBERATE REWRITE — this test previously encoded the OPPOSITE behaviour.
+  //
+  // It used to be titled "case 2 fallback: no checkpoint + no spawnable writer →
+  // surfaces the no-checkpoint outcome on the status channel, persists nothing"
+  // and asserted `after.length === countBefore` — i.e. that a manual /rebuild
+  // whose writer could not run must NOT compact. That encoded a deliberate
+  // tradeoff: /rebuild means "rebuild from a checkpoint", so substituting a
+  // lossy summary would misreport what happened.
+  //
+  // The user overruled that tradeoff: when there is no checkpoint AND the writer
+  // genuinely fails, a truncating compaction beats doing nothing. That is now the
+  // single compaction fallback condition, shared with the auto overflow paths.
+  // The test is rewritten rather than edited quietly, because the assertion it
+  // used to make is now a statement of the wrong behaviour.
+  //
+  // What is PRESERVED from the old test, and still asserted below: the handler
+  // must not enter the runLoop, must not produce an assistant reply, and must not
+  // fabricate a synthetic user turn — only the boundary marker may be persisted.
   test(
-    "case 2 fallback: no checkpoint + no spawnable writer → surfaces the no-checkpoint outcome on the status channel, persists nothing",
+    "case 2 fallback: no checkpoint + no spawnable writer → compacts instead, and says so on the status channel",
     async () => {
       const llm = startLLM("should-not-be-used-as-a-reply")
       const seen: Array<string | undefined> = []
@@ -457,9 +475,8 @@ describe("Manual /rebuild: on-the-spot rebuild driven through SessionPrompt.comm
         })
 
         // Force NO writer: with spawnRef unset, tryStartCheckpointWriter cannot
-        // spawn and waitForWriter resolves "no-writer" → the handler must fall
-        // through to the no-checkpoint outcome (status channel, no runLoop, no
-        // persisted message).
+        // spawn and waitForWriter resolves "no-writer" → the genuine
+        // writer-failure case, the ONLY one allowed to reach compaction.
         await withSpawnRef(undefined, () =>
           Instance.provide({
             directory: tmp.path,
@@ -486,29 +503,32 @@ describe("Manual /rebuild: on-the-spot rebuild driven through SessionPrompt.comm
 
                   const after = yield* sessions.messages({ sessionID: info.id })
 
-                  // NOTHING was persisted: no boundary (nothing to rebuild from)
-                  // and no fabricated "No checkpoint…" user turn. The message
-                  // count is unchanged.
-                  expect(after.length).toBe(countBefore)
+                  // The writer could not run and no checkpoint existed, so the
+                  // context was compacted: exactly ONE new message, carrying a
+                  // `compaction` part.
+                  expect(after.length).toBe(countBefore + 1)
+                  const compactions = after.filter((m) => m.parts.some((p) => p.type === "compaction"))
+                  expect(compactions.length).toBe(1)
+
+                  // No rebuild boundary — there was nothing to rebuild from.
                   const boundaries = after.filter((m) => m.parts.some((p) => p.type === "checkpoint"))
                   expect(boundaries.length).toBe(0)
+
+                  // Still no fabricated user turn carrying the outcome text.
                   const fabricated = after.some((m) =>
-                    m.parts.some(
-                      (p) => p.type === "text" && p.text.includes("No checkpoint is available to rebuild from yet"),
-                    ),
+                    m.parts.some((p) => p.type === "text" && p.text.includes("the context was compacted instead")),
                   )
                   expect(fabricated).toBe(false)
 
-                  // No assistant reply carrying the scripted text was produced.
+                  // Still no assistant reply.
                   const modelReplied = after.some((m) =>
                     m.parts.some((p) => p.type === "text" && p.text.includes("should-not-be-used-as-a-reply")),
                   )
                   expect(modelReplied).toBe(false)
 
-                  // The outcome IS surfaced — on the status channel.
-                  expect(
-                    seen.some((m) => m?.includes("No checkpoint is available to rebuild from yet")),
-                  ).toBe(true)
+                  // The substitution is NAMED on the status channel rather than
+                  // silently swapping the mechanism the user asked for.
+                  expect(seen.some((m) => m?.includes("the context was compacted instead"))).toBe(true)
                 }),
               ),
           }),
