@@ -446,6 +446,78 @@ describe("SessionPrune.fireCheckpoints writer-failure retry", () => {
       { checkpoint: { thresholds: ["50%"] } },
     )
   })
+
+  // MAX_WRITER_WAIT_EXTENSIONS (prune.ts:32) caps the watcher fiber at ~1h:
+  // one initial waitForWriter plus at most 12 re-entries of the 5-minute bound,
+  // so 13 calls total. These two cases sit on either side of that boundary, and
+  // the leftover length of the stub's queue counts the calls exactly — so
+  // moving the constant by one breaks one of them.
+  test("12 extensions is still inside the ~1h cap — the writer's real outcome is booked", async () => {
+    const harness = makeRetryHarness()
+    const promptOps = {} as any
+
+    await runWithHarness(
+      harness,
+      Effect.gen(function* () {
+        const svc = yield* SessionPrune.Service
+        const ssn = yield* SessionNs.Service
+        const info = yield* ssn.create({})
+        const model = createModel({ context: 100_000, output: 32_000 })
+
+        // 12 expired bounds (~60min) and then a real failure on the 13th call.
+        harness.outcomes.push(...Array(12).fill("timeout" as const), "failure")
+        yield* svc.fireCheckpoints({ sessionID: info.id, model, tokens: makeTokens(), promptOps })
+        yield* Effect.sleep(100)
+        expect(harness.state.enqueueCount).toBe(1)
+
+        // Every seeded outcome was consumed ⇒ the 13th call happened, i.e. the
+        // 12th extension was still permitted.
+        expect(harness.outcomes.length).toBe(0)
+
+        // The failure was booked (counter 1, below the 3-failure cap), so crossed
+        // was cleared and this fire enqueues again. If the watcher had bailed at
+        // extension 12 instead, nothing would have been booked and this would
+        // still read 1.
+        yield* svc.fireCheckpoints({ sessionID: info.id, model, tokens: makeTokens(), promptOps })
+        yield* Effect.sleep(100)
+        expect(harness.state.enqueueCount).toBe(2)
+      }),
+      { checkpoint: { thresholds: ["50%"] } },
+    )
+  })
+
+  test("the 13th extension is past the cap — the watcher stops waiting and books nothing", async () => {
+    const harness = makeRetryHarness()
+    const promptOps = {} as any
+
+    await runWithHarness(
+      harness,
+      Effect.gen(function* () {
+        const svc = yield* SessionPrune.Service
+        const ssn = yield* SessionNs.Service
+        const info = yield* ssn.create({})
+        const model = createModel({ context: 100_000, output: 32_000 })
+
+        // One expired bound more than the cap allows, then a failure that the
+        // watcher must never reach.
+        harness.outcomes.push(...Array(13).fill("timeout" as const), "failure")
+        yield* svc.fireCheckpoints({ sessionID: info.id, model, tokens: makeTokens(), promptOps })
+        yield* Effect.sleep(100)
+        expect(harness.state.enqueueCount).toBe(1)
+
+        // The trailing "failure" is still queued ⇒ waitForWriter was called
+        // exactly 13 times and the watcher then gave up, so a permanently stuck
+        // writer cannot pin the fiber for the life of the process.
+        expect(harness.outcomes.length).toBe(1)
+
+        // Nothing was booked, so crossed stayed set → no further enqueue.
+        yield* svc.fireCheckpoints({ sessionID: info.id, model, tokens: makeTokens(), promptOps })
+        yield* Effect.sleep(100)
+        expect(harness.state.enqueueCount).toBe(1)
+      }),
+      { checkpoint: { thresholds: ["50%"] } },
+    )
+  })
 })
 
 describe("defaultThresholdsFor (Part 2 density)", () => {

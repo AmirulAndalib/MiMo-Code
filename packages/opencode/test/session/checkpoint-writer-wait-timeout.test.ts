@@ -27,8 +27,11 @@ const ref = {
   modelID: ModelID.make("test-model"),
 }
 
-// Actor stub whose outcome Deferred never resolves — a writer still grinding
-// through LLM round-trips when the caller's bounded wait expires.
+// Actor stub whose outcome Deferred is left unresolved — a writer still
+// grinding through LLM round-trips when the caller's bounded wait expires.
+// Each spawn's Deferred is captured so a test can settle it LATE, i.e. after
+// the caller has already been told "timeout".
+const outcomes: Deferred.Deferred<AgentOutcome>[] = []
 const hangingActor = Layer.effect(
   Actor.Service,
   Effect.gen(function* () {
@@ -39,6 +42,7 @@ const hangingActor = Layer.effect(
         Effect.gen(function* () {
           counter += 1
           const outcome = yield* Deferred.make<AgentOutcome>()
+          outcomes.push(outcome)
           return { actorID: `${input.agentType}-${counter}`, sessionID: input.sessionID, outcome }
         }),
       cancel: () => Effect.void,
@@ -74,6 +78,76 @@ const env = Layer.mergeAll(
 )
 
 const it = testEffect(env)
+
+// Seed a session with one message and start a writer, returning THIS writer's
+// outcome Deferred (located by the array-length delta so concurrent tests never
+// settle each other's writer). Resolving that Deferred is how the actor — the
+// only thing that knows the writer's real result — reports it, so a late
+// resolve models "the writer finally settled, long after the wait bound".
+function seedAndStartWriter() {
+  return Effect.gen(function* () {
+    const svc = yield* SessionCheckpoint.Service
+    const ssn = yield* SessionNs.Service
+    const info = yield* ssn.create({})
+    const user = yield* ssn.updateMessage({
+      id: MessageID.ascending(),
+      role: "user",
+      sessionID: info.id,
+      agent: "build",
+      model: ref,
+      time: { created: Date.now() },
+    })
+    yield* ssn.updatePart({
+      id: PartID.ascending(),
+      messageID: user.id,
+      sessionID: info.id,
+      type: "text",
+      text: "seed",
+    })
+    const idxBefore = outcomes.length
+    const started = yield* svc.tryStartCheckpointWriter({
+      sessionID: info.id,
+      model: { providerID: "test", modelID: "test-model" },
+      promptOps: {} as never,
+    })
+    expect(started).toBe("started")
+    return { info, outcome: outcomes[idxBefore]! }
+  })
+}
+
+// Drive one writer past the 5-minute bound and re-enter the wait exactly the
+// way prune's retry watcher does (prune.ts:338-349), then settle the writer
+// LATE and return what the re-entered wait reports. This is the seam the
+// prune-side tests cannot cover: they stub waitForWriter, so they ASSUME a
+// late-settling writer yields "timeout" then its real outcome. Here the real
+// service produces it.
+function timeoutThenSettle(settled: AgentOutcome) {
+  return Effect.gen(function* () {
+    const svc = yield* SessionCheckpoint.Service
+    const { info, outcome } = yield* seedAndStartWriter()
+
+    // First wait: expires with the writer genuinely still in flight.
+    const first = yield* Effect.forkChild(svc.waitForWriter(info.id))
+    yield* TestClock.adjust("6 minutes")
+    expect(yield* Fiber.join(first)).toBe("timeout")
+
+    // The caller has now been told "timeout" and the writer is still running.
+    expect(yield* svc.isWriterRunning(info.id)).toBe(true)
+
+    // Prune re-enters the bounded wait. Advancing the clock (well short of a
+    // second bound) both lets the fiber reach Deferred.await and proves it is
+    // parked there rather than having returned early: the writers-map entry is
+    // still present, because it is only deleted AFTER the writer settles
+    // (checkpoint.ts:939).
+    const second = yield* Effect.forkChild(svc.waitForWriter(info.id))
+    yield* TestClock.adjust("1 minute")
+    expect(second.pollUnsafe()).toBeUndefined()
+
+    // The writer finally settles — ~7 minutes in, long past the first bound.
+    yield* Deferred.succeed(outcome, settled)
+    return yield* Fiber.join(second)
+  })
+}
 
 describe("SessionCheckpoint.waitForWriter", () => {
   it.effect(
@@ -132,6 +206,40 @@ describe("SessionCheckpoint.waitForWriter", () => {
         // in flight and still owns the watermark advance. This is the property
         // that makes "timeout" honest rather than a renamed failure.
         expect(yield* svc.isWriterRunning(info.id)).toBe(true)
+      }),
+    ),
+  )
+
+  // The PR claims the writer's REAL outcome is still booked after the bound
+  // expires. Booking happens in prune, whose counter is closure-private — but
+  // prune learns the outcome from exactly one place, waitForWriter's return on
+  // the re-entered wait, and that IS public. These two cases pin it for both
+  // terminal states.
+  it.effect(
+    "a writer that SUCCEEDS after the bound reports 'success' to the re-entered wait",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const late = yield* timeoutThenSettle({ status: "success" } as AgentOutcome)
+
+        // Not "timeout" and not "no-writer": the late success survives the
+        // expiry, which is what lets prune clear writerFailures instead of
+        // leaving a healthy-but-slow session stuck near the failure cap.
+        expect(late).toBe("success")
+      }),
+    ),
+  )
+
+  it.effect(
+    "a writer that FAILS after the bound reports 'failure' to the re-entered wait",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const late = yield* timeoutThenSettle({ status: "failure", error: "boom" })
+
+        // This is the direction that keeps the failure cap reachable in the slow
+        // regime: if the late failure were lost (returning "timeout" forever, or
+        // "no-writer" because the settle watcher had already removed the map
+        // entry), a permanently broken slow writer would never be counted.
+        expect(late).toBe("failure")
       }),
     ),
   )
