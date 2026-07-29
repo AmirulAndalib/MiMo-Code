@@ -2318,6 +2318,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           yield* sweepOrphanAssistants(input.sessionID, idle)
           // Same recovery point, same idleness argument: repair tool parts a killed
           // process left stuck at `running`. Self-gated on idle (see the function).
+          //
+          // These two look mergeable into one message fetch. They are not:
+          // `sweepOrphanAssistants` reads EVERY slice (`agentID: "*"`) while this one
+          // reads the MAIN slice only, and that difference is load-bearing.
+          // `SessionProcessor` publishes status for the main slice alone, so a subagent
+          // slice can be mid-tool while the session status reads `idle` — scanning only
+          // main is what stops this sweep from rewriting a live subagent's `running`
+          // part. Sharing a fetch would mean taking the wider read and re-filtering
+          // here, which is precisely where that property would get lost. The cost is
+          // also smaller than it looks: this returns after one status lookup unless the
+          // session is genuinely idle.
           yield* sweepOrphanToolParts(input.sessionID)
         }
         const message = yield* createUserMessage(input)
