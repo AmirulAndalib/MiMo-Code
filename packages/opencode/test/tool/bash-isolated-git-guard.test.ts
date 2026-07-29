@@ -11,6 +11,7 @@ import { SessionID, MessageID } from "../../src/session/schema"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
 import { AppFileSystem } from "@mimo-ai/shared/filesystem"
 import { Plugin } from "../../src/plugin"
+import * as Git from "../../src/git"
 import { tmpdir } from "../fixture/fixture"
 
 // End-to-end proof that the cross-branch git guard is actually WIRED into the
@@ -25,6 +26,9 @@ const runtime = ManagedRuntime.make(
     Plugin.defaultLayer,
     Truncate.defaultLayer,
     Agent.defaultLayer,
+    // bash.ts resolves the repo git identity through the Git service (added when
+    // the worktree-identity work landed), so the runtime must provide it.
+    Git.defaultLayer,
   ),
 )
 
