@@ -50,6 +50,13 @@ describe("isolated-git-guard / blocked cross-branch operations", () => {
     "git worktree remove ../other",
     "git update-ref refs/heads/main HEAD",
     "git symbolic-ref HEAD refs/heads/main",
+    // Tags have NO "checked out elsewhere" protection: measured, `git tag -f v1
+    // HEAD` from a linked worktree prints `Updated tag 'v1'` and the parent
+    // checkout resolves the new value.
+    "git tag -f v1 HEAD",
+    "git tag --force release main",
+    "git tag -d v1",
+    "git tag --delete release",
     // git global options must not smuggle the subcommand past the guard
     "git --no-pager rebase main",
     "git -C /elsewhere/repo checkout main",
@@ -100,6 +107,10 @@ describe("isolated-git-guard / allowed child work", () => {
     "git branch",
     "git branch --show-current",
     "git symbolic-ref HEAD",
+    // Creating a NEW tag is additive — it cannot move a ref anyone else holds.
+    "git tag v2",
+    "git tag -a v2 -m release",
+    "git tag --list",
     // git reset / git pull are deliberately out of scope: neither can write a
     // ref other than the current worktree's own branch.
     "git reset --hard HEAD",

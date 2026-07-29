@@ -9,10 +9,33 @@ import { Global } from "../global"
  * An isolated child (`session create --isolate`) runs in an app-managed git
  * worktree under `<data>/worktree/<projectID>/<name>`. Every worktree of a
  * repository shares ONE ref store (`--git-common-dir`), so a git command run
- * from inside the child's worktree can mutate refs the MAIN checkout is sitting
- * on — `git rebase main`, `git checkout main`, `git branch -f main …` all reach
- * across and can move the main checkout's HEAD, corrupting the tree the user
- * and other agents are actively working in. This has happened for real.
+ * from inside the child's worktree can write refs that other checkouts depend
+ * on.
+ *
+ * WHAT ACTUALLY REACHES ACROSS — measured, not assumed (git 2.50.1, a repo with
+ * `main` checked out in the parent and a linked worktree on `feature`):
+ *
+ *   git update-ref refs/heads/main HEAD   → SUCCEEDS, moves main, no warning
+ *   git symbolic-ref                      → same class: writes a shared ref
+ *   git tag -f v1 HEAD                     → SUCCEEDS: `Updated tag 'v1'`
+ *   git branch -f <branch-not-checked-out> → SUCCEEDS
+ *   git push                               → writes the REMOTE; irreversible
+ *   git worktree <sub>                     → mutates the shared registry
+ *
+ * WHAT GIT ALREADY REFUSES, so this module is only a second line there:
+ *
+ *   git checkout main   → fatal: 'main' is already used by worktree at …
+ *   git branch -f main  → fatal: cannot force update the branch 'main' used by …
+ *
+ * AND ONE THING THAT IS NOT A HAZARD AT ALL:
+ *
+ *   git rebase main     → rebases the CURRENT branch onto main. It does not
+ *                         move main. An earlier version of this comment listed
+ *                         it (and the two git already refuses) as the
+ *                         justification; that was wrong. `rebase` stays gated
+ *                         because `git rebase <upstream> <branch>` takes a
+ *                         branch argument and rewrites THAT ref — the bare
+ *                         `git rebase main` form is not what the gate is for.
  *
  * The orchestrator prompt already tells children not to do this; this module
  * makes it a mechanism instead of a suggestion. It only fires for isolated
@@ -212,6 +235,18 @@ export function violates(input: {
       const pos = positionals(args)
       if (pos.length < 2 && !args.includes("--delete") && !args.includes("-d")) return
       return "`git symbolic-ref` repoints HEAD in the shared ref store"
+    }
+    case "tag": {
+      // Tags live in the shared ref store and — unlike a branch — carry NO
+      // "already checked out by another worktree" protection, so a force-update
+      // from here silently moves a tag the parent checkout and every other
+      // worktree resolve. Measured: `git tag -f v1 HEAD` from a linked worktree
+      // prints `Updated tag 'v1'` and the parent sees the new value.
+      // Creating a NEW tag is additive and allowed; only moving or deleting an
+      // existing one reaches across.
+      if (args.includes("-f") || args.includes("--force")) return "`git tag -f` moves a shared tag"
+      if (args.includes("-d") || args.includes("--delete")) return "`git tag -d` deletes a shared tag"
+      return
     }
     default:
       return
