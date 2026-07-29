@@ -451,15 +451,23 @@ export const layer = Layer.effect(
     /**
      * Outcome of a rebuild attempt that is allowed to WRITE a checkpoint first.
      *
+     * Named for what the attempt DID, not for the state it started in: reading a
+     * call site, `writer-failed` has to say that a writer was started and awaited
+     * and only then gave up. An earlier name (`no-checkpoint`) described the entry
+     * condition instead, which made `if (attempt === "no-checkpoint") compact()`
+     * read as "no checkpoint, so compact immediately" — the writer attempt is
+     * invisible at the call site, and that is exactly how it was misread.
+     *
      * - "rebuilt"       a boundary was inserted; context is freed.
-     * - "no-checkpoint" there was no checkpoint AND the writer failed / never
-     *                   ran / the wait bound expired. This is the ONLY state in
-     *                   which a caller may fall back to compaction.
+     * - "writer-failed" there was no checkpoint, so a writer WAS STARTED AND
+     *                   AWAITED here (bounded by `writerWaitMs`), and it then
+     *                   failed / never ran / the bound expired. This is the ONLY
+     *                   state in which a caller may fall back to compaction.
      * - "insert-failed" a checkpoint DOES exist but the boundary insert still
      *                   refused (degraded, e.g. renderRebuildContext empty).
      *                   Callers must report this honestly and must NOT compact.
      */
-    type RebuildAttempt = "rebuilt" | "no-checkpoint" | "insert-failed"
+    type RebuildAttempt = "rebuilt" | "writer-failed" | "insert-failed"
 
     // The single place that decides whether a rebuild may degrade to
     // compaction. Every caller — both auto context-overflow sites and the
@@ -491,10 +499,25 @@ export const layer = Layer.effect(
 
       // 2. Distinguish "nothing to rebuild from" (may compact) from "checkpoint
       //    present but the insert failed" (must not compact).
+      //
+      //    `hasCheckpoint` alone is NOT that distinction: it is a bare
+      //    `Bun.file(...).exists()` (checkpoint.ts:1021), and
+      //    `tryStartCheckpointWriter` scaffolds an EMPTY TEMPLATE at
+      //    checkpoint.ts:650 *before* spawning the writer. Since
+      //    `prune.fireCheckpoints` (prune.ts:289) runs immediately before the
+      //    overflow check, "template on disk, watermark not yet written" is a
+      //    NORMAL arrival state — and keying on the bare check classified it as
+      //    `insert-failed`, which skipped the start-and-wait below entirely and
+      //    silently defeated this whole helper. A usable checkpoint therefore
+      //    requires the boundary too, which is exactly what
+      //    `rebuildFromCheckpoint` needs (it reads `lastBoundary` at :411).
       const hasCP = yield* checkpoint
         .hasCheckpoint(input.sessionID)
         .pipe(Effect.catch(() => Effect.succeed(false)))
-      if (hasCP) return "insert-failed" as const
+      const boundary = hasCP
+        ? yield* checkpoint.lastBoundary(input.sessionID).pipe(Effect.catch(() => Effect.succeed(undefined)))
+        : undefined
+      if (hasCP && boundary !== undefined) return "insert-failed" as const
 
       // 3. No checkpoint → produce one on the spot. Reentrancy: the
       //    isWriterRunning probe skips a redundant request, and
@@ -526,7 +549,7 @@ export const layer = Layer.effect(
           Effect.timeout(input.writerWaitMs),
           Effect.catch(() => Effect.succeed<"success" | "failure" | "no-writer">("failure")),
         )
-      if (writerOutcome !== "success") return "no-checkpoint" as const
+      if (writerOutcome !== "success") return "writer-failed" as const
 
       // 4. Writer wrote a checkpoint — rebuild from it.
       if (yield* rebuildFromCheckpoint(input).pipe(Effect.catch(() => Effect.succeed(false))))
@@ -3468,7 +3491,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               continue
             }
 
-            if (attempt === "no-checkpoint") {
+            // A writer was started and awaited above (AUTO_WRITER_WAIT_MS) and
+            // still produced nothing — the ONE condition that may compact.
+            if (attempt === "writer-failed") {
               // THE single compaction fallback: no checkpoint existed AND the
               // writer failed / never ran / the bound expired. Note this is a
               // bare boundary insert, not an LLM summary — everything before it
@@ -4058,7 +4083,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               })
               if (attempt2 === "rebuilt") return "continue" as const
 
-              if (attempt2 === "no-checkpoint") {
+              // Same as above: the writer ran and failed — not "no checkpoint".
+              if (attempt2 === "writer-failed") {
                 // THE single compaction fallback (see the token-threshold site).
                 yield* compaction
                   .create({
@@ -4339,7 +4365,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             .pipe(Effect.catch(() => Effect.void)),
         }).pipe(Effect.catch(() => Effect.succeed("insert-failed" as const)))
 
-        if (attempt === "no-checkpoint") {
+        // A writer was started and awaited above (MANUAL_WRITER_WAIT_MS) and
+        // still produced nothing — only then may /rebuild degrade to compaction.
+        if (attempt === "writer-failed") {
           // No checkpoint AND the writer genuinely failed / never ran / the bound
           // expired — the ONE fallback condition, shared with the auto overflow
           // paths. An earlier revision of this branch deliberately did NOT
