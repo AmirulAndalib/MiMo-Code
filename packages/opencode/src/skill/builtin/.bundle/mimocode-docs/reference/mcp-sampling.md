@@ -200,3 +200,7 @@ model actually used, as `provider/model`), and `stopReason`
 | Policy `deny`, user declined, no session for an `ask` | `-1` |
 | Cancelled or timed out | `-32001` |
 | Provider failure, model init failure | `-32603` InternalError |
+
+`-32001` cannot be read alone: it is the SDK's own `RequestTimeout`, which the
+SDK's request timeout raises too, with a `data.timeout` our bound also sets. Only
+our errors carry `data.server`, so that field is what says whose deadline fired.
