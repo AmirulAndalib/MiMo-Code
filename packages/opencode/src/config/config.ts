@@ -275,10 +275,6 @@ const InfoSchema = Schema.Struct({
       reserved: Schema.optional(NonNegativeInt).annotate({
         description: "Token buffer reserved for checkpoint operations. Default: 20000.",
       }),
-      max_writer_failures: Schema.optional(PositiveInt).annotate({
-        description:
-          "Maximum consecutive writer failures per session before checkpointing stops retrying until process restart. Default: 3.",
-      }),
       fork: Schema.optional(Schema.Boolean).annotate({
         description:
           "Whether to fork the parent agent's message prefix into the writer session for prefix-cache reuse. Requires provider cache-breakpoint support. Default: false.",
