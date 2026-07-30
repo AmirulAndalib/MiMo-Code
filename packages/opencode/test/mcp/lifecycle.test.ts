@@ -16,6 +16,7 @@ interface MockClientState {
   resources: Array<{ name: string; uri: string; description?: string }>
   closed: boolean
   notificationHandlers: Map<unknown, (...args: any[]) => any>
+  requestHandlers: Map<unknown, (...args: any[]) => any>
   serverCapabilities: Record<string, unknown>
   toolCalls: Array<Record<string, unknown>>
   toolCallSignals: Array<AbortSignal | undefined>
@@ -56,6 +57,7 @@ function getOrCreateClientState(name?: string): MockClientState {
       resources: [],
       closed: false,
       notificationHandlers: new Map(),
+      requestHandlers: new Map(),
       serverCapabilities: {},
       toolCalls: [],
       toolCallSignals: [],
@@ -152,6 +154,13 @@ void mock.module("@modelcontextprotocol/sdk/client/index.js", () => ({
 
     setNotificationHandler(schema: unknown, handler: (...args: any[]) => any) {
       this._state?.notificationHandlers.set(schema, handler)
+    }
+
+    // Production registers a `sampling/createMessage` request handler on every
+    // client (see MCP.CLIENT_OPTIONS + McpSampling.serve), so the double has to
+    // offer the same method or every connect path throws.
+    setRequestHandler(schema: unknown, handler: (...args: any[]) => any) {
+      this._state?.requestHandlers.set(schema, handler)
     }
 
     getServerCapabilities() {
@@ -317,9 +326,14 @@ test(
         command: ["echo", "test"],
       })
 
+      // Kept as an EXACT toEqual so any unintended capability addition still
+      // fails here. `sampling: {}` is declared because production registers a
+      // sampling/createMessage request handler and the SDK refuses that
+      // registration otherwise; sampling.tools/context stay undeclared.
       expect(clientOptions).toEqual([
         {
           capabilities: {
+            sampling: {},
             experimental: {
               "com.xiaomi.mimo/turn-lifecycle": { version: 1 },
             },

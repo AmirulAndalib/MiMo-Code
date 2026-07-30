@@ -57,3 +57,36 @@ describe("mimocode-docs provider guidance", () => {
     expect(providers).toContain("Never put the API key, base URL, display name, or combined `provider/model` string")
   })
 })
+
+/**
+ * These docs are fed to the model AS INSTRUCTIONS, so a misclassification here
+ * does not merely read wrong — it teaches the model that a valid config shape is
+ * invalid. `mcp_sampling` is glob-keyed by MCP server name (the handler passes
+ * `patterns: [server]`), and the page's own example uses the glob-map form, so
+ * listing it as action-only contradicted the example two paragraphs below it.
+ */
+describe("mimocode-docs permission arity", () => {
+  test("classifies mcp_sampling as glob-keyed, not action-only", async () => {
+    const permissions = await Bun.file(path.join(root, "reference/permissions.md")).text()
+
+    const globLine = permissions.split("\n").find((line) => line.startsWith("Glob-keyed"))
+    const simpleLine = permissions.split("\n").find((line) => line.startsWith("Simple action-only"))
+    expect(globLine).toBeDefined()
+    expect(simpleLine).toBeDefined()
+    expect(globLine).toContain("`mcp_sampling`")
+    expect(simpleLine).not.toContain("`mcp_sampling`")
+    // The glob key is a server name, not a path or a command — say so, since the
+    // section is otherwise about paths and commands.
+    expect(permissions).toContain("except for `mcp_sampling`, where it is the MCP server name")
+    // The example that the old classification contradicted must still be present.
+    expect(permissions).toContain('"mcp_sampling": { "*": "ask", "mimo-cut": "allow" }')
+  })
+
+  test("states that a permission deny outranks mcp.<server>.sampling allow", async () => {
+    const permissions = await Bun.file(path.join(root, "reference/permissions.md")).text()
+
+    expect(permissions).toContain(
+      'A `deny` from either control wins: `mcp.<name>.sampling: "allow"` does **not** override `permission.mcp_sampling` denying that server.',
+    )
+  })
+})
