@@ -10,6 +10,7 @@ import { Instance } from "../../src/project/instance"
 import { AppRuntime } from "../../src/effect/app-runtime"
 import { EffectBridge } from "../../src/effect"
 import { McpSampling } from "../../src/mcp/sampling"
+import { DEFAULT_CHUNK_TIMEOUT } from "../../src/provider/provider"
 import { MCP } from "../../src/mcp/index"
 import { Permission } from "../../src/permission"
 import type { SessionID } from "../../src/session/schema"
@@ -407,24 +408,14 @@ async function harness(input: {
 function wireSampling(
   client: ClientType,
   serverName = "fixture",
-  timeoutMs?: number,
-  approvalTimeoutMs?: number,
   livenessIntervalMs?: number,
-  stallTimeoutMs?: number,
+  chunkTimeoutMs?: number,
 ) {
   return AppRuntime.runPromise(
     Effect.gen(function* () {
       const bridge = yield* EffectBridge.make()
       McpSampling.setActiveSession(client, SESSION)
-      McpSampling.serve(
-        serverName,
-        client as never,
-        bridge,
-        timeoutMs,
-        approvalTimeoutMs,
-        livenessIntervalMs,
-        stallTimeoutMs,
-      )
+      McpSampling.serve(serverName, client as never, bridge, livenessIntervalMs, chunkTimeoutMs)
     }),
   )
 }
@@ -743,19 +734,22 @@ describe("MCP client-side sampling, end to end", () => {
    * abort side never settles on its own, so the ask parked forever. `raceFirst`
    * (first side to *complete*, success or failure) is the fix.
    *
-   * THE TIMEOUT BOUND IS INJECTED (8 s) SO THIS TEST FAILS FAST RATHER THAN
-   * HANGING. It is not part of the property being proven: the assertions below
-   * require the *declined* answer well inside the bound, so a regression that
-   * re-parks the ask is caught by the bound reaping it with "sampling timed out"
-   * (code -32001) instead — a failure, not a pass. This is a bounded proof, not an
-   * unbounded one.
+   * THERE IS NO LONGER A BOUND TO INJECT AS A SAFETY NET, and that changes what
+   * catches a regression rather than whether one is caught. The total bound this
+   * test used to set to 8 s is gone (see the deadlines block), so a regression that
+   * re-parks the ask now hangs until Bun's own 60 s test timeout instead of being
+   * reaped at 8 s with "sampling timed out". Slower, still a FAILURE and never a
+   * pass — and the promptness assertion below is unchanged, so the property proven
+   * is the same one.
    */
   test("a human rejection answers the server with the declined error and drains the fiber", async () => {
-    const BOUND = 8_000
+    // The ceiling the answer must beat. Previously expressed as half the injected
+    // bound; kept at the same absolute value now that no bound is injected.
+    const PROMPT_CEILING = 4_000
     wire = stubProvider(TRANSCRIPT)
     await withInstance(config({ mcp: { fixture: { type: "local", command: ["true"] } } }), async () => {
       const h = await harness({ text: "hi" })
-      await wireSampling(h.client, "fixture", BOUND)
+      await wireSampling(h.client)
       const pending = h.client
         .callTool({ name: "transcribe_audio_fixture", arguments: {} }, CallToolResultSchema, { timeout: 30_000 })
         .catch(() => undefined)
@@ -784,8 +778,8 @@ describe("MCP client-side sampling, end to end", () => {
       expect(detail.code).toBe(-1)
       expect(String(detail.message)).toMatch(/declined/)
       expect(detail.data).toMatchObject({ server: "fixture" })
-      // Answered by the rejection, not by the bound expiring.
-      expect(Date.now() - rejectedAt).toBeLessThan(BOUND / 2)
+      // Answered by the rejection, not by anything expiring.
+      expect(Date.now() - rejectedAt).toBeLessThan(PROMPT_CEILING)
       // A refusal never reaches a model.
       expect(wire!.bodies).toHaveLength(0)
       // Polled, not synchronous: the server's request settles when our JSON-RPC
@@ -812,16 +806,16 @@ describe("MCP client-side sampling, end to end", () => {
    * the abort composition would still satisfy the existing cancellation test, which
    * polls for the outcome and so tolerates arriving at the bound; this does not.
    *
-   * The bound is injected LARGE (20 s) on purpose: the assertion is that the answer
-   * arrives in a small fraction of it, which is only possible via the abort path,
-   * since the only other exit is the bound itself.
+   * The promptness ceiling is 5 s and there is now NO outer bound at all — the
+   * approval wait is unbounded by design, so the only alternative to the abort path
+   * is hanging until Bun's 60 s test timeout. That makes this assertion strictly
+   * harder to satisfy by accident than when a 20 s bound stood behind it.
    */
-  test("an abort while the prompt is pending abandons it promptly, not at the timeout bound", async () => {
-    const BOUND = 20_000
+  test("an abort while the prompt is pending abandons it promptly, not by expiring", async () => {
     wire = stubProvider(TRANSCRIPT)
     await withInstance(config({ mcp: { fixture: { type: "local", command: ["true"] } } }), async () => {
       const h = await harness({ text: "hi", cancelAfterAsk: true })
-      await wireSampling(h.client, "fixture", BOUND)
+      await wireSampling(h.client)
       const startedAt = Date.now()
       const result = await h.client.callTool({ name: "transcribe_audio_fixture", arguments: {} }, CallToolResultSchema, {
         timeout: 30_000,
@@ -829,8 +823,8 @@ describe("MCP client-side sampling, end to end", () => {
       expect(result.isError).toBe(true)
       expect(h.samplingOutcomes).toHaveLength(1)
       expect(h.samplingOutcomes[0].ok).toBe(false)
-      // The abort answered it, not the bound: a 20 s bound against a 5 s ceiling,
-      // so a regression that fell back to the bound could not slip through.
+      // The abort answered it, and nothing else could have: the approval wait has no
+      // bound, so a regression that lost the abort composition would hang instead.
       expect(Date.now() - startedAt).toBeLessThan(5_000)
       expect(wire!.bodies).toHaveLength(0)
       await drainInFlight(h.client)
@@ -989,21 +983,26 @@ describe("MCP client-side sampling, end to end", () => {
   }, 60_000)
 
   /**
-   * The REQUEST-TIMEOUT bound. Cancellation (above) was the only exercised exit
-   * from a parked request; the timeout was implemented and untested. It matters
-   * more than a redundant second exit, because the upstream SDK drops a
-   * cancellation whose JSON-RPC id is 0 (pinned in the last describe block of this
-   * file), which makes this bound the ONLY thing that reaps the first
-   * server-initiated sampling request of a connection when the server abandons it.
+   * THE SILENCE BOUND, and the reaping it is responsible for. Cancellation (above)
+   * was the only exercised exit from a parked request; this exit was implemented and
+   * untested. It matters more than a redundant second exit, because the upstream SDK
+   * drops a cancellation whose JSON-RPC id is 0 (pinned in the last describe block of
+   * this file), which makes this the ONLY thing that reaps the first server-initiated
+   * sampling request of a connection when the server abandons it.
    *
-   * The bound is INJECTED (1 s) because a test cannot wait out 120 s. Production
-   * passes no bound at all, so it gets `serve`'s parameter default; that default's
-   * value is pinned by the DEFAULT_SAMPLING_TIMEOUT assertion below, which is a
-   * constant check and is deliberately NOT sensitive to the timeout path — no test
-   * that runs in CI time can be.
+   * IT USED TO BE THE TOTAL BOUND THAT DID THIS REAPING, and the rename in this test
+   * is not cosmetic: the total bound is gone, so what now catches a provider that
+   * never answers is the stall detector, and the error it produces names
+   * `phase: "stall"` and reports how much output arrived. That last field is the part
+   * a total bound could never have supplied — `chunks: 0` says the provider never
+   * produced anything, which is precisely the distinction this exit exists to draw.
+   *
+   * The bound is INJECTED (1 s) because a test cannot wait out the inherited 8
+   * minutes. Production passes nothing and takes the provider's own `chunkTimeout`;
+   * that the inherited value is genuinely what applies is proven separately by the
+   * config test in the deadlines block, which injects nothing at all.
    */
-  test("a provider that never responds is reaped at the timeout bound and leaves the in-flight set", async () => {
-    expect(McpSampling.DEFAULT_SAMPLING_TIMEOUT).toBe(120_000)
+  test("a provider that never responds is reaped at the silence bound and leaves the in-flight set", async () => {
     const BOUND = 1_000
     await withInstance(config({ mcp: { fixture: { type: "local", command: ["true"], sampling: "allow" } } }), async () => {
       // Warm the provider and the bundled adapter on a client with the DEFAULT
@@ -1026,7 +1025,7 @@ describe("MCP client-side sampling, end to end", () => {
       wire = hang
       try {
         const h = await harness({ text: "hi" })
-        await wireSampling(h.client, "fixture", BOUND)
+        await wireSampling(h.client, "fixture", undefined, BOUND)
         const result = await h.client.callTool(
           { name: "transcribe_audio_fixture", arguments: {} },
           CallToolResultSchema,
@@ -1043,24 +1042,27 @@ describe("MCP client-side sampling, end to end", () => {
         expect(detail.code).toBe(McpSampling.TIMEOUT_CODE)
         // OURS: the SDK's own timeout says "Request timed out" and carries no
         // `server`, so this pair cannot be satisfied by the SDK's error.
-        expect(String(detail.message)).toMatch(/sampling timed out/)
-        expect(detail.data).toMatchObject({ server: "fixture", timeout: BOUND })
+        expect(String(detail.message)).toMatch(/sampling stalled: the model produced no output/)
+        expect(detail.data).toMatchObject({ server: "fixture", phase: "stall", timeout: BOUND })
+        // NEVER STARTED, not "started and went quiet" — the distinction the removed
+        // total bound could not express.
+        expect(detail.data.chunks).toBe(0)
 
         // The model call was genuinely started and then abandoned mid-flight —
-        // this is the timeout path, not a pre-flight refusal.
+        // this is the expiry path, not a pre-flight refusal.
         expect(hang.bodies).toHaveLength(1)
 
-        // THE BOUND MUST REACH THE PROVIDER, not just our own waiting. The fiber
-        // interrupt that `Effect.timeoutOption` performs does NOT by itself cancel
-        // a promise already in flight, so without the abort composition in
-        // `handle` the HTTP call would run to completion after we gave up on it —
-        // exactly the leak this asserts against. Observed on the signal the
-        // provider was handed, so it cannot be satisfied by our own bookkeeping.
+        // THE BOUND MUST REACH THE PROVIDER, not just our own waiting. Interrupting
+        // the call fiber does NOT by itself cancel a promise already in flight, so
+        // without the abort composition in `handle` the HTTP call would run to
+        // completion after we gave up on it — exactly the leak this asserts against.
+        // Observed on the signal the provider was handed, so it cannot be satisfied
+        // by our own bookkeeping.
         expect(hang.signals).toHaveLength(1)
         expect(hang.signals[0]).toBeInstanceOf(AbortSignal)
         expect(hang.signals[0]!.aborted).toBe(true)
 
-        // THE POINT OF THE GAP: the timed-out fiber is removed from the in-flight
+        // THE POINT OF THE GAP: the expired fiber is removed from the in-flight
         // set. `serve`'s finally block runs before the JSON-RPC error is written,
         // so this is asserted SYNCHRONOUSLY; polling would also pass while a leak
         // drained on its own.
@@ -1218,20 +1220,26 @@ describe("MCP client-side sampling, end to end", () => {
  * DEADLINES AND KEEPALIVE.
  *
  * One wall-clock bound used to wrap a human decision and a machine call together,
- * and nothing kept the counterparty's own timer alive. These four tests pin the
- * symptoms of that, not the bookkeeping around it.
+ * and nothing kept the counterparty's own timer alive. These tests pin the symptoms
+ * of that, not the bookkeeping around it.
  *
- * EVERY BOUND HERE IS INJECTED so the suite runs in CI time. That is a property of
- * the tests, not of the proofs: production passes no bounds at all and gets 120 s
- * for the model call, 30 s for approval, 150 s as the ceiling. The default VALUES
- * are pinned separately by constant assertions; no test that finishes in seconds
- * can also wait out two minutes, and none of these pretends to.
+ * WHAT IS LEFT TO BOUND, after three invented bounds were removed: only SILENCE
+ * FROM THE PROVIDER, and its value is the provider layer's own `chunkTimeout`
+ * rather than a number sampling picked. There is no total bound and no approval
+ * bound, so two of the expiries these tests used to distinguish no longer exist.
+ *
+ * THE SILENCE BOUND IS INJECTED HERE so the suite runs in CI time. That is a
+ * property of the tests, not of the proofs: production passes nothing and inherits
+ * `DEFAULT_CHUNK_TIMEOUT` (8 minutes), or whatever the operator configured for that
+ * provider. Sub-second bounds prove the MECHANISM, never that a production value is
+ * right; the inherited value is pinned separately by a constant assertion, and no
+ * test that finishes in seconds also waits out eight minutes.
  */
 describe("sampling deadlines and liveness", () => {
   test("a liveness notification is emitted while the model call is in flight", async () => {
-    // 400 ms beats inside a 2.5 s model bound: several land, and the count is
+    // 400 ms beats inside a 2.5 s silence bound: several land, and the count is
     // asserted as a floor so a slow CI box cannot fail it.
-    const MODEL_BOUND = 2_500
+    const CHUNK_BOUND = 2_500
     const INTERVAL = 400
     await withInstance(config({ mcp: { fixture: { type: "local", command: ["true"], sampling: "allow" } } }), async () => {
       const warm = stubProvider(TRANSCRIPT)
@@ -1257,7 +1265,7 @@ describe("sampling deadlines and liveness", () => {
           // Generous, so the server's own timer is not what ends this.
           requestTimeout: 30_000,
         })
-        await wireSampling(h.client, "fixture", MODEL_BOUND, 20_000, INTERVAL)
+        await wireSampling(h.client, "fixture", INTERVAL, CHUNK_BOUND)
         const result = await h.client.callTool(
           { name: "transcribe_audio_fixture", arguments: {} },
           CallToolResultSchema,
@@ -1301,12 +1309,14 @@ describe("sampling deadlines and liveness", () => {
         expect(ticks).toEqual([...ticks].sort((a, b) => a - b))
         expect(new Set(ticks).size).toBe(ticks.length)
 
-        // AND IT CANNOT MASK A HUNG CALL. Beats went out the whole time and our
-        // own bound still fired: the notifications reset the PEER's timer, never
-        // ours. Asserted on the error the server actually received.
+        // AND IT CANNOT MASK A HUNG CALL. Beats went out the whole time and the
+        // silence bound still fired: the notifications reset the PEER's timer, never
+        // ours. Asserted on the error the server actually received. `phase: "stall"`
+        // is now the ONLY expiry a model call can produce — `"model"` and `"total"`
+        // were removed with their bounds.
         const detail = h.samplingOutcomes[0].detail as any
         expect(detail.code).toBe(McpSampling.TIMEOUT_CODE)
-        expect(detail.data).toMatchObject({ server: "fixture", phase: "model", timeout: MODEL_BOUND })
+        expect(detail.data).toMatchObject({ server: "fixture", phase: "stall", timeout: CHUNK_BOUND })
         expect(hang.signals[0]!.aborted).toBe(true)
         await h.client.close()
       } finally {
@@ -1317,7 +1327,7 @@ describe("sampling deadlines and liveness", () => {
   }, 60_000)
 
   test("no liveness notification is emitted when the server supplied no progress token", async () => {
-    const MODEL_BOUND = 1_500
+    const CHUNK_BOUND = 1_500
     const INTERVAL = 200
     await withInstance(config({ mcp: { fixture: { type: "local", command: ["true"], sampling: "allow" } } }), async () => {
       const warm = stubProvider(TRANSCRIPT)
@@ -1339,7 +1349,7 @@ describe("sampling deadlines and liveness", () => {
         const h = await harness({ text: "hi", requestTimeout: 30_000 })
         // Interval far below the bound, so "nothing was sent" is a real absence
         // and not simply a window too short for the first beat to fall in.
-        await wireSampling(h.client, "fixture", MODEL_BOUND, 20_000, INTERVAL)
+        await wireSampling(h.client, "fixture", INTERVAL, CHUNK_BOUND)
         const errors: Array<unknown> = []
         h.server.server.onerror = (error) => errors.push(error)
         const result = await h.client.callTool(
@@ -1363,31 +1373,137 @@ describe("sampling deadlines and liveness", () => {
     })
   }, 60_000)
 
-  test("an approval-phase expiry and a model-phase expiry are distinguishable by message and data", async () => {
-    const APPROVAL_BOUND = 900
-    const MODEL_BOUND = 900
-
-    // PHASE 1 — nobody answers the prompt. Policy is the default `ask`, and the
-    // test deliberately never replies.
-    let approval: any
+  test("an unanswered approval is NOT timed out: the prompt stays pending and a late answer still succeeds", async () => {
+    // THE BOUND THIS REPLACES. A 30 s wall-clock bound used to end the approval
+    // wait and report `phase: "approval"`. `permission/index.ts` has no such bound
+    // for an ordinary interactive ask — only a FORWARDED ask
+    // (FORWARD_DENY_TIMEOUT_MS) and a skip-all forced ask are bounded, and this ask
+    // is neither — so a TUI prompt waits indefinitely while sampling gave up.
+    //
+    // PROVING AN ABSENCE needs a positive observation, not a longer wait: the
+    // request must still be ALIVE after a stretch in which the old bound (had it
+    // been injectable, which it no longer is) would have killed it, and it must
+    // still be answerable. Both halves are asserted, so a machine that somehow
+    // resolved the prompt early fails the test rather than proving less.
+    const PENDING_WINDOW = 1_800
     await withInstance(config({ mcp: { fixture: { type: "local", command: ["true"] } } }), async () => {
       wire = stubProvider(TRANSCRIPT)
+      // Generous peer timeout: the SERVER's own timer must not be what ends this,
+      // or the test would be measuring the SDK rather than us.
       const h = await harness({ text: "hi", requestTimeout: 30_000 })
-      // Model bound left LARGE, so nothing but the approval bound can fire.
-      await wireSampling(h.client, "fixture", 20_000, APPROVAL_BOUND)
-      const result = await h.client.callTool({ name: "transcribe_audio_fixture", arguments: {} }, CallToolResultSchema, {
+      await wireSampling(h.client)
+      const call = h.client.callTool({ name: "transcribe_audio_fixture", arguments: {} }, CallToolResultSchema, {
         timeout: 30_000,
       })
-      expect(result.isError).toBe(true)
-      approval = h.samplingOutcomes[0].detail
-      // THE POINT OF SPLITTING THE BOUND: a human who never answers must not be
-      // reported as a slow model, and the model must not have been charged for it.
+      const ask = await waitForAsk()
+
+      // Deliberately answer NOTHING for a window several times the poll interval
+      // and well past the old 30 s bound's shape at test scale.
+      await new Promise((resolve) => setTimeout(resolve, PENDING_WINDOW))
+
+      // STILL PENDING, and the model was never charged for the wait.
+      const stillPending = await AppRuntime.runPromise(
+        Effect.gen(function* () {
+          const permission = yield* Permission.Service
+          return yield* permission.list()
+        }),
+      )
+      expect(stillPending.some((item) => item.id === ask.id)).toBe(true)
+      expect(McpSampling.inFlightCount(h.client)).toBe(1)
       expect((wire as Wire).bodies).toHaveLength(0)
+      // No error reached the server: nothing expired.
+      expect(h.samplingOutcomes).toHaveLength(0)
+
+      // A LATE ANSWER STILL WORKS. Under the old bound this reply arrived after the
+      // request had already been failed, so the transcript below could not exist.
+      await AppRuntime.runPromise(
+        Effect.gen(function* () {
+          const permission = yield* Permission.Service
+          yield* permission.reply({ requestID: ask.id, reply: "once" })
+        }),
+      )
+      const result = await call
+      expect(result.isError).toBeFalsy()
+      expect((result.content as Array<{ text: string }>)[0].text).toBe(TRANSCRIPT)
+      expect(h.samplingOutcomes[0].ok).toBe(true)
+      expect((wire as Wire).bodies).toHaveLength(1)
       await h.client.close()
     })
+  }, 90_000)
 
-    // PHASE 2 — the human is out of the picture (`allow`) and the provider hangs.
-    let model: any
+  test("a per-provider chunkTimeout from mimocode.json is what bounds a silent sampling call", async () => {
+    // THE REUSE, END TO END AND WITHOUT AN INJECTED PARAMETER. `wireSampling` passes
+    // no bound here, so the value can only have come from the operator's provider
+    // config — the same `chunkTimeout` key `provider.ts` reads for the main chat
+    // path. That is the whole point of deleting DEFAULT_SAMPLING_STALL_TIMEOUT: one
+    // knob, one value, no second number to drift.
+    const CONFIGURED = 700
+    const cfg = config({
+      mcp: { fixture: { type: "local", command: ["true"], sampling: "allow" } },
+      provider: {
+        [PROVIDER_ID]: {
+          ...PROVIDERS[PROVIDER_ID],
+          options: { ...PROVIDERS[PROVIDER_ID].options, chunkTimeout: CONFIGURED },
+        },
+      },
+    })
+    await withInstance(cfg, async () => {
+      const warm = stubProvider(TRANSCRIPT)
+      try {
+        const first = await harness({ text: "hi" })
+        await wireSampling(first.client)
+        await first.client.callTool({ name: "transcribe_audio_fixture", arguments: {} }, CallToolResultSchema, {
+          timeout: 30_000,
+        })
+        await first.client.close()
+      } finally {
+        warm.restore()
+      }
+      const hang = stubProviderHang()
+      wire = hang
+      try {
+        const h = await harness({ text: "hi", requestTimeout: 30_000 })
+        // NO bound injected — production wiring exactly.
+        await wireSampling(h.client)
+        const result = await h.client.callTool(
+          { name: "transcribe_audio_fixture", arguments: {} },
+          CallToolResultSchema,
+          { timeout: 30_000 },
+        )
+        expect(result.isError).toBe(true)
+        // THE CONFIGURED VALUE IS THE ONE REPORTED. Had sampling kept its own
+        // default this would read 45_000; had it ignored config it would read
+        // 480_000 and this test would have timed out instead.
+        const detail = h.samplingOutcomes[0].detail as any
+        expect(detail.code).toBe(McpSampling.TIMEOUT_CODE)
+        expect(detail.data).toMatchObject({ server: "fixture", phase: "stall", timeout: CONFIGURED })
+        expect(hang.bodies).toHaveLength(1)
+        expect(hang.signals[0]!.aborted).toBe(true)
+        await h.client.close()
+      } finally {
+        hang.release()
+        hang.restore()
+      }
+    })
+  }, 60_000)
+
+  test("a chunk timeout of 0 disables the silence bound instead of firing instantly", async () => {
+    // `provider.ts` treats 0 as "install no bound" (it creates no AbortController;
+    // its comment says "incl. 0 / negative to disable"). Sampling has to mean the
+    // same thing by it, and the failure mode if it does not is severe rather than
+    // cosmetic: `stallWatch` with `stallMs = 0` satisfies `Date.now() - lastAt >= 0`
+    // on its first poll, so a 0 arriving here would kill every sampling call
+    // immediately instead of removing a bound.
+    //
+    // ⚠️0 IS INJECTED RATHER THAN CONFIGURED, and that is a finding rather than a
+    // convenience. `chunkTimeout` is declared `PositiveInt`
+    // (`config/provider.ts:5,111`, i.e. `isGreaterThan(0)`), so `chunkTimeout: 0` is
+    // REJECTED BY THE CONFIG SCHEMA and no operator can write it in mimocode.json —
+    // which makes provider.ts's own "0 / negative to disable" affordance unreachable
+    // from config too. Measured, not assumed: configuring 0 here made the provider
+    // unresolvable and no HTTP call went out at all. So this guards the value
+    // arriving through the parameter, which is the only route that exists.
+    const ALIVE_WINDOW = 1_200
     await withInstance(config({ mcp: { fixture: { type: "local", command: ["true"], sampling: "allow" } } }), async () => {
       const warm = stubProvider(TRANSCRIPT)
       try {
@@ -1404,93 +1520,21 @@ describe("sampling deadlines and liveness", () => {
       wire = hang
       try {
         const h = await harness({ text: "hi", requestTimeout: 30_000 })
-        // Approval bound left LARGE, so nothing but the model bound can fire.
-        await wireSampling(h.client, "fixture", MODEL_BOUND, 20_000)
-        const result = await h.client.callTool(
-          { name: "transcribe_audio_fixture", arguments: {} },
-          CallToolResultSchema,
-          { timeout: 30_000 },
-        )
-        expect(result.isError).toBe(true)
-        model = h.samplingOutcomes[0].detail
+        await wireSampling(h.client, "fixture", undefined, 0)
+        const call = h.client
+          .callTool({ name: "transcribe_audio_fixture", arguments: {} }, CallToolResultSchema, { timeout: 30_000 })
+          .catch(() => undefined)
+        await new Promise((resolve) => setTimeout(resolve, ALIVE_WINDOW))
+        // The provider call went out and is STILL RUNNING: no bound was installed.
+        // With a `stallMs = 0` watcher this would have been aborted on the first poll,
+        // ~25 ms in, and `samplingOutcomes` would already hold a stall error.
         expect(hang.bodies).toHaveLength(1)
-        await h.client.close()
-      } finally {
+        expect(hang.signals[0]!.aborted).toBe(false)
+        expect(McpSampling.inFlightCount(h.client)).toBe(1)
+        expect(h.samplingOutcomes).toHaveLength(0)
+        // Let it finish so the tool call settles rather than leaking a promise.
         hang.release()
-        hang.restore()
-      }
-    })
-
-    // Both are still `-32001` and both still carry `data.server` — that field is
-    // the ONLY discriminator against the SDK's own `-32001`, since `data.timeout`
-    // is set by our bounds too.
-    expect(approval.code).toBe(McpSampling.TIMEOUT_CODE)
-    expect(model.code).toBe(McpSampling.TIMEOUT_CODE)
-    expect(approval.data).toMatchObject({ server: "fixture", phase: "approval", timeout: APPROVAL_BOUND })
-    expect(model.data).toMatchObject({ server: "fixture", phase: "model", timeout: MODEL_BOUND })
-    // DISTINGUISHABLE BY MESSAGE... (matched, not compared: `McpError` prefixes
-    // `MCP error -32001: ` on each hop, so the text the server sees is wrapped.)
-    expect(String(approval.message)).toMatch(/sampling timed out waiting for approval/)
-    expect(String(model.message)).toMatch(/sampling timed out waiting for the model/)
-    expect(String(approval.message)).not.toMatch(/waiting for the model/)
-    expect(String(model.message)).not.toMatch(/waiting for approval/)
-    // ...AND MACHINE-READABLY, which is the half a message cannot give a server.
-    expect(approval.data.phase).not.toBe(model.data.phase)
-  }, 90_000)
-
-  test("the absolute ceiling still fires for work no phase bound covers", async () => {
-    // The ceiling is `timeoutMs + approvalTimeoutMs` and exists for the stretch
-    // neither phase bound covers: config load, provider listing, model selection,
-    // provider initialisation.
-    //
-    // BECAUSE THE CEILING IS THE SUM, IT CAN ONLY PRECEDE A PHASE BOUND WHEN THAT
-    // PRE-PHASE STRETCH OVERRUNS THE APPROVAL BUDGET — which is exactly the
-    // condition it exists for. So this test does two things on purpose: it sets
-    // the approval budget to 1 ms (policy is `allow`, so that budget is never
-    // otherwise spent), and it SKIPS the provider warm-up every neighbouring test
-    // performs, letting the genuine cold adapter load be the overrun. Both halves
-    // are asserted rather than assumed — `hang.bodies` below proves the provider
-    // call did start inside the ceiling, so a machine slow enough to invalidate
-    // the setup fails the test instead of quietly proving less.
-    //
-    // The bounds are injected. In production the ceiling is 150 s and a phase
-    // bound normally fires first.
-    const APPROVAL_BOUND = 1
-    const MODEL_BOUND = 3_000
-    await withInstance(config({ mcp: { fixture: { type: "local", command: ["true"], sampling: "allow" } } }), async () => {
-      const hang = stubProviderHang()
-      wire = hang
-      try {
-        const h = await harness({
-          text: "hi",
-          requestTimeout: 30_000,
-          onprogress: () => {},
-        })
-        await wireSampling(h.client, "fixture", MODEL_BOUND, APPROVAL_BOUND, 100)
-        const result = await h.client.callTool(
-          { name: "transcribe_audio_fixture", arguments: {} },
-          CallToolResultSchema,
-          { timeout: 30_000 },
-        )
-        expect(result.isError).toBe(true)
-        // The provider call started, so the cold stretch fit inside the ceiling
-        // and the ceiling is genuinely what ended the request.
-        expect(hang.bodies).toHaveLength(1)
-        const detail = h.samplingOutcomes[0].detail as any
-        expect(detail.code).toBe(McpSampling.TIMEOUT_CODE)
-        expect(String(detail.message)).toMatch(/sampling timed out/)
-        // NO PHASE IS NAMED in the message, because the ceiling is the one case
-        // where we do not know which phase to blame.
-        expect(String(detail.message)).not.toMatch(/waiting for/)
-        expect(detail.data).toMatchObject({
-          server: "fixture",
-          phase: "total",
-          timeout: MODEL_BOUND + APPROVAL_BOUND,
-        })
-        // Heartbeats were being emitted throughout and did NOT extend it.
-        expect(h.progressNotifications.length).toBeGreaterThanOrEqual(1)
-        // And the ceiling reaches the provider, not just our own waiting.
-        expect(hang.signals[0]!.aborted).toBe(true)
+        await call
         await h.client.close()
       } finally {
         hang.release()
@@ -1501,32 +1545,29 @@ describe("sampling deadlines and liveness", () => {
 
   // ⚠️THIS TEST IS A CHANGE-DETECTOR, NOT A PROOF OF BEHAVIOUR, and it is labelled
   // as such rather than counted as coverage: every assertion below compares a
-  // constant against a literal, so the only way to make it fail is to edit the
-  // constant it pins. Nothing here exercises a code path, and no revert probe
-  // exists for it because there is no mechanism to revert — the behaviour these
-  // numbers govern is covered by the tests above, all of which inject their bounds.
-  test("the default bounds are the exported constants", () => {
-    expect(McpSampling.DEFAULT_SAMPLING_TIMEOUT).toBe(120_000)
-    expect(McpSampling.DEFAULT_SAMPLING_APPROVAL_TIMEOUT).toBe(30_000)
+  // constant against another constant or a literal, so the only way to make it fail
+  // is to edit what it pins. Nothing here exercises a code path, and no revert probe
+  // exists for it because there is no mechanism to revert. What it guards is the one
+  // thing a comment cannot: that the silence bound does not quietly become a second
+  // number again, and that the three deleted bounds do not come back.
+  test("the liveness interval is sampling's only self-chosen number, and the silence bound is the provider's", () => {
     expect(McpSampling.DEFAULT_LIVENESS_INTERVAL).toBe(15_000)
-    expect(McpSampling.DEFAULT_SAMPLING_STALL_TIMEOUT).toBe(45_000)
-    // The approval default must stay UNDER the SDK's own 60 s request timeout, so
-    // a peer that never opted into progress still has budget for the model after
-    // a maximal approval wait. This is the one mechanical constraint the number
-    // satisfies; it is not a derivation of how long a human takes.
-    expect(McpSampling.DEFAULT_SAMPLING_APPROVAL_TIMEOUT).toBeLessThan(60_000)
-    // Several beats must fit inside one peer timeout window.
+    // Several beats must fit inside one peer timeout window (the SDK's 60 s
+    // DEFAULT_REQUEST_TIMEOUT_MSEC). That is now the whole of this number's job: it
+    // used to be justified against the stall bound as well, and that ratio is void.
     expect(McpSampling.DEFAULT_LIVENESS_INTERVAL * 3).toBeLessThan(60_000)
-    // The stall bound's one mechanical constraint, the same way: at least two
-    // liveness notifications reach a peer before a stall is declared, so a peer
-    // never learns of a stall from silence. Like the others this is NOT a
-    // measurement of the slowest legitimate gap a provider produces — see the
-    // constant's comment for the false-positive risk that leaves open.
-    expect(McpSampling.DEFAULT_SAMPLING_STALL_TIMEOUT).toBe(McpSampling.DEFAULT_LIVENESS_INTERVAL * 3)
-    // And the stall detector must be able to fire before the backstop behind it,
-    // or the backstop would still be the operative guard and nothing would have
-    // changed.
-    expect(McpSampling.DEFAULT_SAMPLING_STALL_TIMEOUT).toBeLessThan(McpSampling.DEFAULT_SAMPLING_TIMEOUT)
+
+    // THE SAME VALUE, NOT A SECOND NUMBER. With nothing configured and nothing
+    // injected, sampling's silence bound IS the provider layer's, so the two cannot
+    // drift apart the way 45 s and 480 s had.
+    expect(McpSampling.chunkTimeoutFor({}, PROVIDER_ID)).toBe(DEFAULT_CHUNK_TIMEOUT)
+    expect(DEFAULT_CHUNK_TIMEOUT).toBe(480_000)
+
+    // AND THE DELETED BOUNDS STAY DELETED. Each was a number with no precedent in
+    // this repo, so re-exporting any of them would mean one had come back.
+    expect(Object.keys(McpSampling)).not.toContain("DEFAULT_SAMPLING_TIMEOUT")
+    expect(Object.keys(McpSampling)).not.toContain("DEFAULT_SAMPLING_STALL_TIMEOUT")
+    expect(Object.keys(McpSampling)).not.toContain("DEFAULT_SAMPLING_APPROVAL_TIMEOUT")
   })
 })
 
@@ -1541,10 +1582,11 @@ describe("sampling deadlines and liveness", () => {
  * contract a server sees.
  *
  * EVERY BOUND HERE IS INJECTED so the suite runs in CI time, exactly as in the
- * block above: production passes none and gets 45 s for the stall bound behind a
- * 120 s backstop. Sub-second bounds prove the MECHANISM, never that any particular
- * production value is right; the default values are pinned separately by the
- * constant assertions, and no test that finishes in seconds also waits out 45 s.
+ * block above: production passes none and inherits the provider's `chunkTimeout`
+ * (8 minutes by default), with no total bound behind it. Sub-second bounds prove
+ * the MECHANISM, never that any particular production value is right; the inherited
+ * value is pinned separately by the constant assertions, and no test that finishes
+ * in seconds also waits out eight minutes.
  */
 describe("sampling streams, and a stalled stream is observable", () => {
   test("the model call streams, and the single-result contract is unchanged", async () => {
@@ -1604,7 +1646,7 @@ describe("sampling streams, and a stalled stream is observable", () => {
       wire = trickle
       try {
         const h = await harness({ text: "hi", onprogress: () => {}, requestTimeout: 30_000 })
-        await wireSampling(h.client, "fixture", 25_000, 25_000, INTERVAL, 20_000)
+        await wireSampling(h.client, "fixture", INTERVAL, 20_000)
         const result = await h.client.callTool(
           { name: "transcribe_audio_fixture", arguments: {} },
           CallToolResultSchema,
@@ -1648,7 +1690,7 @@ describe("sampling streams, and a stalled stream is observable", () => {
   }, 90_000)
 
   test("a stalled stream is reported as a stall, distinctly from the model bound, and says whether output ever started", async () => {
-    const STALL_BOUND = 700
+    const CHUNK_BOUND = 700
 
     // PHASE 1 — the provider never answers at all. Nothing is produced, so the
     // stall must say `chunks: 0`.
@@ -1672,7 +1714,7 @@ describe("sampling streams, and a stalled stream is observable", () => {
         // Model bound and approval bound left LARGE on purpose: if the stall
         // detector did not exist, one of those would have to be what ends this, and
         // the assertions below would see `phase: "model"` or `phase: "total"`.
-        await wireSampling(h.client, "fixture", 25_000, 25_000, 10_000, STALL_BOUND)
+        await wireSampling(h.client, "fixture", 10_000, CHUNK_BOUND)
         const result = await h.client.callTool(
           { name: "transcribe_audio_fixture", arguments: {} },
           CallToolResultSchema,
@@ -1709,7 +1751,7 @@ describe("sampling streams, and a stalled stream is observable", () => {
       wire = trickle
       try {
         const h = await harness({ text: "hi", requestTimeout: 30_000 })
-        await wireSampling(h.client, "fixture", 25_000, 25_000, 10_000, STALL_BOUND)
+        await wireSampling(h.client, "fixture", 10_000, CHUNK_BOUND)
         const result = await h.client.callTool(
           { name: "transcribe_audio_fixture", arguments: {} },
           CallToolResultSchema,
@@ -1729,8 +1771,8 @@ describe("sampling streams, and a stalled stream is observable", () => {
     // is set by our bounds too.
     expect(never.code).toBe(McpSampling.TIMEOUT_CODE)
     expect(died.code).toBe(McpSampling.TIMEOUT_CODE)
-    expect(never.data).toMatchObject({ server: "fixture", phase: "stall", timeout: STALL_BOUND, chunks: 0 })
-    expect(died.data).toMatchObject({ server: "fixture", phase: "stall", timeout: STALL_BOUND })
+    expect(never.data).toMatchObject({ server: "fixture", phase: "stall", timeout: CHUNK_BOUND, chunks: 0 })
+    expect(died.data).toMatchObject({ server: "fixture", phase: "stall", timeout: CHUNK_BOUND })
     // THE OBSERVABILITY PAYOFF, and the reason this is not merely a shorter
     // timeout: the error itself distinguishes a provider that never produced
     // anything from one that produced and then died.
@@ -1738,12 +1780,17 @@ describe("sampling streams, and a stalled stream is observable", () => {
     expect(never.data.characters).toBe(0)
     expect(died.data.chunks).toBeGreaterThan(0)
     expect(died.data.characters).toBeGreaterThan(0)
-    // DISTINCT FROM THE TOTAL-BOUND EXPIRY, in words and in `phase`. (Matched, not
-    // compared: `McpError` prefixes `MCP error -32001: ` on each hop.)
+    // `"stall"` IS NOW THE WHOLE PHASE VOCABULARY. The three expiries this used to
+    // be distinguished from are gone with their bounds, so these are no longer
+    // "distinct from a sibling" checks but a guard that none of them comes back
+    // wearing this error's clothes. Asserted positively as well, so the check cannot
+    // pass merely because `phase` went missing. (Matched, not compared: `McpError`
+    // prefixes `MCP error -32001: ` on each hop.)
     for (const detail of [never, died]) {
       expect(String(detail.message)).toMatch(/sampling stalled: the model produced no output/)
       expect(String(detail.message)).not.toMatch(/waiting for the model/)
       expect(String(detail.message)).not.toMatch(/waiting for approval/)
+      expect(detail.data.phase).toBe("stall")
       expect(detail.data.phase).not.toBe("model")
       expect(detail.data.phase).not.toBe("total")
       expect(detail.data.phase).not.toBe("approval")
@@ -1754,11 +1801,11 @@ describe("sampling streams, and a stalled stream is observable", () => {
     // The stream runs for MANY TIMES the stall bound in total while never pausing
     // for as long as the bound. That combination is the whole property: a bound on
     // the GAP, not on the duration. Were the clock not reset per chunk, this call
-    // would be killed at ~STALL_BOUND despite producing output the entire time.
-    const STALL_BOUND = 900
+    // would be killed at ~CHUNK_BOUND despite producing output the entire time.
+    const CHUNK_BOUND = 900
     const GAP = 250
     const deltas = splitDeltas(TRANSCRIPT)
-    expect(deltas.length * GAP).toBeGreaterThan(STALL_BOUND * 2)
+    expect(deltas.length * GAP).toBeGreaterThan(CHUNK_BOUND * 2)
     const trickle = stubProviderTrickle({ deltas, gapMs: GAP })
     await withInstance(config({ mcp: { fixture: { type: "local", command: ["true"], sampling: "allow" } } }), async () => {
       const warm = stubProvider(TRANSCRIPT)
@@ -1775,7 +1822,7 @@ describe("sampling streams, and a stalled stream is observable", () => {
       wire = trickle
       try {
         const h = await harness({ text: "hi", requestTimeout: 30_000 })
-        await wireSampling(h.client, "fixture", 25_000, 25_000, 10_000, STALL_BOUND)
+        await wireSampling(h.client, "fixture", 10_000, CHUNK_BOUND)
         const started = Date.now()
         const result = await h.client.callTool(
           { name: "transcribe_audio_fixture", arguments: {} },
@@ -1787,7 +1834,7 @@ describe("sampling streams, and a stalled stream is observable", () => {
         expect((result.content as Array<{ text: string }>)[0].text).toBe(TRANSCRIPT)
         // It genuinely outlived the stall bound, so "it did not stall" is a real
         // result and not an artefact of the call finishing too fast to test.
-        expect(elapsed).toBeGreaterThan(STALL_BOUND)
+        expect(elapsed).toBeGreaterThan(CHUNK_BOUND)
         expect(h.samplingOutcomes[0].ok).toBe(true)
         await h.client.close()
       } finally {

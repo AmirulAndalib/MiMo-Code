@@ -124,54 +124,65 @@ If a sampling request arrives while no turn is in flight for that server, the
 |---|---|
 | Media (image/audio) per item, decoded | 20 MiB |
 | Text per item, and `systemPrompt` | 1 MiB |
-| Approval wait | 30 s |
-| No output from the model (stall) | 45 s |
-| Model call, end to end (backstop) | 120 s |
-| Whole request (absolute ceiling) | 150 s |
+| No output from the model (stall) | the provider's `chunkTimeout` — 8 min by default |
 
-The approval wait and the model call have **separate** bounds, and the expiry says
-which one ran out — `sampling timed out waiting for approval` with
-`data.phase: "approval"`, or `sampling timed out waiting for the model` with
-`data.phase: "model"`. A single shared bound made the model's budget a residual: a
-human taking 110 s of it left the model 10 s, and a human taking all of it meant
-the model was never called while the server was still told that *sampling* timed
-out. The ceiling is their sum and covers the stretch neither bound does (model
-selection, provider initialisation); its error names no phase, with
-`data.phase: "total"`.
+That is the whole list of time bounds, and it is inherited rather than chosen.
+There is **no total bound** on a sampling request, **no bound on the model call**
+end to end, and **no bound on the approval wait**. Sampling sets one number of its
+own — the 15 s liveness interval — and that one is a keepalive cadence, not a
+deadline.
 
-### The stall bound is the one that catches a hung provider
+### Why there is no total bound
+
+The main conversation path settles it. `src/session/llm.ts` puts no wall-clock
+ceiling on a model call at all: its retry schedule is "intentionally NOT capped",
+its own worst case is ~97 minutes, and it states the design in one line —
+*"bounding per-attempt latency via `chunkTimeout` is the primary lever for
+hang-time control"*. For a streaming call this repo's position is that **elapsed
+total is not a health signal; silence is.** Sampling calls the same provider
+through the same SDK, so a 2-minute total budget made it roughly 48× more
+impatient than ordinary chat for no stated reason. It is gone, along with the
+absolute ceiling that sat behind it.
+
+### Why there is no approval bound
+
+The same reason, measured in `src/permission/index.ts`: **an ordinary interactive
+permission prompt has no timeout.** Only a *forwarded* ask and a forced-ask under
+skip-permissions are bounded, and a sampling approval is neither. A TUI prompt
+waits as long as the operator needs, so sampling giving up at 30 s was stricter
+than anything comparable in the repo. The wait now ends when the operator answers,
+when the peer cancels (its own request timeout is what produces that), or when the
+MCP client closes.
+
+### The stall bound, and what it is not
 
 The model call **streams**, so "has this hung?" is answerable from evidence rather
-than guessed: 45 s with no output at all is a symptom, not a policy choice about
-how patient MiMoCode is. That bound is the primary defence, and it fails with
-`sampling stalled: the model produced no output` and `data.phase: "stall"`. Its
-clock covers both the wait for the first chunk and every gap between later chunks,
-and **every arriving chunk resets it** — a stream that produces slowly for ten
-minutes never stalls, while one that goes quiet for 45 s does.
+than guessed: no output at all is a symptom, not a policy choice about how patient
+MiMoCode is. It fails with `sampling stalled: the model produced no output` and
+`data.phase: "stall"`. Its clock covers both the wait for the first chunk and every
+gap between later chunks, and **every arriving chunk resets it** — a stream that
+produces slowly for ten minutes never stalls, while one that goes quiet does.
 
 The error also carries `data.chunks` and `data.characters`, which separate the two
 failures a server author would otherwise have to guess between: `chunks: 0` means
 the provider never produced anything, and a non-zero count means it started and
 then died.
 
-The 120 s model-call bound is therefore **no longer the primary guard** — it is the
-backstop for what a stall detector cannot see, namely a stream that keeps trickling
-just often enough never to look stalled and yet never finishes.
+**Its value is the provider layer's `chunkTimeout`, not a sampling-specific
+number.** Set `chunkTimeout` for a provider in `mimocode.json` and it governs
+sampling exactly as it governs ordinary chat; leave it unset and both get the 8
+minute default. Sampling used to carry its own 45 s bound for the same question,
+which disagreed with the provider layer by 10× — and in the wrong direction, since
+`chunkTimeout` is tuned to tolerate a real cold-path first token that can be ~5
+minutes silent. A tighter number would have failed calls ordinary chat survives.
 
-Neither of the two headline numbers is derived. **30 s is a placeholder awaiting a
-product decision** — nothing here measures how long an operator takes to answer a
-prompt. It satisfies exactly one mechanical constraint: it sits under the MCP SDK's
-60 s `DEFAULT_REQUEST_TIMEOUT_MSEC`, so a peer on that default still has budget for
-the model call after a maximal approval wait. **45 s is also a placeholder**, with
-its own single mechanical constraint — it is 3× the 15 s notification interval, so
-at least two notifications reach a peer before a stall is declared; nothing here
-measures the slowest legitimate gap a real provider produces, and the known risk is
-a **false positive** on a model that thinks for a long time before its first token.
-**120 s has no recorded derivation at all**, and it is 2× that SDK default;
-switching to streaming narrowed what it is responsible for without producing a
-derivation for it. Treat all three as open questions rather than as settled.
+What is deliberately **not** covered, stated rather than implied: a stream that
+trickles just often enough never to look stalled and never finishes, and the
+stretch before the model call (model selection, provider initialisation). Both are
+unbounded here — and both are equally unbounded on the main chat path, which is the
+basis for accepting them rather than inventing a number to cover them.
 
-Reaching any of these bounds aborts the provider call as well as MiMoCode's wait
+Reaching this bound aborts the provider call as well as MiMoCode's wait
 for it. That is not automatic: interrupting the Effect fiber does not cancel an
 HTTP request already in flight inside it, so the handler hands the provider the
 union of its own fiber's abort signal and the MCP request signal. Both a timeout
@@ -182,7 +193,8 @@ and a client teardown therefore reach the provider.
 While the model call is in flight MiMoCode emits periodic
 `notifications/progress` — every 15 s — so a server that asked for progress does
 not abandon a request that is still being worked on. Without them a server on the
-SDK's 60 s default gives up at 60 s while MiMoCode keeps working to 120 s.
+SDK's 60 s default gives up at 60 s while MiMoCode is still working, since
+MiMoCode imposes no deadline of its own on the model call.
 
 What it does and does not claim:
 
@@ -241,11 +253,10 @@ call, so an orphaned model call cannot outlive its transport.
 > JSON-RPC `requestId` is `0` is silently dropped
 > (`if (!notification.params.requestId) return` in `shared/protocol.js`), because
 > `0` is falsy. The *first* server-initiated request on a connection is therefore
-> uncancellable upstream; later ones cancel correctly. MiMoCode's own bounds are the
-> backstop that keeps even that case from leaking — the stall bound first if the
-> provider goes quiet, the 120 s model-call bound otherwise — and because those
-> bounds abort the provider call they end the model call rather than merely stopping
-> us waiting for it.
+> uncancellable upstream; later ones cancel correctly. The stall bound is what keeps
+> even that case from leaking, and it is the ONLY thing that does — which is why it
+> is not gated on the server having asked for progress. Because it aborts the
+> provider call it ends the model call rather than merely stopping us waiting for it.
 >
 > MiMoCode does not work around this, because it cannot: the id at risk belongs to
 > the **server's** outgoing request counter, which only the server can advance.
@@ -258,8 +269,10 @@ call, so an orphaned model call cannot outlive its transport.
 > The residual, stated plainly: **when a server abandons the first sampling request
 > it issues on a connection, MiMoCode does not learn of it, so that request keeps a
 > model call running — and a paid one — until one of MiMoCode's own bounds aborts
-> it: 45 s if the provider stops producing, otherwise up to 120 s.** The bounds cap
-> the waste; they do not avoid it.
+> it — which happens once the provider goes quiet for its `chunkTimeout`. If the
+> provider instead keeps trickling output indefinitely, nothing here stops it; that
+> is the same exposure ordinary chat carries, and it is accepted on the same terms.**
+> The bound caps the waste; it does not avoid it.
 
 ## Security boundaries
 
@@ -289,8 +302,9 @@ model actually used, as `provider/model`), and `stopReason`
 SDK's request timeout raises too, with a `data.timeout` our bound also sets. Only
 our errors carry `data.server`, so that field is what says whose deadline fired.
 
-Once it is ours, `data.phase` says which of our deadlines it was — `"approval"`,
-`"model"`, `"stall"` or `"total"` — and the message says the same in words. A
-`"stall"` additionally carries `data.chunks` and `data.characters`, so a server can
-tell a provider that never produced anything from one that stopped part way. A
-cancellation carries `data.server` with no `phase`, because nothing expired.
+Once it is ours, `data.phase` has exactly one possible value — `"stall"` — because
+that is now the only deadline MiMoCode imposes; the `"approval"`, `"model"` and
+`"total"` phases went away with the bounds that produced them. A `"stall"` carries
+`data.chunks` and `data.characters`, so a server can tell a provider that never
+produced anything from one that stopped part way. A cancellation carries
+`data.server` with no `phase`, because nothing expired.

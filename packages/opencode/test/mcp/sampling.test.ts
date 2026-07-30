@@ -1,5 +1,6 @@
 import { test, expect, describe } from "bun:test"
 import { McpSampling } from "../../src/mcp/sampling"
+import { DEFAULT_CHUNK_TIMEOUT } from "../../src/provider/provider"
 import { ModelCapability } from "../../src/provider/capability-registry"
 import { wav } from "./wav-fixture"
 
@@ -227,5 +228,54 @@ describe("SamplingError", () => {
     expect(mapped.code).toBe(-1)
     expect(mapped.message).toContain("nope")
     expect(mapped.data).toEqual({ server: "srv" })
+  })
+})
+
+/**
+ * THE SILENCE BOUND IS INHERITED, NOT INVENTED.
+ *
+ * Sampling used to carry `DEFAULT_SAMPLING_STALL_TIMEOUT = 45_000` for "the model
+ * produced nothing for this long". The repo already had that concept as the provider
+ * layer's `chunkTimeout` — same question, per-provider configurable, default 8
+ * minutes — so two numbers disagreed 10x about one fact. These tests pin the
+ * resolution that removed the second number.
+ */
+describe("chunkTimeoutFor", () => {
+  test("falls back to the provider layer's own default rather than a sampling-owned number", () => {
+    expect(McpSampling.chunkTimeoutFor({}, "anyprovider")).toBe(DEFAULT_CHUNK_TIMEOUT)
+    expect(McpSampling.chunkTimeoutFor({ provider: {} }, "anyprovider")).toBe(DEFAULT_CHUNK_TIMEOUT)
+    expect(McpSampling.chunkTimeoutFor({ provider: { anyprovider: {} } }, "anyprovider")).toBe(DEFAULT_CHUNK_TIMEOUT)
+    expect(McpSampling.chunkTimeoutFor({ provider: { anyprovider: { options: {} } } }, "anyprovider")).toBe(
+      DEFAULT_CHUNK_TIMEOUT,
+    )
+    // A different provider's setting must not leak across.
+    expect(
+      McpSampling.chunkTimeoutFor({ provider: { other: { options: { chunkTimeout: 1_234 } } } }, "anyprovider"),
+    ).toBe(DEFAULT_CHUNK_TIMEOUT)
+  })
+
+  test("honours the operator's per-provider chunkTimeout, the same key the main chat path reads", () => {
+    expect(
+      McpSampling.chunkTimeoutFor({ provider: { anyprovider: { options: { chunkTimeout: 60_000 } } } }, "anyprovider"),
+    ).toBe(60_000)
+    // 0 and negative pass THROUGH rather than falling back, because that is what
+    // they already mean to provider.ts: install no bound. `handle` reads them as
+    // "disabled"; turning them into the default here would silently re-enable a
+    // bound the operator switched off.
+    expect(
+      McpSampling.chunkTimeoutFor({ provider: { anyprovider: { options: { chunkTimeout: 0 } } } }, "anyprovider"),
+    ).toBe(0)
+    expect(
+      McpSampling.chunkTimeoutFor({ provider: { anyprovider: { options: { chunkTimeout: -1 } } } }, "anyprovider"),
+    ).toBe(-1)
+  })
+
+  test("treats a non-number as unconfigured, matching provider.ts's own typeof test", () => {
+    const bads: ReadonlyArray<unknown> = ["not a number", null, undefined, true, {}, []]
+    for (const bad of bads) {
+      expect(
+        McpSampling.chunkTimeoutFor({ provider: { anyprovider: { options: { chunkTimeout: bad } } } }, "anyprovider"),
+      ).toBe(DEFAULT_CHUNK_TIMEOUT)
+    }
   })
 })
