@@ -1095,12 +1095,7 @@ export function fromError(
 ): NonNullable<Assistant["error"]> {
   switch (true) {
     case e instanceof DOMException && e.name === "AbortError":
-      return new AbortedError(
-        { message: e.message },
-        {
-          cause: e,
-        },
-      ).toObject()
+      return new AbortedError({ message: e.message }, { cause: e }).toObject()
     // The AI SDK wraps the real failure in AI_RetryError after exhausting its
     // own maxRetries. Unwrap to the underlying error (.lastError) so the
     // APICallError branch below can extract statusCode/isRetryable/responseBody.
@@ -1134,6 +1129,18 @@ export function fromError(
           metadata: {
             code: (e as SystemError).code ?? "",
             syscall: (e as SystemError).syscall ?? "",
+            message: (e as SystemError).message ?? "",
+          },
+        },
+        { cause: e },
+      ).toObject()
+    case (e as SystemError)?.code === "ETIMEDOUT":
+      return new APIError(
+        {
+          message: (e as SystemError).message || "Request timed out",
+          isRetryable: true,
+          metadata: {
+            code: "ETIMEDOUT",
             message: (e as SystemError).message ?? "",
           },
         },

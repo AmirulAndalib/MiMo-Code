@@ -309,6 +309,26 @@ describe("session.retry.retryable", () => {
 })
 
 describe("session.message-v2.fromError", () => {
+  test("treats a normalized provider timeout as retryable", () => {
+    const result = MessageV2.fromError(Object.assign(new Error("Request timed out"), { code: "ETIMEDOUT" }), {
+      providerID,
+    })
+
+    expect(MessageV2.APIError.isInstance(result)).toBe(true)
+    expect((result as MessageV2.APIError).data.isRetryable).toBe(true)
+    expect((result as MessageV2.APIError).data.metadata?.code).toBe("ETIMEDOUT")
+    expect(SessionRetry.retryable(result as ReturnType<NamedError["toObject"]>)).toBeTruthy()
+  })
+
+  test("keeps AbortError terminal", () => {
+    const result = MessageV2.fromError(new DOMException("The user aborted the request", "AbortError"), {
+      providerID,
+    })
+
+    expect(MessageV2.AbortedError.isInstance(result)).toBe(true)
+    expect(SessionRetry.retryable(result as ReturnType<NamedError["toObject"]>)).toBeUndefined()
+  })
+
   test.concurrent(
     "converts ECONNRESET socket errors to retryable APIError",
     async () => {
