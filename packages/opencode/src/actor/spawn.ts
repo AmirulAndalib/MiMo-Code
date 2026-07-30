@@ -40,10 +40,10 @@ export const MAX_PRE_REACT = 3
 /** Cap on postStop ReAct re-entries per spawn. See MAX_PRE_REACT TODO. */
 export const MAX_POST_REACT = 3
 /**
- * T40 stall watchdog scan cadence. Sits between the per-step turn heartbeat and
- * the DEFAULT_LIVENESS_STALL_MS (90s) window, and just under the registry's own
- * 60s stuck-scan, so a genuinely stalled child is caught within ~one window of
- * flipping to `stalled` without hammering the DB.
+ * T40 stall watchdog scan cadence. Well inside the DEFAULT_LIVENESS_STALL_MS (6m)
+ * window and just under the registry's own 60s stuck-scan, so a genuinely stalled
+ * child is caught within one scan of flipping to `stalled` without hammering the
+ * DB.
  */
 export const WATCHDOG_SCAN_INTERVAL_MS = 45_000
 const RETURN_FORMAT_INSTRUCTION = `
@@ -960,17 +960,17 @@ export const layer = Layer.effect(
     // Event-driven stall detection: a background fiber periodically scans active
     // background actors (ActorRegistry.listActive → pending/running + background),
     // computes deriveLiveness for each, and when a PEER/subagent flips to
-    // `stalled` (running/pending but now-lastTurnTime > DEFAULT_LIVENESS_STALL_MS
-    // AND turnCount not advancing — deriveLiveness encodes exactly that) pushes
-    // ONE actor_notification{stalled} to its parent. Reuses the notifyTerminal
-    // shape (inbox.send actor_notification + renderActorNotification + a TUI
-    // toast) so stalled joins completed/failed/cancelled on one contract.
+    // `stalled` (running/pending but nothing has landed for the actor's slice for
+    // longer than DEFAULT_LIVENESS_STALL_MS — deriveLiveness encodes exactly that)
+    // pushes ONE actor_notification{stalled} to its parent. Reuses the
+    // notifyTerminal shape (inbox.send actor_notification + renderActorNotification
+    // + a TUI toast) so stalled joins completed/failed/cancelled on one contract.
     //
     // Debounce — the crux: `notified` holds the "sessionID:actorID" of actors we
     // have ALREADY warned about for their CURRENT stall episode. We emit only on
     // the not-yet-notified → stalled edge; while it STAYS stalled across ticks it
     // is in `notified` and we skip. We re-arm (delete the key) the moment the
-    // actor is no longer stalled — it resumed (turnCount advanced so
+    // actor is no longer stalled — it resumed (activity landed again, so
     // deriveLiveness reads `progressing`), went terminal, or vanished — so a
     // later re-stall notifies again. One notification per stall episode.
     const notified = new Set<string>()
@@ -1006,13 +1006,16 @@ export const layer = Layer.effect(
             sessionID: actor.sessionID,
             actorID: actor.actorID,
             description: actor.description,
-            lastTurnTime: actor.lastTurnTime,
+            // Same reference the classification used, for the same reason the
+            // notification carries it: an observability payload that reports the
+            // step clock while the predicate read the activity clock is a trap.
+            lastActivityTime: actor.lastActivityTime ?? actor.time.created,
             stalledDuration: stalledForMs,
           })
           .pipe(Effect.ignore)
         yield* Effect.promise(() =>
           Bus.publish(TuiEvent.ToastShow, {
-            message: `Child "${actor.description}" appears stalled`,
+            message: `Child "${actor.description}" appears stalled (no activity for ${Math.floor(stalledForMs / 1000)}s)`,
             variant: "info",
           }),
         ).pipe(Effect.ignore)
@@ -1029,7 +1032,11 @@ export const layer = Layer.effect(
         if (live === "stalled") {
           if (notified.has(key)) continue // already warned this episode — debounce
           notified.add(key)
-          yield* notifyStalled(actor, now - actor.lastTurnTime)
+          // Report the quantity the classification actually used — silence since
+          // the last part write, or since spawn when nothing has landed — not
+          // time since the last completed step, which deriveLiveness no longer
+          // reads. A number that disagrees with its own predicate is a bug.
+          yield* notifyStalled(actor, now - (actor.lastActivityTime ?? actor.time.created))
           continue
         }
         // Not stalled (progressing/terminal) → re-arm so a future re-stall notifies.

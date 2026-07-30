@@ -955,10 +955,10 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
           return { title: "Child sessions: 0", output: "No child sessions.", metadata: {} as Metadata }
         // The actor row's status enum is only pending|running|idle; a terminal
         // idle carries a lastOutcome (success/failure/cancelled). deriveLiveness
-        // maps (status, lastOutcome, lastTurnTime) to a display bucket:
-        // running/pending split into progressing vs stalled by whether the last
-        // turn advanced within the staleness window (updateTurn bumps
-        // last_turn_time per step — recent == progressing); terminal idle rows
+        // maps (status, lastOutcome, lastActivityTime) to a display bucket:
+        // running/pending split into progressing vs stalled by whether anything
+        // LANDED within the staleness window (the PartUpdated projector bumps
+        // last_activity_time per part — recent == progressing); terminal idle rows
         // map to success(→idle)/failure/cancelled. Never fabricate a state the
         // data lacks: a missing actor row is a plain idle.
         const now = Date.now()
@@ -981,7 +981,7 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
         }
         const groups: { bucket: keyof typeof counts; heading: string }[] = [
           { bucket: "progressing", heading: "In progress — progressing (running/pending, advancing)" },
-          { bucket: "stalled", heading: "In progress — stalled (running/pending, no recent turn)" },
+          { bucket: "stalled", heading: "In progress — stalled (running/pending, no recent activity)" },
           { bucket: "idle", heading: "Finished / idle" },
           { bucket: "failed", heading: "Failed" },
           { bucket: "cancelled", heading: "Cancelled" },
@@ -1056,8 +1056,9 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
         // Derived pull-side liveness for one child. A peer registers with
         // session_id === actor_id === its own child id (see the create branch /
         // Actor.spawnPeer), so key the row by (childID, childID). deriveLiveness
-        // turns the honest registry fields (status/lastOutcome/lastTurnTime) into
-        // progressing|stalled|terminal — never fabricating a state the row lacks.
+        // turns the honest registry fields (status/lastOutcome/lastActivityTime)
+        // into progressing|stalled|terminal — never fabricating a state the row
+        // lacks.
         const childID = op.sessionID
         const found = yield* actorReg.liveness(childID as SessionID, childID)
         if (!found)
@@ -1066,16 +1067,24 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
             output: `No actor registered for ${childID}. It may not exist or never started.`,
             metadata: { sessionID: childID } as Metadata,
           }
-        const ageMs = Date.now() - found.actor.lastTurnTime
-        const ageStr = ageMs < 60_000 ? `${Math.floor(ageMs / 1000)}s` : `${Math.floor(ageMs / 60_000)}m`
+        const age = (ms: number) => (ms < 60_000 ? `${Math.floor(ms / 1000)}s` : `${Math.floor(ms / 60_000)}m`)
+        const nowMs = Date.now()
+        // Report the age the verdict was computed from FIRST. `?? time.created` is
+        // the same fallback deriveLiveness uses, and the column is nullable so it
+        // arrives as `null` — see AGENTS.md "Reading a nullable column".
+        const activityAge = age(nowMs - (found.actor.lastActivityTime ?? found.actor.time.created))
+        // turnCount/lastTurnTime stay on the dump as step bookkeeping, explicitly
+        // labelled as not being what the liveness above was derived from.
+        const turnAge = age(nowMs - found.actor.lastTurnTime)
         const outcome = found.actor.lastOutcome ? ` (last outcome: ${found.actor.lastOutcome})` : ""
         return {
           title: `Status ${childID}: ${found.liveness}`,
           output:
             `${childID} — ${found.liveness}${outcome}\n` +
             `  raw status: ${found.actor.status}\n` +
+            `  lastActivityTime: ${found.actor.lastActivityTime ?? "(none)"} (${activityAge} ago) — liveness derives from this\n` +
             `  turnCount: ${found.actor.turnCount}\n` +
-            `  lastTurnTime: ${found.actor.lastTurnTime} (${ageStr} ago)`,
+            `  lastTurnTime: ${found.actor.lastTurnTime} (${turnAge} ago) — last COMPLETED step, not the liveness input`,
           metadata: { sessionID: childID } as Metadata,
         }
       }

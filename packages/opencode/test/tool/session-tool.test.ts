@@ -10,6 +10,7 @@ import { Agent } from "../../src/agent/agent"
 import { Actor } from "../../src/actor/spawn"
 import { ActorRegistry } from "../../src/actor/registry"
 import { ActorRegistryTable } from "../../src/actor/actor.sql"
+import { DEFAULT_LIVENESS_STALL_MS } from "../../src/actor/schema"
 import { Database, and, eq } from "../../src/storage"
 import { Bus } from "../../src/bus"
 import { TuiEvent } from "../../src/cli/cmd/tui/event"
@@ -628,6 +629,12 @@ describe("session tool", () => {
         expect(running.output).toContain("progressing")
         expect(running.output).toContain("turnCount:")
         expect(running.output).toContain("lastTurnTime:")
+        // The dump must also show the quantity the verdict was DERIVED from, and
+        // label which of the two clocks that is. Showing only the step clock next
+        // to an activity-derived verdict is how this signal got misread.
+        expect(running.output).toContain("lastActivityTime:")
+        expect(running.output).toContain("liveness derives from this")
+        expect(running.output).toContain("not the liveness input")
 
         // Flip to a terminal idle+success: derived liveness surfaces the outcome.
         yield* actorReg.updateStatus(SessionID.make(childID), childID, { status: "idle", lastOutcome: "success" })
@@ -671,12 +678,18 @@ describe("session tool", () => {
         )
         const progID = prog.metadata.sessionID!
 
-        // A stalled peer: running, having run at least one turn, but with an old
-        // last_turn_time far past the default staleness window → deriveLiveness
-        // reports stalled. Force status running and turn_count >= 1 (a
-        // not-yet-started child with turnCount 0 is exempt from the stall path),
-        // then age its last_turn_time via a direct row update (updateTurn would
-        // bump last_turn_time to now; we need it OLD while turn_count stays put).
+        // A stalled peer: running, but with nothing landed for far longer than the
+        // default staleness window → deriveLiveness reports stalled. Age
+        // last_activity_time (the field the derivation reads) via a direct row
+        // update; last_turn_time is aged with it so the row stays internally
+        // consistent.
+        // REWRITTEN: this used a bare `5 * 60_000`, justified in-line as "past the
+        // 90s stall window and comfortably inside the 10-minute abandonment bound".
+        // The window is now 6 minutes, so that literal quietly became a
+        // `progressing` fixture asserting `stalled`. Derived from the constant
+        // instead — one minute past the window, still well inside the bound — so it
+        // cannot silently invert again.
+        const silentForMs = DEFAULT_LIVENESS_STALL_MS + 60_000
         const stalled = yield* tool.execute(
           { operation: { action: "create", task: "wedged", mode: "build", title: "Wedged" } },
           ctx(parent.id),
@@ -687,7 +700,11 @@ describe("session tool", () => {
           Database.use((db) =>
             db
               .update(ActorRegistryTable)
-              .set({ last_turn_time: Date.now() - 10 * 60_000, turn_count: 1 })
+              .set({
+                last_turn_time: Date.now() - silentForMs,
+                last_activity_time: Date.now() - silentForMs,
+                turn_count: 1,
+              })
               .where(and(eq(ActorRegistryTable.session_id, SessionID.make(stalledID)), eq(ActorRegistryTable.actor_id, stalledID)))
               .run(),
           ),
@@ -696,7 +713,10 @@ describe("session tool", () => {
         const result = yield* tool.execute({ operation: { action: "list" } }, ctx(parent.id))
 
         expect(result.output).toContain("In progress — progressing (running/pending, advancing) (1):")
-        expect(result.output).toContain("In progress — stalled (running/pending, no recent turn) (1):")
+        // Heading reworded with the signal: the bucket means "no recent ACTIVITY",
+        // not "no recent turn" — a child mid-step advances activity and never lands
+        // in this bucket.
+        expect(result.output).toContain("In progress — stalled (running/pending, no recent activity) (1):")
         expect(result.output).toContain("(1 progressing, 1 stalled)")
         // Each child lands under its own group.
         const progSection = result.output.split("In progress — progressing")[1]?.split("In progress — stalled")[0] ?? ""

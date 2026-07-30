@@ -41,6 +41,7 @@ function fromRow(row: ActorRow): Actor {
     tools: row.tools ?? undefined,
     lastTurnTime: row.last_turn_time,
     turnCount: row.turn_count,
+    lastActivityTime: row.last_activity_time ?? undefined,
     lastError: row.last_error ?? undefined,
     time: {
       created: row.time_created,
@@ -145,6 +146,10 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
         tools: input.tools ?? null,
         last_turn_time: now,
         turn_count: 0,
+        // No part has landed for this actor yet. NULL, not `now`: deriveLiveness
+        // falls back to time_created when activity is absent, so seeding a fake
+        // activity timestamp here would assert something happened that did not.
+        last_activity_time: null,
         last_error: null,
         instance_id: instanceID,
         time_completed: null,
