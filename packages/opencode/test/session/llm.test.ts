@@ -785,19 +785,25 @@ describe("session.llm.stream", () => {
     })
   })
 
-  test("aborts an OpenAI request that stalls before response headers", async () => {
+  test("retries an OpenAI request that times out before response headers", async () => {
     const server = state.server
     if (!server) throw new Error("Server not initialized")
 
     const source = await loadFixture("openai", "gpt-5.2")
-    const request = deferred<Capture>()
+    const first = deferred<Capture>()
+    const second = deferred<Capture>()
     state.queue.push({
       path: "/responses",
-      resolve: request.resolve,
+      resolve: first.resolve,
       response: async () => {
         await Bun.sleep(500)
         return createEventResponse([], true)
       },
+    })
+    state.queue.push({
+      path: "/responses",
+      resolve: second.resolve,
+      response: createEventResponse([], true),
     })
 
     await using tmp = await tmpdir({
@@ -854,17 +860,18 @@ describe("session.llm.stream", () => {
               system: ["You are a helpful assistant."],
               messages: [{ role: "user", content: "Hello" }],
               tools: {},
-              retries: 0,
+              retries: 1,
             })
             .pipe(Stream.runCollect),
         )
 
-        expect(Date.now() - started).toBeLessThan(400)
-        expect(Array.from(events).some((event) => event.type === "error")).toBe(true)
-        expect((await request.promise).url.pathname.endsWith("/responses")).toBe(true)
+        expect(Date.now() - started).toBeLessThan(3_000)
+        expect(Array.from(events).some((event) => event.type === "error")).toBe(false)
+        expect((await first.promise).url.pathname.endsWith("/responses")).toBe(true)
+        expect((await second.promise).url.pathname.endsWith("/responses")).toBe(true)
       },
     })
-  })
+  }, 15_000)
 
   test("accepts user image attachments as data URLs for OpenAI models", async () => {
     const server = state.server
