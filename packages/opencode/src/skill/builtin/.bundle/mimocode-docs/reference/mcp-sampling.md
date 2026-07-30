@@ -124,13 +124,59 @@ If a sampling request arrives while no turn is in flight for that server, the
 |---|---|
 | Media (image/audio) per item, decoded | 20 MiB |
 | Text per item, and `systemPrompt` | 1 MiB |
-| Whole request, including the approval wait | 120 s |
+| Approval wait | 30 s |
+| Model call | 120 s |
+| Whole request (absolute ceiling) | 150 s |
 
-Reaching the 120 s bound aborts the provider call as well as MiMoCode's wait for
-it. That is not automatic: interrupting the Effect fiber does not cancel an HTTP
-request already in flight inside it, so the handler hands the provider the union
-of its own fiber's abort signal and the MCP request signal. Both the timeout and
-a client teardown therefore reach the provider.
+The approval wait and the model call have **separate** bounds, and the expiry says
+which one ran out — `sampling timed out waiting for approval` with
+`data.phase: "approval"`, or `sampling timed out waiting for the model` with
+`data.phase: "model"`. A single shared bound made the model's budget a residual: a
+human taking 110 s of it left the model 10 s, and a human taking all of it meant
+the model was never called while the server was still told that *sampling* timed
+out. The ceiling is their sum and covers the stretch neither bound does (model
+selection, provider initialisation); its error names no phase, with
+`data.phase: "total"`.
+
+Neither default number is derived. **30 s is a placeholder awaiting a product
+decision** — nothing here measures how long an operator takes to answer a prompt.
+It satisfies exactly one mechanical constraint: it sits under the MCP SDK's 60 s
+`DEFAULT_REQUEST_TIMEOUT_MSEC`, so a peer on that default still has budget for the
+model call after a maximal approval wait. **120 s has no recorded derivation at
+all**, and it is 2× that SDK default; treat both as open questions rather than as
+settled.
+
+Reaching any of these bounds aborts the provider call as well as MiMoCode's wait
+for it. That is not automatic: interrupting the Effect fiber does not cancel an
+HTTP request already in flight inside it, so the handler hands the provider the
+union of its own fiber's abort signal and the MCP request signal. Both a timeout
+and a client teardown therefore reach the provider.
+
+### Keeping a server's own timer alive
+
+While the model call is in flight MiMoCode emits periodic
+`notifications/progress` — every 15 s — so a server that asked for progress does
+not abandon a request that is still being worked on. Without them a server on the
+SDK's 60 s default gives up at 60 s while MiMoCode keeps working to 120 s.
+
+Three things this is **not**:
+
+- **It is liveness, not progress.** The model call is `generateText`, which is
+  non-streaming, so there is no token-level signal and no completion fraction
+  exists. `progress` is a monotonic tick count and `total` is deliberately
+  omitted, so nothing can be read as a percentage.
+- **It is necessary, not sufficient.** Resetting the timer is the *requester's*
+  choice: the SDK's `resetTimeoutOnProgress` defaults to `false`, so a server
+  that did not pass it ignores these notifications entirely and still times out at
+  its own deadline. MiMoCode cannot make that decision for it.
+- **It cannot extend MiMoCode's own bounds.** The notifications reset the peer's
+  timer only. The model call is still cut off at its own bound no matter how many
+  went out, so a hung provider cannot be kept alive by its own keepalive.
+
+Nothing is sent unless the server asked for it. The progress token belongs to the
+requester — the SDK mints one only when its caller passed `onprogress`, and
+MiMoCode reads it back off the request's `_meta`. No token means no notifications
+at all.
 
 The media cap is a **client-side safety limit**, not a claim about any
 provider's real limit. It exists so a buggy or hostile server cannot push an
@@ -159,7 +205,7 @@ call, so an orphaned model call cannot outlive its transport.
 > JSON-RPC `requestId` is `0` is silently dropped
 > (`if (!notification.params.requestId) return` in `shared/protocol.js`), because
 > `0` is falsy. The *first* server-initiated request on a connection is therefore
-> uncancellable upstream; later ones cancel correctly. The 120 s request timeout
+> uncancellable upstream; later ones cancel correctly. The 120 s model-call bound
 > is the backstop that keeps even that case from leaking, and because that bound
 > aborts the provider call it ends the model call rather than merely stopping us
 > waiting for it.
@@ -174,8 +220,8 @@ call, so an orphaned model call cannot outlive its transport.
 >
 > The residual, stated plainly: **when a server abandons the first sampling request
 > it issues on a connection, MiMoCode does not learn of it, so that request keeps a
-> model call running — and a paid one — for up to 120 s before the bound aborts
-> it.** The bound caps the waste; it does not avoid it.
+> model call running — and a paid one — for up to 120 s before the model-call bound
+> aborts it.** The bound caps the waste; it does not avoid it.
 
 ## Security boundaries
 
@@ -204,3 +250,7 @@ model actually used, as `provider/model`), and `stopReason`
 `-32001` cannot be read alone: it is the SDK's own `RequestTimeout`, which the
 SDK's request timeout raises too, with a `data.timeout` our bound also sets. Only
 our errors carry `data.server`, so that field is what says whose deadline fired.
+
+Once it is ours, `data.phase` says which of our deadlines it was — `"approval"`,
+`"model"` or `"total"` — and the message says the same in words. A cancellation
+carries `data.server` with no `phase`, because nothing expired.

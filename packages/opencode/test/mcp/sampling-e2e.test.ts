@@ -195,6 +195,12 @@ interface Harness {
   samplingOutcomes: Array<{ ok: boolean; detail: unknown }>
   /** True while the fixture tool is mid-execution. */
   toolActive: () => boolean
+  /**
+   * `notifications/progress` messages that actually reached the server. Recorded
+   * off the transport, not off our own bookkeeping, so a test cannot pass because
+   * we counted an intention rather than a delivered message.
+   */
+  progressNotifications: Array<any>
 }
 
 /**
@@ -207,6 +213,16 @@ async function harness(input: {
   text?: string
   /** Abort the sampling request once a permission prompt is pending. */
   cancelAfterAsk?: boolean
+  /**
+   * Passed straight through to `server.server.request`. Supplying it is the ONLY
+   * way a progress token comes into existence: the SDK mints one solely when its
+   * caller asked for progress (`if (options?.onprogress) { ... progressToken:
+   * messageId }`, shared/protocol.js). Omitting it models a server that never
+   * opted in — and then our side must send nothing at all.
+   */
+  onprogress?: (progress: any) => void
+  /** The server's own per-request timeout; left at the SDK's 60 s when absent. */
+  requestTimeout?: number
 }): Promise<Harness> {
   const server = new McpServer({ name: "fixture", version: "1.0.0" })
   const samplingOutcomes: Array<{ ok: boolean; detail: unknown }> = []
@@ -256,7 +272,11 @@ async function harness(input: {
             },
           },
           CreateMessageResultSchema,
-          { signal: controller.signal },
+          {
+            signal: controller.signal,
+            ...(input.onprogress ? { onprogress: input.onprogress } : {}),
+            ...(input.requestTimeout !== undefined ? { timeout: input.requestTimeout } : {}),
+          },
         )
         samplingOutcomes.push({ ok: true, detail: result })
         return { content: [{ type: "text", text: (result.content as { text: string }).text }] }
@@ -275,16 +295,31 @@ async function harness(input: {
   const client = new Client({ name: "mimocode", version: "test" }, MCP.CLIENT_OPTIONS)
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
   await Promise.all([client.connect(clientTransport), server.server.connect(serverTransport)])
-  return { client, server, samplingOutcomes, toolActive: () => active }
+  // Tap the SERVER's inbound transport after connect. `Protocol.connect` chains
+  // whatever `onmessage` it found, so wrapping the one it installed keeps the
+  // SDK's own dispatch intact while letting us see the raw wire messages.
+  const progressNotifications: Array<any> = []
+  const installed = serverTransport.onmessage?.bind(serverTransport)
+  serverTransport.onmessage = (message: any, extra: any) => {
+    if (message?.method === "notifications/progress") progressNotifications.push(message)
+    installed?.(message, extra)
+  }
+  return { client, server, samplingOutcomes, toolActive: () => active, progressNotifications }
 }
 
 /** Register production sampling handling on a client inside a live Instance. */
-function wireSampling(client: ClientType, serverName = "fixture", timeoutMs?: number) {
+function wireSampling(
+  client: ClientType,
+  serverName = "fixture",
+  timeoutMs?: number,
+  approvalTimeoutMs?: number,
+  livenessIntervalMs?: number,
+) {
   return AppRuntime.runPromise(
     Effect.gen(function* () {
       const bridge = yield* EffectBridge.make()
       McpSampling.setActiveSession(client, SESSION)
-      McpSampling.serve(serverName, client as never, bridge, timeoutMs)
+      McpSampling.serve(serverName, client as never, bridge, timeoutMs, approvalTimeoutMs, livenessIntervalMs)
     }),
   )
 }
@@ -1072,6 +1107,293 @@ describe("MCP client-side sampling, end to end", () => {
       await client.close()
     })
   }, 60_000)
+})
+
+/**
+ * DEADLINES AND KEEPALIVE.
+ *
+ * One wall-clock bound used to wrap a human decision and a machine call together,
+ * and nothing kept the counterparty's own timer alive. These four tests pin the
+ * symptoms of that, not the bookkeeping around it.
+ *
+ * EVERY BOUND HERE IS INJECTED so the suite runs in CI time. That is a property of
+ * the tests, not of the proofs: production passes no bounds at all and gets 120 s
+ * for the model call, 30 s for approval, 150 s as the ceiling. The default VALUES
+ * are pinned separately by constant assertions; no test that finishes in seconds
+ * can also wait out two minutes, and none of these pretends to.
+ */
+describe("sampling deadlines and liveness", () => {
+  test("a liveness notification is emitted while the model call is in flight", async () => {
+    // 400 ms beats inside a 2.5 s model bound: several land, and the count is
+    // asserted as a floor so a slow CI box cannot fail it.
+    const MODEL_BOUND = 2_500
+    const INTERVAL = 400
+    await withInstance(config({ mcp: { fixture: { type: "local", command: ["true"], sampling: "allow" } } }), async () => {
+      const warm = stubProvider(TRANSCRIPT)
+      try {
+        const first = await harness({ text: "hi" })
+        await wireSampling(first.client)
+        await first.client.callTool({ name: "transcribe_audio_fixture", arguments: {} }, CallToolResultSchema, {
+          timeout: 30_000,
+        })
+        await first.client.close()
+      } finally {
+        warm.restore()
+      }
+
+      const hang = stubProviderHang()
+      wire = hang
+      try {
+        const seen: Array<any> = []
+        const h = await harness({
+          text: "hi",
+          // The server OPTS IN. This is what makes the SDK mint a token at all.
+          onprogress: (progress) => seen.push(progress),
+          // Generous, so the server's own timer is not what ends this.
+          requestTimeout: 30_000,
+        })
+        await wireSampling(h.client, "fixture", MODEL_BOUND, 20_000, INTERVAL)
+        const result = await h.client.callTool(
+          { name: "transcribe_audio_fixture", arguments: {} },
+          CallToolResultSchema,
+          { timeout: 30_000 },
+        )
+        expect(result.isError).toBe(true)
+
+        // THE SYMPTOM: notifications genuinely crossed the wire. Observed on the
+        // server's transport, so our own counters cannot satisfy this.
+        expect(h.progressNotifications.length).toBeGreaterThanOrEqual(2)
+        // And the server's own handler ran, i.e. the token we echoed back matched
+        // the one it minted — an unmatched token lands in `_onprogress`'s
+        // "unknown token" error branch instead.
+        expect(seen.length).toBeGreaterThanOrEqual(2)
+
+        const first = h.progressNotifications[0].params
+        // THE FALSY-ZERO TRAP, guarded on purpose: this is the first
+        // server-initiated request of the connection, so its message id — and
+        // therefore its progress token — is `0`. The SDK's own cancel path drops
+        // `requestId` 0 for exactly this reason; our token check must test for
+        // `undefined`, not for truthiness.
+        expect(first.progressToken).toBe(0)
+        // LIVENESS, NOT PROGRESS: a monotonic tick and NO `total`, because
+        // `generateText` is non-streaming and no completion fraction exists.
+        expect(first.progress).toBe(1)
+        expect(first.total).toBeUndefined()
+        expect(String(first.message)).toMatch(/in flight/)
+        const ticks = h.progressNotifications.map((n) => n.params.progress)
+        expect(ticks).toEqual([...ticks].sort((a, b) => a - b))
+        expect(new Set(ticks).size).toBe(ticks.length)
+
+        // AND IT CANNOT MASK A HUNG CALL. Beats went out the whole time and our
+        // own bound still fired: the notifications reset the PEER's timer, never
+        // ours. Asserted on the error the server actually received.
+        const detail = h.samplingOutcomes[0].detail as any
+        expect(detail.code).toBe(McpSampling.TIMEOUT_CODE)
+        expect(detail.data).toMatchObject({ server: "fixture", phase: "model", timeout: MODEL_BOUND })
+        expect(hang.signals[0]!.aborted).toBe(true)
+        await h.client.close()
+      } finally {
+        hang.release()
+        hang.restore()
+      }
+    })
+  }, 60_000)
+
+  test("no liveness notification is emitted when the server supplied no progress token", async () => {
+    const MODEL_BOUND = 1_500
+    const INTERVAL = 200
+    await withInstance(config({ mcp: { fixture: { type: "local", command: ["true"], sampling: "allow" } } }), async () => {
+      const warm = stubProvider(TRANSCRIPT)
+      try {
+        const first = await harness({ text: "hi" })
+        await wireSampling(first.client)
+        await first.client.callTool({ name: "transcribe_audio_fixture", arguments: {} }, CallToolResultSchema, {
+          timeout: 30_000,
+        })
+        await first.client.close()
+      } finally {
+        warm.restore()
+      }
+
+      const hang = stubProviderHang()
+      wire = hang
+      try {
+        // NO `onprogress`, so no `_meta.progressToken` exists on the request.
+        const h = await harness({ text: "hi", requestTimeout: 30_000 })
+        // Interval far below the bound, so "nothing was sent" is a real absence
+        // and not simply a window too short for the first beat to fall in.
+        await wireSampling(h.client, "fixture", MODEL_BOUND, 20_000, INTERVAL)
+        const errors: Array<unknown> = []
+        h.server.server.onerror = (error) => errors.push(error)
+        const result = await h.client.callTool(
+          { name: "transcribe_audio_fixture", arguments: {} },
+          CallToolResultSchema,
+          { timeout: 30_000 },
+        )
+        expect(result.isError).toBe(true)
+        // The model call really did run long enough for many beats to have fired
+        // had we been sending any.
+        expect(hang.bodies).toHaveLength(1)
+        expect(h.progressNotifications).toHaveLength(0)
+        // A notification sent against a token the peer never minted is not merely
+        // wasted: `_onprogress` reports it to the peer as an error. Nothing did.
+        expect(errors).toHaveLength(0)
+        await h.client.close()
+      } finally {
+        hang.release()
+        hang.restore()
+      }
+    })
+  }, 60_000)
+
+  test("an approval-phase expiry and a model-phase expiry are distinguishable by message and data", async () => {
+    const APPROVAL_BOUND = 900
+    const MODEL_BOUND = 900
+
+    // PHASE 1 — nobody answers the prompt. Policy is the default `ask`, and the
+    // test deliberately never replies.
+    let approval: any
+    await withInstance(config({ mcp: { fixture: { type: "local", command: ["true"] } } }), async () => {
+      wire = stubProvider(TRANSCRIPT)
+      const h = await harness({ text: "hi", requestTimeout: 30_000 })
+      // Model bound left LARGE, so nothing but the approval bound can fire.
+      await wireSampling(h.client, "fixture", 20_000, APPROVAL_BOUND)
+      const result = await h.client.callTool({ name: "transcribe_audio_fixture", arguments: {} }, CallToolResultSchema, {
+        timeout: 30_000,
+      })
+      expect(result.isError).toBe(true)
+      approval = h.samplingOutcomes[0].detail
+      // THE POINT OF SPLITTING THE BOUND: a human who never answers must not be
+      // reported as a slow model, and the model must not have been charged for it.
+      expect((wire as Wire).bodies).toHaveLength(0)
+      await h.client.close()
+    })
+
+    // PHASE 2 — the human is out of the picture (`allow`) and the provider hangs.
+    let model: any
+    await withInstance(config({ mcp: { fixture: { type: "local", command: ["true"], sampling: "allow" } } }), async () => {
+      const warm = stubProvider(TRANSCRIPT)
+      try {
+        const first = await harness({ text: "hi" })
+        await wireSampling(first.client)
+        await first.client.callTool({ name: "transcribe_audio_fixture", arguments: {} }, CallToolResultSchema, {
+          timeout: 30_000,
+        })
+        await first.client.close()
+      } finally {
+        warm.restore()
+      }
+      const hang = stubProviderHang()
+      wire = hang
+      try {
+        const h = await harness({ text: "hi", requestTimeout: 30_000 })
+        // Approval bound left LARGE, so nothing but the model bound can fire.
+        await wireSampling(h.client, "fixture", MODEL_BOUND, 20_000)
+        const result = await h.client.callTool(
+          { name: "transcribe_audio_fixture", arguments: {} },
+          CallToolResultSchema,
+          { timeout: 30_000 },
+        )
+        expect(result.isError).toBe(true)
+        model = h.samplingOutcomes[0].detail
+        expect(hang.bodies).toHaveLength(1)
+        await h.client.close()
+      } finally {
+        hang.release()
+        hang.restore()
+      }
+    })
+
+    // Both are still `-32001` and both still carry `data.server` — that field is
+    // the ONLY discriminator against the SDK's own `-32001`, since `data.timeout`
+    // is set by our bounds too.
+    expect(approval.code).toBe(McpSampling.TIMEOUT_CODE)
+    expect(model.code).toBe(McpSampling.TIMEOUT_CODE)
+    expect(approval.data).toMatchObject({ server: "fixture", phase: "approval", timeout: APPROVAL_BOUND })
+    expect(model.data).toMatchObject({ server: "fixture", phase: "model", timeout: MODEL_BOUND })
+    // DISTINGUISHABLE BY MESSAGE... (matched, not compared: `McpError` prefixes
+    // `MCP error -32001: ` on each hop, so the text the server sees is wrapped.)
+    expect(String(approval.message)).toMatch(/sampling timed out waiting for approval/)
+    expect(String(model.message)).toMatch(/sampling timed out waiting for the model/)
+    expect(String(approval.message)).not.toMatch(/waiting for the model/)
+    expect(String(model.message)).not.toMatch(/waiting for approval/)
+    // ...AND MACHINE-READABLY, which is the half a message cannot give a server.
+    expect(approval.data.phase).not.toBe(model.data.phase)
+  }, 90_000)
+
+  test("the absolute ceiling still fires for work no phase bound covers", async () => {
+    // The ceiling is `timeoutMs + approvalTimeoutMs` and exists for the stretch
+    // neither phase bound covers: config load, provider listing, model selection,
+    // provider initialisation.
+    //
+    // BECAUSE THE CEILING IS THE SUM, IT CAN ONLY PRECEDE A PHASE BOUND WHEN THAT
+    // PRE-PHASE STRETCH OVERRUNS THE APPROVAL BUDGET — which is exactly the
+    // condition it exists for. So this test does two things on purpose: it sets
+    // the approval budget to 1 ms (policy is `allow`, so that budget is never
+    // otherwise spent), and it SKIPS the provider warm-up every neighbouring test
+    // performs, letting the genuine cold adapter load be the overrun. Both halves
+    // are asserted rather than assumed — `hang.bodies` below proves the provider
+    // call did start inside the ceiling, so a machine slow enough to invalidate
+    // the setup fails the test instead of quietly proving less.
+    //
+    // The bounds are injected. In production the ceiling is 150 s and a phase
+    // bound normally fires first.
+    const APPROVAL_BOUND = 1
+    const MODEL_BOUND = 3_000
+    await withInstance(config({ mcp: { fixture: { type: "local", command: ["true"], sampling: "allow" } } }), async () => {
+      const hang = stubProviderHang()
+      wire = hang
+      try {
+        const h = await harness({
+          text: "hi",
+          requestTimeout: 30_000,
+          onprogress: () => {},
+        })
+        await wireSampling(h.client, "fixture", MODEL_BOUND, APPROVAL_BOUND, 100)
+        const result = await h.client.callTool(
+          { name: "transcribe_audio_fixture", arguments: {} },
+          CallToolResultSchema,
+          { timeout: 30_000 },
+        )
+        expect(result.isError).toBe(true)
+        // The provider call started, so the cold stretch fit inside the ceiling
+        // and the ceiling is genuinely what ended the request.
+        expect(hang.bodies).toHaveLength(1)
+        const detail = h.samplingOutcomes[0].detail as any
+        expect(detail.code).toBe(McpSampling.TIMEOUT_CODE)
+        expect(String(detail.message)).toMatch(/sampling timed out/)
+        // NO PHASE IS NAMED in the message, because the ceiling is the one case
+        // where we do not know which phase to blame.
+        expect(String(detail.message)).not.toMatch(/waiting for/)
+        expect(detail.data).toMatchObject({
+          server: "fixture",
+          phase: "total",
+          timeout: MODEL_BOUND + APPROVAL_BOUND,
+        })
+        // Heartbeats were being emitted throughout and did NOT extend it.
+        expect(h.progressNotifications.length).toBeGreaterThanOrEqual(1)
+        // And the ceiling reaches the provider, not just our own waiting.
+        expect(hang.signals[0]!.aborted).toBe(true)
+        await h.client.close()
+      } finally {
+        hang.release()
+        hang.restore()
+      }
+    })
+  }, 60_000)
+
+  test("the default bounds are the exported constants", () => {
+    expect(McpSampling.DEFAULT_SAMPLING_TIMEOUT).toBe(120_000)
+    expect(McpSampling.DEFAULT_SAMPLING_APPROVAL_TIMEOUT).toBe(30_000)
+    expect(McpSampling.DEFAULT_LIVENESS_INTERVAL).toBe(15_000)
+    // The approval default must stay UNDER the SDK's own 60 s request timeout, so
+    // a peer that never opted into progress still has budget for the model after
+    // a maximal approval wait. This is the one mechanical constraint the number
+    // satisfies; it is not a derivation of how long a human takes.
+    expect(McpSampling.DEFAULT_SAMPLING_APPROVAL_TIMEOUT).toBeLessThan(60_000)
+    // Several beats must fit inside one peer timeout window.
+    expect(McpSampling.DEFAULT_LIVENESS_INTERVAL * 3).toBeLessThan(60_000)
+  })
 })
 
 describe("the approval prompt", () => {

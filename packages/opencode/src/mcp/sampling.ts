@@ -22,11 +22,48 @@ const log = Log.create({ service: "mcp.sampling" })
  */
 
 /**
- * Wall-clock ceiling on one sampling request, including the human approval wait.
- * Reaching it aborts the provider call as well as our wait for it — see the
- * abort composition in `handle`.
+ * Wall-clock ceiling on the MODEL CALL. Not on the human approval wait, which
+ * has its own bound — see DEFAULT_SAMPLING_APPROVAL_TIMEOUT for why the two were
+ * separated. Reaching it aborts the provider call as well as our wait for it —
+ * see the abort composition in `handle`.
+ *
+ * This is also the ABSOLUTE bound on the model call: the liveness notifications
+ * `handle` emits can reset a PEER's request timer, never this one, so a provider
+ * that hangs forever is still cut off here.
+ *
+ * WHERE 120 s COMES FROM: nowhere. No derivation and no measurement is recorded
+ * for it, here or anywhere else in the repo. Compare `actor/schema.ts`'s
+ * DEFAULT_LIVENESS_STALL_MS, which at least ties its 90 s to two other named
+ * numbers in the system (the per-step turn cadence below it, the 5-minute
+ * stuck-detection cutoff above it); this value is tied to nothing. The one thing
+ * that IS known about it is a hazard, not a justification: it is 2x the MCP SDK's
+ * own DEFAULT_REQUEST_TIMEOUT_MSEC (60 s, `shared/protocol.js`), so a peer that
+ * left its request timeout at the default and did not opt into
+ * `resetTimeoutOnProgress` abandons the request at 60 s while we keep working to
+ * 120 s. Treat the value as an OPEN QUESTION, not as something already argued.
  */
 export const DEFAULT_SAMPLING_TIMEOUT = 120_000
+
+/**
+ * Wall-clock ceiling on the human approval wait alone.
+ *
+ * THIS NUMBER IS A DEFAULT AWAITING A REAL PRODUCT DECISION, NOT A DERIVED VALUE.
+ * Nothing here measures how long an operator actually takes to answer a sampling
+ * prompt, so 30 s is not that. It was chosen because it satisfies one mechanical
+ * constraint and no more: it is below the SDK's 60 s DEFAULT_REQUEST_TIMEOUT_MSEC,
+ * so a peer running that default still has budget left for the model call after a
+ * maximal approval wait. Whether 30 s is enough time for a human is undecided.
+ * Overridable through `serve`'s parameter, exactly as `timeoutMs` is.
+ */
+export const DEFAULT_SAMPLING_APPROVAL_TIMEOUT = 30_000
+
+/**
+ * How often a liveness notification goes out while the model call is in flight.
+ * Chosen under the SDK's 60 s default request timeout by enough of a margin that
+ * several land inside one peer timeout window rather than one landing near its
+ * edge.
+ */
+export const DEFAULT_LIVENESS_INTERVAL = 15_000
 
 /** How much of a prompt is shown in the approval dialog and in logs. */
 const PREVIEW_LENGTH = 200
@@ -274,6 +311,67 @@ function mapStopReason(finishReason: string | undefined, stopSequences: Readonly
   return finishReason ?? "endTurn"
 }
 
+/**
+ * What is needed to keep a PEER's request timer alive while we work. Neither
+ * field is ours to invent: we are the CLIENT answering a server-initiated
+ * request, so the token belongs to the requester's message id and only the
+ * requester can mint it (`shared/protocol.js` sets
+ * `params._meta.progressToken = messageId`, and only when its caller passed
+ * `onprogress`). `serve` reads it back out of the request the SDK handed us and
+ * builds this; when the server did not ask for progress there is no token and
+ * this is `undefined`, which means we send nothing at all.
+ */
+export interface Liveness {
+  readonly progressToken: string | number
+  /** `extra.sendNotification` from the SDK request handler — this connection. */
+  readonly send: (notification: { method: string; params: Record<string, unknown> }) => Promise<void>
+  readonly intervalMs: number
+}
+
+/**
+ * LIVENESS, NOT PROGRESS — and the name is the point.
+ *
+ * The model call on this path is `generateText`, which is non-streaming; there is
+ * no `streamText` anywhere in sampling, so no token-level signal exists and NO
+ * COMPLETION FRACTION CAN BE COMPUTED. `progress` is therefore a monotonic TICK
+ * COUNT (the spec asks only that it increase) and `total` is deliberately OMITTED
+ * so no peer can divide one by the other and read a percentage that does not
+ * exist. The single claim being made is: this request has not been abandoned.
+ *
+ * WHY IT CANNOT MASK A HUNG CALL. Two independent reasons. (1) These
+ * notifications reset the timer on the PEER's side only — `_resetTimeout` in
+ * `shared/protocol.js`, and only if that peer passed `resetTimeoutOnProgress`.
+ * Our own bound on the model call is plain wall clock and no notification
+ * touches it, so a provider that never answers is still cut off at `timeoutMs`.
+ * (2) Even on the peer's side the resets are capped by its own `maxTotalTimeout`.
+ *
+ * Runs forever and never fails: each send is ignored, because a peer that cannot
+ * receive a notification must not thereby kill the model call. Raced against the
+ * model call with `raceFirst` — the model settling first (success OR failure)
+ * interrupts this.
+ */
+function heartbeat(liveness: Liveness): Effect.Effect<never> {
+  let tick = 0
+  return Effect.forever(
+    Effect.sleep(liveness.intervalMs).pipe(
+      Effect.flatMap(() =>
+        Effect.tryPromise({
+          try: () =>
+            liveness.send({
+              method: "notifications/progress",
+              params: {
+                progressToken: liveness.progressToken,
+                progress: ++tick,
+                message: "sampling: model call in flight",
+              },
+            }),
+          catch: (error) => error,
+        }).pipe(Effect.ignore),
+      ),
+    ),
+  )
+}
+
 export interface HandleInput {
   readonly server: string
   readonly params: CreateMessageParams
@@ -284,6 +382,16 @@ export interface HandleInput {
    */
   readonly sessionID: SessionID | undefined
   readonly signal?: AbortSignal
+  /** Bound on the model call alone. Defaults to DEFAULT_SAMPLING_TIMEOUT. */
+  readonly timeoutMs?: number
+  /**
+   * Bound on the approval wait alone. Defaults to
+   * DEFAULT_SAMPLING_APPROVAL_TIMEOUT. Separate from `timeoutMs` so a slow human
+   * cannot eat the model's budget and so the expiry can say which phase ran out.
+   */
+  readonly approvalTimeoutMs?: number
+  /** Absent when the server did not ask for progress; then nothing is emitted. */
+  readonly liveness?: Liveness
 }
 
 /**
@@ -292,6 +400,8 @@ export interface HandleInput {
  */
 export const handle = Effect.fn("MCP.sampling.handle")(function* (input: HandleInput) {
   const started = Date.now()
+  const modelTimeoutMs = input.timeoutMs ?? DEFAULT_SAMPLING_TIMEOUT
+  const approvalTimeoutMs = input.approvalTimeoutMs ?? DEFAULT_SAMPLING_APPROVAL_TIMEOUT
   const cfgSvc = yield* Config.Service
   const provider = yield* Provider.Service
   const permission = yield* Permission.Service
@@ -403,6 +513,26 @@ export const handle = Effect.fn("MCP.sampling.handle")(function* (input: HandleI
             }),
           ),
         ),
+        // THE APPROVAL PHASE HAS ITS OWN BOUND. Sharing one bound with the model
+        // call made the model's budget a residual: a human taking 110 s of a
+        // 120 s bound left the model 10 s, and a human taking all 120 s meant the
+        // model was never called at all — while the server was told that
+        // *sampling* timed out. The phase is named in the message and in
+        // `data.phase`, so an operator knows which knob to turn and a server
+        // author is not told a model was slow when nobody answered the prompt.
+        Effect.timeoutOption(approvalTimeoutMs),
+        Effect.flatMap((answered) =>
+          Option.isSome(answered)
+            ? Effect.void
+            : Effect.fail(
+                new SamplingError(TIMEOUT_CODE, "sampling timed out waiting for approval", {
+                  server: input.server,
+                  model: modelRef,
+                  phase: "approval",
+                  timeout: approvalTimeoutMs,
+                }),
+              ),
+        ),
       )
   }
 
@@ -426,15 +556,15 @@ export const handle = Effect.fn("MCP.sampling.handle")(function* (input: HandleI
   // provider genuinely failed" without assuming which source aborted.
   let providerSignal: AbortSignal | undefined
 
-  const result = yield* Effect.tryPromise({
+  const call = Effect.tryPromise({
     try: (fiberSignal: AbortSignal) => {
       // COMPOSE both abort sources. `fiberSignal` is aborted whenever this fiber
-      // is interrupted, which covers the internal timeout bound in `serve` and
-      // `cancelAll`; on its own, neither of those reaches the provider, because
-      // interrupting a fiber does not cancel a promise already in flight inside
-      // it. `input.signal` is the MCP SDK's per-request signal and covers a
-      // server-issued cancellation. Either one must stop the HTTP call, so the
-      // provider gets the union of the two, not just one of them.
+      // is interrupted, which covers the model bound below, the absolute ceiling
+      // in `serve` and `cancelAll`; on its own, none of those reaches the
+      // provider, because interrupting a fiber does not cancel a promise already
+      // in flight inside it. `input.signal` is the MCP SDK's per-request signal
+      // and covers a server-issued cancellation. Either one must stop the HTTP
+      // call, so the provider gets the union of the two, not just one of them.
       providerSignal = input.signal ? AbortSignal.any([fiberSignal, input.signal]) : fiberSignal
       return generateText({
         model: language,
@@ -461,6 +591,32 @@ export const handle = Effect.fn("MCP.sampling.handle")(function* (input: HandleI
       })
     },
   })
+
+  // KEEPALIVE, and only if the server asked for it. `raceFirst` is "first to
+  // SETTLE", so the model call winning with a failure still interrupts the
+  // heartbeat; `Effect.race` would be wrong here for the same reason it was wrong
+  // in the approval wait — it waits for a losing side to fail and the heartbeat
+  // never does. The heartbeat cannot win: it never settles.
+  const kept = input.liveness ? Effect.raceFirst(call, heartbeat(input.liveness)) : call
+
+  const result = yield* kept.pipe(
+    // THE MODEL PHASE'S OWN BOUND, and our ABSOLUTE one: liveness notifications
+    // reset the PEER's timer, never this. A provider that hangs forever is cut
+    // off here regardless of how many heartbeats went out.
+    Effect.timeoutOption(modelTimeoutMs),
+    Effect.flatMap((completed) =>
+      Option.isSome(completed)
+        ? Effect.succeed(completed.value)
+        : Effect.fail(
+            new SamplingError(TIMEOUT_CODE, "sampling timed out waiting for the model", {
+              server: input.server,
+              model: modelRef,
+              phase: "model",
+              timeout: modelTimeoutMs,
+            }),
+          ),
+    ),
+  )
 
   // The model's text is returned verbatim: no summarising, no rewriting.
   const text = result.text ?? ""
@@ -519,6 +675,21 @@ export function inFlightCount(client: object) {
 }
 
 /**
+ * The part of the SDK's request-handler `extra` this module reads. Deliberately
+ * `unknown` for everything but the signal: `_meta` and `sendNotification` are
+ * typed on the SDK side against a notification union that is generic over the
+ * schema, and naming those types here would couple the module to SDK internals
+ * for no gain — the two are narrowed at the use site instead.
+ */
+export interface SamplingRequestExtra {
+  signal?: AbortSignal
+  /** The request's own `params._meta`, passed through verbatim by `_onrequest`. */
+  _meta?: unknown
+  /** Sends a notification on THIS request's connection, tagged to its id. */
+  sendNotification?: unknown
+}
+
+/**
  * The subset of the MCP `Client` surface this module drives. Typed loosely on
  * purpose: the SDK's own `setRequestHandler` signature is generic over the Zod
  * schema and infers a result type we satisfy structurally, so pinning it exactly
@@ -527,8 +698,27 @@ export function inFlightCount(client: object) {
 export interface SamplingClient {
   setRequestHandler(
     schema: typeof CreateMessageRequestSchema,
-    handler: (request: { params?: unknown }, extra?: { signal?: AbortSignal }) => Promise<never>,
+    handler: (request: { params?: unknown }, extra?: SamplingRequestExtra) => Promise<never>,
   ): void
+}
+
+/**
+ * Read the progress token the REQUESTER minted, if it minted one.
+ *
+ * We are the client answering a server-initiated request, so we never choose this
+ * value. The SDK's requester side writes it only when its caller asked for
+ * progress (`shared/protocol.js`: `if (options?.onprogress) { ... _meta: { ...,
+ * progressToken: messageId } }`) and the responder side hands the handler that
+ * same object (`_meta: request.params?._meta`). NO TOKEN THEREFORE MEANS THE
+ * SERVER DID NOT ASK FOR PROGRESS, and we must send nothing at all — an
+ * unsolicited notification hits `_onprogress`'s "unknown token" branch and is
+ * reported to the peer as an error.
+ */
+function progressTokenOf(extra: SamplingRequestExtra | undefined) {
+  const meta = extra?._meta
+  if (typeof meta !== "object" || meta === null) return undefined
+  const token = (meta as { progressToken?: unknown }).progressToken
+  return typeof token === "string" || typeof token === "number" ? token : undefined
 }
 
 export interface Bridge {
@@ -550,19 +740,40 @@ export interface Bridge {
  *
  * Both directions therefore make progress independently.
  *
- * `timeoutMs` is the wall-clock bound on one request and defaults to
- * DEFAULT_SAMPLING_TIMEOUT; production passes nothing. It is a parameter so the
- * bound-enforcement path can be driven in a test without waiting two minutes —
- * the default value itself is pinned by an assertion on the exported constant.
+ * `timeoutMs` bounds the MODEL CALL and defaults to DEFAULT_SAMPLING_TIMEOUT;
+ * `approvalTimeoutMs` bounds the APPROVAL WAIT and defaults to
+ * DEFAULT_SAMPLING_APPROVAL_TIMEOUT. Production passes neither. Both are
+ * parameters so the expiry paths can be driven in a test without waiting minutes
+ * — the default values themselves are pinned by assertions on the exported
+ * constants.
+ *
+ * Their sum is also enforced here as an ABSOLUTE CEILING on the whole request, so
+ * the stretch of work covered by no phase bound (content conversion, model
+ * selection, provider initialisation) cannot run unbounded either. That error
+ * names no phase, because by construction it is the one case where we do not know
+ * which one to blame.
  */
 export function serve(
   server: string,
   client: SamplingClient,
   bridge: Bridge,
   timeoutMs: number = DEFAULT_SAMPLING_TIMEOUT,
+  approvalTimeoutMs: number = DEFAULT_SAMPLING_APPROVAL_TIMEOUT,
+  livenessIntervalMs: number = DEFAULT_LIVENESS_INTERVAL,
 ) {
   client.setRequestHandler(CreateMessageRequestSchema, async (request, extra) => {
     const params = (request.params ?? {}) as CreateMessageParams
+    // KEEPALIVE WIRING. Both halves come from the SDK and neither is ours to
+    // fabricate: the token off the request's `_meta`, the sender off `extra`. If
+    // either is missing the server did not ask for progress and `liveness` stays
+    // undefined, which makes `handle` emit nothing.
+    const progressToken = progressTokenOf(extra)
+    const send = extra?.sendNotification
+    const liveness: Liveness | undefined =
+      progressToken !== undefined && typeof send === "function"
+        ? { progressToken, send: send as Liveness["send"], intervalMs: livenessIntervalMs }
+        : undefined
+    const ceilingMs = timeoutMs + approvalTimeoutMs
     // Effect 4 exposes no `timeoutFail` (it survives only in doc comments), so
     // the deadline is expressed as timeoutOption plus an explicit failure.
     const effect = handle({
@@ -570,15 +781,19 @@ export function serve(
       params,
       sessionID: activeSessions.get(client),
       signal: extra?.signal,
+      timeoutMs,
+      approvalTimeoutMs,
+      liveness,
     }).pipe(
-      Effect.timeoutOption(timeoutMs),
+      Effect.timeoutOption(ceilingMs),
       Effect.flatMap((result) =>
         Option.isSome(result)
           ? Effect.succeed(result.value)
           : Effect.fail(
               new SamplingError(TIMEOUT_CODE, "sampling timed out", {
                 server,
-                timeout: timeoutMs,
+                phase: "total",
+                timeout: ceilingMs,
               }),
             ),
       ),
