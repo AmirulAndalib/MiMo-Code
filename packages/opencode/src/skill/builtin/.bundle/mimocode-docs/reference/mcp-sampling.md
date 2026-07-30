@@ -125,7 +125,8 @@ If a sampling request arrives while no turn is in flight for that server, the
 | Media (image/audio) per item, decoded | 20 MiB |
 | Text per item, and `systemPrompt` | 1 MiB |
 | Approval wait | 30 s |
-| Model call | 120 s |
+| No output from the model (stall) | 45 s |
+| Model call, end to end (backstop) | 120 s |
 | Whole request (absolute ceiling) | 150 s |
 
 The approval wait and the model call have **separate** bounds, and the expiry says
@@ -138,13 +139,37 @@ out. The ceiling is their sum and covers the stretch neither bound does (model
 selection, provider initialisation); its error names no phase, with
 `data.phase: "total"`.
 
-Neither default number is derived. **30 s is a placeholder awaiting a product
-decision** — nothing here measures how long an operator takes to answer a prompt.
-It satisfies exactly one mechanical constraint: it sits under the MCP SDK's 60 s
-`DEFAULT_REQUEST_TIMEOUT_MSEC`, so a peer on that default still has budget for the
-model call after a maximal approval wait. **120 s has no recorded derivation at
-all**, and it is 2× that SDK default; treat both as open questions rather than as
-settled.
+### The stall bound is the one that catches a hung provider
+
+The model call **streams**, so "has this hung?" is answerable from evidence rather
+than guessed: 45 s with no output at all is a symptom, not a policy choice about
+how patient MiMoCode is. That bound is the primary defence, and it fails with
+`sampling stalled: the model produced no output` and `data.phase: "stall"`. Its
+clock covers both the wait for the first chunk and every gap between later chunks,
+and **every arriving chunk resets it** — a stream that produces slowly for ten
+minutes never stalls, while one that goes quiet for 45 s does.
+
+The error also carries `data.chunks` and `data.characters`, which separate the two
+failures a server author would otherwise have to guess between: `chunks: 0` means
+the provider never produced anything, and a non-zero count means it started and
+then died.
+
+The 120 s model-call bound is therefore **no longer the primary guard** — it is the
+backstop for what a stall detector cannot see, namely a stream that keeps trickling
+just often enough never to look stalled and yet never finishes.
+
+Neither of the two headline numbers is derived. **30 s is a placeholder awaiting a
+product decision** — nothing here measures how long an operator takes to answer a
+prompt. It satisfies exactly one mechanical constraint: it sits under the MCP SDK's
+60 s `DEFAULT_REQUEST_TIMEOUT_MSEC`, so a peer on that default still has budget for
+the model call after a maximal approval wait. **45 s is also a placeholder**, with
+its own single mechanical constraint — it is 3× the 15 s notification interval, so
+at least two notifications reach a peer before a stall is declared; nothing here
+measures the slowest legitimate gap a real provider produces, and the known risk is
+a **false positive** on a model that thinks for a long time before its first token.
+**120 s has no recorded derivation at all**, and it is 2× that SDK default;
+switching to streaming narrowed what it is responsible for without producing a
+derivation for it. Treat all three as open questions rather than as settled.
 
 Reaching any of these bounds aborts the provider call as well as MiMoCode's wait
 for it. That is not automatic: interrupting the Effect fiber does not cancel an
@@ -159,12 +184,23 @@ While the model call is in flight MiMoCode emits periodic
 not abandon a request that is still being worked on. Without them a server on the
 SDK's 60 s default gives up at 60 s while MiMoCode keeps working to 120 s.
 
-Three things this is **not**:
+What it does and does not claim:
 
-- **It is liveness, not progress.** The model call is `generateText`, which is
-  non-streaming, so there is no token-level signal and no completion fraction
-  exists. `progress` is a monotonic tick count and `total` is deliberately
-  omitted, so nothing can be read as a percentage.
+- **It reports observed output, but it is still not a fraction.** The model call
+  streams, so the notification says how many chunks and characters the provider has
+  actually produced — which is what lets a server tell "MiMoCode is alive" from
+  "the model is producing", a distinction a timer-driven tick cannot make. `total`
+  is still deliberately omitted, because streaming does not reveal how much output
+  is coming either, so no percentage can be read out of it. `progress` remains a
+  monotonic tick rather than the chunk count, since a chunk count does not advance
+  during exactly the quiet stretch a notification is most needed for.
+- **It never carries the model's text.** Partial content is deliberately withheld:
+  a request that later stalls, times out or is cancelled returns **no** text at all,
+  so streaming a prefix over the progress channel would disclose in the failure case
+  precisely what the response contract says was never delivered. `onprogress` is
+  also how a peer asks to be told a request is alive — MCP has no partial-result
+  channel, and treating `message` as one would be MiMoCode deciding that on the
+  server's behalf. The running length is metadata and is disclosed; the text is not.
 - **It is necessary, not sufficient.** Resetting the timer is the *requester's*
   choice: the SDK's `resetTimeoutOnProgress` defaults to `false`, so a server
   that did not pass it ignores these notifications entirely and still times out at
@@ -205,10 +241,11 @@ call, so an orphaned model call cannot outlive its transport.
 > JSON-RPC `requestId` is `0` is silently dropped
 > (`if (!notification.params.requestId) return` in `shared/protocol.js`), because
 > `0` is falsy. The *first* server-initiated request on a connection is therefore
-> uncancellable upstream; later ones cancel correctly. The 120 s model-call bound
-> is the backstop that keeps even that case from leaking, and because that bound
-> aborts the provider call it ends the model call rather than merely stopping us
-> waiting for it.
+> uncancellable upstream; later ones cancel correctly. MiMoCode's own bounds are the
+> backstop that keeps even that case from leaking — the stall bound first if the
+> provider goes quiet, the 120 s model-call bound otherwise — and because those
+> bounds abort the provider call they end the model call rather than merely stopping
+> us waiting for it.
 >
 > MiMoCode does not work around this, because it cannot: the id at risk belongs to
 > the **server's** outgoing request counter, which only the server can advance.
@@ -220,8 +257,9 @@ call, so an orphaned model call cannot outlive its transport.
 >
 > The residual, stated plainly: **when a server abandons the first sampling request
 > it issues on a connection, MiMoCode does not learn of it, so that request keeps a
-> model call running — and a paid one — for up to 120 s before the model-call bound
-> aborts it.** The bound caps the waste; it does not avoid it.
+> model call running — and a paid one — until one of MiMoCode's own bounds aborts
+> it: 45 s if the provider stops producing, otherwise up to 120 s.** The bounds cap
+> the waste; they do not avoid it.
 
 ## Security boundaries
 
@@ -252,5 +290,7 @@ SDK's request timeout raises too, with a `data.timeout` our bound also sets. Onl
 our errors carry `data.server`, so that field is what says whose deadline fired.
 
 Once it is ours, `data.phase` says which of our deadlines it was — `"approval"`,
-`"model"` or `"total"` — and the message says the same in words. A cancellation
-carries `data.server` with no `phase`, because nothing expired.
+`"model"`, `"stall"` or `"total"` — and the message says the same in words. A
+`"stall"` additionally carries `data.chunks` and `data.characters`, so a server can
+tell a provider that never produced anything from one that stopped part way. A
+cancellation carries `data.server` with no `phase`, because nothing expired.

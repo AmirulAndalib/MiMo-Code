@@ -1,5 +1,5 @@
 import { Effect, Cause, Exit, Fiber, Option } from "effect"
-import { generateText, type ModelMessage } from "ai"
+import { streamText, type ModelMessage } from "ai"
 import { CreateMessageRequestSchema, ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js"
 import { Config } from "@/config"
 import { Permission } from "@/permission"
@@ -27,16 +27,24 @@ const log = Log.create({ service: "mcp.sampling" })
  * separated. Reaching it aborts the provider call as well as our wait for it —
  * see the abort composition in `handle`.
  *
- * This is also the ABSOLUTE bound on the model call: the liveness notifications
- * `handle` emits can reset a PEER's request timer, never this one, so a provider
- * that hangs forever is still cut off here.
+ * THIS IS NO LONGER THE PRIMARY DEFENCE AGAINST A HUNG PROVIDER, and that is the
+ * most important thing to know about it. The model call streams, so "nothing has
+ * arrived for a while" is now directly observable and
+ * DEFAULT_SAMPLING_STALL_TIMEOUT acts on it. A hang trips the stall bound, which
+ * says so; this bound is what remains for the case a stall detector cannot see:
+ * a stream that keeps producing just often enough never to look stalled and yet
+ * never finishes. It is a BACKSTOP against pathological-but-alive output, not the
+ * thing standing between a dead provider and forever.
  *
- * WHERE 120 s COMES FROM: nowhere. No derivation and no measurement is recorded
- * for it, here or anywhere else in the repo. Compare `actor/schema.ts`'s
- * DEFAULT_LIVENESS_STALL_MS, which at least ties its 90 s to two other named
- * numbers in the system (the per-step turn cadence below it, the 5-minute
- * stuck-detection cutoff above it); this value is tied to nothing. The one thing
- * that IS known about it is a hazard, not a justification: it is 2x the MCP SDK's
+ * WHERE 120 s COMES FROM: still nowhere. No derivation and no measurement is
+ * recorded for it, here or anywhere else in the repo, and switching to streaming
+ * did not produce one — it only demoted what the number is responsible for. The
+ * value is deliberately left ALONE rather than widened to suit its narrower role,
+ * because any new number would be exactly as unargued as this one; note that a
+ * backstop against a slow-but-live stream plausibly wants a LOOSER value than a
+ * primary guard did, so "is 120 s still the right size for this job" is now part
+ * of the same open question rather than a settled point. The one thing that IS
+ * known about it remains a hazard, not a justification: it is 2x the MCP SDK's
  * own DEFAULT_REQUEST_TIMEOUT_MSEC (60 s, `shared/protocol.js`), so a peer that
  * left its request timeout at the default and did not opt into
  * `resetTimeoutOnProgress` abandons the request at 60 s while we keep working to
@@ -64,6 +72,34 @@ export const DEFAULT_SAMPLING_APPROVAL_TIMEOUT = 30_000
  * edge.
  */
 export const DEFAULT_LIVENESS_INTERVAL = 15_000
+
+/**
+ * How long the model may produce NOTHING before we call it stalled.
+ *
+ * This is the primary hang detector, and it exists because the call streams. A
+ * non-streaming call is opaque: the only question you can ask is "has the whole
+ * thing taken too long", which is why a total bound had to carry that job and why
+ * the number carrying it (DEFAULT_SAMPLING_TIMEOUT) had to be guessed. With a
+ * stream the useful question becomes answerable from evidence instead — no bytes
+ * for this long is not a policy choice about how patient we are, it is a symptom.
+ *
+ * The clock covers BOTH the wait for the first chunk and every gap between later
+ * chunks, because "no output at all" is the same symptom in both places. Every
+ * arriving chunk resets it.
+ *
+ * THIS NUMBER IS A DEFAULT AWAITING A REAL PRODUCT DECISION, NOT A DERIVED VALUE.
+ * Nothing here measures the slowest legitimate gap a real provider produces, so
+ * 45 s is not that. It satisfies one mechanical constraint and no more: it is 3x
+ * DEFAULT_LIVENESS_INTERVAL, so at least two liveness notifications reach a peer
+ * before we declare a stall, and the peer therefore never learns of the stall
+ * from silence. ⚠️THE KNOWN RISK IS A FALSE POSITIVE, and it is not hypothetical:
+ * a reasoning model on a large multimodal prompt can spend a long time before its
+ * first token, and if that quiet period exceeds this bound we will report a stall
+ * for a call that was working. Whether 45 s clears the slowest legitimate
+ * time-to-first-token is UNDECIDED — it is unmeasured here. Overridable through
+ * `serve`'s parameter, exactly as the other bounds are.
+ */
+export const DEFAULT_SAMPLING_STALL_TIMEOUT = 45_000
 
 /** How much of a prompt is shown in the approval dialog and in logs. */
 const PREVIEW_LENGTH = 200
@@ -329,28 +365,81 @@ export interface Liveness {
 }
 
 /**
- * LIVENESS, NOT PROGRESS — and the name is the point.
+ * Stream parts that are the SDK's own bookkeeping rather than model output.
  *
- * The model call on this path is `generateText`, which is non-streaming; there is
- * no `streamText` anywhere in sampling, so no token-level signal exists and NO
- * COMPLETION FRACTION CAN BE COMPUTED. `progress` is therefore a monotonic TICK
- * COUNT (the spec asks only that it increase) and `total` is deliberately OMITTED
- * so no peer can divide one by the other and read a percentage that does not
- * exist. The single claim being made is: this request has not been abandoned.
+ * MEASURED, NOT ASSUMED, and the measurement overturned the obvious guess. Against
+ * a provider whose HTTP call never answers at all, `fullStream` still yields
+ * `start` immediately (and `abort` at the end). So "every part proves the provider
+ * is alive" is false: counting parts indiscriminately made a stone-dead provider
+ * report `1 chunk`, which destroys the single distinction this signal exists to
+ * draw — never started versus started and went quiet. Only parts OUTSIDE this set
+ * advance the activity record, so `chunks === 0` means exactly what it says.
  *
- * WHY IT CANNOT MASK A HUNG CALL. Two independent reasons. (1) These
- * notifications reset the timer on the PEER's side only — `_resetTimeout` in
- * `shared/protocol.js`, and only if that peer passed `resetTimeoutOnProgress`.
- * Our own bound on the model call is plain wall clock and no notification
- * touches it, so a provider that never answers is still cut off at `timeoutMs`.
- * (2) Even on the peer's side the resets are capped by its own `maxTotalTimeout`.
+ * The terminal markers are excluded for the same reason and cost nothing: they
+ * arrive when the stream is already ending, so they could not have rescued a call
+ * from a stall verdict anyway.
+ */
+const LIFECYCLE_PARTS = new Set(["start", "start-step", "finish-step", "finish", "abort", "error"])
+
+/**
+ * What the model call has actually produced so far, written by the stream loop in
+ * `handle` and read by the two watchers below. Mutable on purpose: it is the one
+ * piece of shared state that makes "is it hung?" answerable rather than guessed.
+ *
+ * `characters` is a COUNT, never the text — see `heartbeat` for why the text
+ * itself does not leave this process on the progress channel.
+ */
+interface StreamActivity {
+  /** Epoch ms of the last chunk, or of the call starting if none has arrived. */
+  lastAt: number
+  /** Chunks of model output seen. 0 means the provider has produced nothing. */
+  chunks: number
+  /** Characters of model text seen. */
+  characters: number
+}
+
+/**
+ * LIVENESS FROM REAL EVIDENCE — and what is deliberately NOT sent.
+ *
+ * The model call streams (`streamText`), so unlike the previous fixed tick this
+ * notification reports something observed: how many chunks the provider has
+ * actually produced. That upgrade matters because the two failures a peer most
+ * needs to tell apart are "our process died" and "the provider went quiet", and a
+ * tick that increments on a local timer cannot distinguish them — it keeps
+ * arriving, unchanged, while the provider produces nothing forever. A peer can now
+ * see the difference, including the specific case of a call that never started at
+ * all, which gets its own wording.
+ *
+ * WHY THE MODEL'S TEXT IS NOT IN `message`, even though we now have it. Three
+ * reasons, and the middle one is the one that decided it.
+ *   1. CHATTINESS. Deltas arrive far faster than this interval; forwarding each
+ *      would turn a keepalive into a second, unasked-for output stream. What goes
+ *      out is coalesced to one notification per interval no matter the delta rate.
+ *   2. IT WOULD DELIVER OUTPUT THAT A FAILED REQUEST NEVER DELIVERS. The response
+ *      contract is a single `CreateMessageResult`: if this request later stalls,
+ *      times out or is cancelled, the server is told it failed and receives NO
+ *      text. Streaming partial content on the progress channel would hand it a
+ *      prefix of an answer the contract says it never got — a disclosure that
+ *      exists only in the failure case, which is the worst place to invent one.
+ *   3. A SERVER THAT ASKED FOR PROGRESS DID NOT ASK FOR CONTENT. `onprogress` is
+ *      how a peer says "tell me you are alive"; MCP has no partial-result channel,
+ *      and reading `message` as one would be us deciding on the peer's behalf.
+ * What IS disclosed is the running length. That is metadata, not content, and the
+ * server learns the exact length seconds later from the result anyway — but it is
+ * a real if small disclosure and is named here rather than glossed over.
+ *
+ * `progress` stays a monotonic TICK, not the chunk count: the spec asks only that
+ * the value increase, and a chunk count does not increase during exactly the quiet
+ * stretch a peer most needs a notification for. `total` IS STILL OMITTED, because
+ * streaming does not tell us how many chunks are coming either — a fraction is
+ * still not computable, so none is implied.
  *
  * Runs forever and never fails: each send is ignored, because a peer that cannot
  * receive a notification must not thereby kill the model call. Raced against the
  * model call with `raceFirst` — the model settling first (success OR failure)
  * interrupts this.
  */
-function heartbeat(liveness: Liveness): Effect.Effect<never> {
+function heartbeat(liveness: Liveness, activity: StreamActivity): Effect.Effect<never> {
   let tick = 0
   return Effect.forever(
     Effect.sleep(liveness.intervalMs).pipe(
@@ -362,12 +451,49 @@ function heartbeat(liveness: Liveness): Effect.Effect<never> {
               params: {
                 progressToken: liveness.progressToken,
                 progress: ++tick,
-                message: "sampling: model call in flight",
+                message:
+                  activity.chunks === 0
+                    ? "sampling: model call in flight, no output yet"
+                    : `sampling: model streaming, ${activity.chunks} chunks / ${activity.characters} characters so far`,
               },
             }),
           catch: (error) => error,
         }).pipe(Effect.ignore),
       ),
+    ),
+  )
+}
+
+/**
+ * THE STALL DETECTOR — the primary defence, and the reason a total bound no longer
+ * has to be one.
+ *
+ * Fails as soon as `stallMs` has passed with no chunk arriving. Unlike the total
+ * bound this is a claim about the provider rather than about our patience: the
+ * stream stopped, and that is a fact we watched happen instead of a deadline we
+ * picked. Raced against the model call with `raceFirst`, so this failure
+ * interrupts the call fiber, which aborts the provider through the signal
+ * composed in `handle`.
+ *
+ * NOT gated on the peer having asked for progress. The heartbeat is (an
+ * unsolicited notification is an error on the peer's side); detecting our own
+ * stalled provider is not the peer's business and happens regardless.
+ *
+ * Polling rather than a per-chunk timer, because the chunk loop lives inside a
+ * promise and this has to observe it from outside without restructuring it. The
+ * poll interval only bounds detection LATENCY, never correctness: a stall is
+ * reported at most one poll late, never early, since the comparison is against a
+ * timestamp the loop wrote.
+ */
+function stallWatch(
+  activity: StreamActivity,
+  stallMs: number,
+  onStalled: () => SamplingError,
+): Effect.Effect<never, SamplingError> {
+  const poll = Math.max(25, Math.min(250, Math.floor(stallMs / 4)))
+  return Effect.forever(
+    Effect.sleep(poll).pipe(
+      Effect.flatMap(() => (Date.now() - activity.lastAt >= stallMs ? Effect.fail(onStalled()) : Effect.void)),
     ),
   )
 }
@@ -385,6 +511,12 @@ export interface HandleInput {
   /** Bound on the model call alone. Defaults to DEFAULT_SAMPLING_TIMEOUT. */
   readonly timeoutMs?: number
   /**
+   * How long the model may produce nothing before the call is declared stalled.
+   * Defaults to DEFAULT_SAMPLING_STALL_TIMEOUT. This is the bound that actually
+   * catches a hung provider; `timeoutMs` is the backstop behind it.
+   */
+  readonly stallTimeoutMs?: number
+  /**
    * Bound on the approval wait alone. Defaults to
    * DEFAULT_SAMPLING_APPROVAL_TIMEOUT. Separate from `timeoutMs` so a slow human
    * cannot eat the model's budget and so the expiry can say which phase ran out.
@@ -401,6 +533,7 @@ export interface HandleInput {
 export const handle = Effect.fn("MCP.sampling.handle")(function* (input: HandleInput) {
   const started = Date.now()
   const modelTimeoutMs = input.timeoutMs ?? DEFAULT_SAMPLING_TIMEOUT
+  const stallTimeoutMs = input.stallTimeoutMs ?? DEFAULT_SAMPLING_STALL_TIMEOUT
   const approvalTimeoutMs = input.approvalTimeoutMs ?? DEFAULT_SAMPLING_APPROVAL_TIMEOUT
   const cfgSvc = yield* Config.Service
   const provider = yield* Provider.Service
@@ -556,17 +689,22 @@ export const handle = Effect.fn("MCP.sampling.handle")(function* (input: HandleI
   // provider genuinely failed" without assuming which source aborted.
   let providerSignal: AbortSignal | undefined
 
+  // Shared with the two watchers raced against the call below. Seeded now, reset
+  // when the request is actually issued, and advanced by every chunk.
+  const activity: StreamActivity = { lastAt: Date.now(), chunks: 0, characters: 0 }
+
   const call = Effect.tryPromise({
     try: (fiberSignal: AbortSignal) => {
       // COMPOSE both abort sources. `fiberSignal` is aborted whenever this fiber
-      // is interrupted, which covers the model bound below, the absolute ceiling
-      // in `serve` and `cancelAll`; on its own, none of those reaches the
-      // provider, because interrupting a fiber does not cancel a promise already
-      // in flight inside it. `input.signal` is the MCP SDK's per-request signal
-      // and covers a server-issued cancellation. Either one must stop the HTTP
-      // call, so the provider gets the union of the two, not just one of them.
+      // is interrupted, which covers the model bound below, the stall detector,
+      // the absolute ceiling in `serve` and `cancelAll`; on its own, none of those
+      // reaches the provider, because interrupting a fiber does not cancel a
+      // promise already in flight inside it. `input.signal` is the MCP SDK's
+      // per-request signal and covers a server-issued cancellation. Either one
+      // must stop the HTTP call, so the provider gets the union of the two, not
+      // just one of them.
       providerSignal = input.signal ? AbortSignal.any([fiberSignal, input.signal]) : fiberSignal
-      return generateText({
+      const stream = streamText({
         model: language,
         system: input.params.systemPrompt,
         messages: converted.messages,
@@ -577,7 +715,39 @@ export const handle = Effect.fn("MCP.sampling.handle")(function* (input: HandleI
         headers: { ...model.headers, "User-Agent": `mimocode/${InstallationVersion}` },
         abortSignal: providerSignal,
         maxRetries: 1,
+        // `streamText` reports provider failures as an `error` PART rather than by
+        // rejecting, and its default handler logs them. The loop below rethrows
+        // that part, which is what puts the failure back on the path `catch`
+        // already maps, so this handler exists only to stop the duplicate log.
+        onError: () => {},
       })
+      // WHY THE STREAM IS ASSEMBLED HERE AND NOT RETURNED. The response contract is
+      // a single `CreateMessageResult` — `sampling/createMessage` has one reply and
+      // JSON-RPC has no streaming response — so streaming is an INTERNAL change:
+      // it buys an observable stall signal and real liveness, and changes nothing a
+      // server receives. The text is concatenated verbatim in arrival order.
+      return (async () => {
+        activity.lastAt = Date.now()
+        let text = ""
+        for await (const part of stream.fullStream) {
+          // Same shape as the in-tree consumers (session/goal.ts): an `error` part
+          // is the provider failing, so rethrow it and let `catch` classify it
+          // exactly as it classified a rejected `generateText`.
+          if (part.type === "error") throw part.error
+          if (part.type === "text-delta") {
+            text += part.text
+            activity.characters += part.text.length
+          }
+          // Only genuine model output counts as life. `start` arrives even from a
+          // provider that never answers, so lifecycle parts neither increment the
+          // count nor reset the stall clock — see LIFECYCLE_PARTS.
+          if (!LIFECYCLE_PARTS.has(part.type)) {
+            activity.chunks += 1
+            activity.lastAt = Date.now()
+          }
+        }
+        return { text, finishReason: await stream.finishReason }
+      })()
     },
     catch: (error) => {
       const message = error instanceof Error ? error.message : String(error)
@@ -592,17 +762,43 @@ export const handle = Effect.fn("MCP.sampling.handle")(function* (input: HandleI
     },
   })
 
-  // KEEPALIVE, and only if the server asked for it. `raceFirst` is "first to
-  // SETTLE", so the model call winning with a failure still interrupts the
-  // heartbeat; `Effect.race` would be wrong here for the same reason it was wrong
-  // in the approval wait — it waits for a losing side to fail and the heartbeat
-  // never does. The heartbeat cannot win: it never settles.
-  const kept = input.liveness ? Effect.raceFirst(call, heartbeat(input.liveness)) : call
+  // THE STALL DETECTOR, raced first and NOT gated on the peer asking for progress.
+  // `raceFirst` is "first to SETTLE", so this failing interrupts the call fiber and
+  // aborts the provider; `Effect.race` would be wrong because it waits for a losing
+  // side to fail and neither side here obliges.
+  const watched = Effect.raceFirst(
+    call,
+    stallWatch(
+      activity,
+      stallTimeoutMs,
+      () =>
+        new SamplingError(TIMEOUT_CODE, "sampling stalled: the model produced no output", {
+          server: input.server,
+          model: modelRef,
+          // A phase of its own, distinct from `"model"`: that one means the whole
+          // call outran its budget, this one means output STOPPED, and the two
+          // want different responses from a server author.
+          phase: "stall",
+          timeout: stallTimeoutMs,
+          // The observability payoff, and the reason this is not just a shorter
+          // timeout: 0 says the provider never produced anything, non-zero says it
+          // started and then went quiet.
+          chunks: activity.chunks,
+          characters: activity.characters,
+        }),
+    ),
+  )
+
+  // KEEPALIVE, and only if the server asked for it. `raceFirst` again, for the same
+  // reason: the model call winning with a failure — including a stall — still has
+  // to interrupt the heartbeat, which never settles and so can never win.
+  const kept = input.liveness ? Effect.raceFirst(watched, heartbeat(input.liveness, activity)) : watched
 
   const result = yield* kept.pipe(
-    // THE MODEL PHASE'S OWN BOUND, and our ABSOLUTE one: liveness notifications
-    // reset the PEER's timer, never this. A provider that hangs forever is cut
-    // off here regardless of how many heartbeats went out.
+    // THE MODEL PHASE'S BACKSTOP. Liveness notifications reset the PEER's timer,
+    // never this. What reaches this bound now is narrow: a provider that hangs
+    // outright trips the stall detector above and reports a stall, so this fires
+    // for a stream that keeps trickling without ever finishing.
     Effect.timeoutOption(modelTimeoutMs),
     Effect.flatMap((completed) =>
       Option.isSome(completed)
@@ -742,16 +938,20 @@ export interface Bridge {
  *
  * `timeoutMs` bounds the MODEL CALL and defaults to DEFAULT_SAMPLING_TIMEOUT;
  * `approvalTimeoutMs` bounds the APPROVAL WAIT and defaults to
- * DEFAULT_SAMPLING_APPROVAL_TIMEOUT. Production passes neither. Both are
- * parameters so the expiry paths can be driven in a test without waiting minutes
- * — the default values themselves are pinned by assertions on the exported
- * constants.
+ * DEFAULT_SAMPLING_APPROVAL_TIMEOUT; `stallTimeoutMs` bounds how long the model
+ * may produce NOTHING and defaults to DEFAULT_SAMPLING_STALL_TIMEOUT — that last
+ * one is what catches a hung provider, with `timeoutMs` behind it as a backstop.
+ * Production passes none of them. They are parameters so the expiry paths can be
+ * driven in a test without waiting minutes — the default values themselves are
+ * pinned by assertions on the exported constants.
  *
- * Their sum is also enforced here as an ABSOLUTE CEILING on the whole request, so
- * the stretch of work covered by no phase bound (content conversion, model
- * selection, provider initialisation) cannot run unbounded either. That error
- * names no phase, because by construction it is the one case where we do not know
- * which one to blame.
+ * The sum of the two PHASE bounds is also enforced here as an ABSOLUTE CEILING on
+ * the whole request, so the stretch of work covered by no phase bound (content
+ * conversion, model selection, provider initialisation) cannot run unbounded
+ * either. The stall bound is deliberately NOT part of that sum: it is not a share
+ * of the request's budget but a detector operating inside the model phase. That
+ * ceiling error names no phase, because by construction it is the one case where
+ * we do not know which one to blame.
  */
 export function serve(
   server: string,
@@ -760,6 +960,7 @@ export function serve(
   timeoutMs: number = DEFAULT_SAMPLING_TIMEOUT,
   approvalTimeoutMs: number = DEFAULT_SAMPLING_APPROVAL_TIMEOUT,
   livenessIntervalMs: number = DEFAULT_LIVENESS_INTERVAL,
+  stallTimeoutMs: number = DEFAULT_SAMPLING_STALL_TIMEOUT,
 ) {
   client.setRequestHandler(CreateMessageRequestSchema, async (request, extra) => {
     const params = (request.params ?? {}) as CreateMessageParams
@@ -783,6 +984,7 @@ export function serve(
       signal: extra?.signal,
       timeoutMs,
       approvalTimeoutMs,
+      stallTimeoutMs,
       liveness,
     }).pipe(
       Effect.timeoutOption(ceilingMs),

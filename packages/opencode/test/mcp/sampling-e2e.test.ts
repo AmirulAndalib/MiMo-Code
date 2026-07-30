@@ -114,7 +114,50 @@ interface Wire {
   restore: () => void
 }
 
-/** Replace global fetch with an OpenAI-compatible chat-completions stub. */
+/**
+ * One `chat.completion.chunk` envelope. `id`/`model` are fixed so the deltas below
+ * differ only in their content.
+ */
+const CHUNK = { id: "chatcmpl-1", object: "chat.completion.chunk", created: 1, model: "mimo-v2.5" }
+
+/**
+ * Split text into deltas that CONCATENATE BACK TO IT EXACTLY — whitespace is kept
+ * with the word it follows — because the round-trip assertions compare the
+ * assembled result against the original string byte for byte.
+ */
+function splitDeltas(text: string): ReadonlyArray<string> {
+  return text.match(/\S+\s*/g) ?? [text]
+}
+
+function sseEvent(payload: object) {
+  return `data: ${JSON.stringify(payload)}\n\n`
+}
+
+function deltaEvent(content: string) {
+  return sseEvent({ ...CHUNK, choices: [{ index: 0, delta: { content }, finish_reason: null }] })
+}
+
+function finishEvents(finishReason = "stop") {
+  return (
+    sseEvent({
+      ...CHUNK,
+      choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
+      usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 },
+    }) + "data: [DONE]\n\n"
+  )
+}
+
+/**
+ * Replace global fetch with an OpenAI-compatible chat-completions stub.
+ *
+ * SERVER-SENT EVENTS, because sampling calls `streamText`: the adapter requests
+ * `stream: true` and parses `text/event-stream`. This fixture used to answer with a
+ * single non-streaming JSON completion, and the conversion is not cosmetic — a JSON
+ * body does NOT fail loudly against a streaming adapter, it yields a stream
+ * carrying no text deltas at all, so every transcript assertion would have started
+ * comparing against `""`. The assertions themselves are untouched: same text, same
+ * `stopReason`, same audio bytes on the wire.
+ */
 function stubProvider(text: string): Wire {
   const original = globalThis.fetch
   const bodies: Array<any> = []
@@ -122,17 +165,9 @@ function stubProvider(text: string): Wire {
     const href = typeof url === "string" ? url : (url?.url ?? String(url))
     if (!href.includes("example.invalid")) return original(url, init)
     bodies.push(JSON.parse(init.body as string))
-    return new Response(
-      JSON.stringify({
-        id: "chatcmpl-1",
-        object: "chat.completion",
-        created: 1,
-        model: "mimo-v2.5",
-        choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: "stop" }],
-        usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 },
-      }),
-      { headers: { "content-type": "application/json" } },
-    )
+    return new Response(splitDeltas(text).map(deltaEvent).join("") + finishEvents(), {
+      headers: { "content-type": "text/event-stream" },
+    })
   }) as typeof fetch
   return { bodies, restore: () => (globalThis.fetch = original) }
 }
@@ -165,24 +200,85 @@ function stubProviderHang(): Wire & { signals: Array<AbortSignal | undefined>; r
     release: () => {
       for (const resolve of pending.splice(0)) {
         resolve(
-          new Response(
-            JSON.stringify({
-              id: "chatcmpl-late",
-              object: "chat.completion",
-              created: 1,
-              model: "mimo-v2.5",
-              choices: [{ index: 0, message: { role: "assistant", content: "too late" }, finish_reason: "stop" }],
-              usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-            }),
-            { headers: { "content-type": "application/json" } },
-          ),
+          new Response(deltaEvent("too late") + finishEvents(), {
+            headers: { "content-type": "text/event-stream" },
+          }),
         )
       }
     },
   }
 }
 
+/**
+ * A provider that streams deltas SLOWLY, and can stop mid-stream and never finish.
+ *
+ * `gapMs` is the pause before each delta, i.e. exactly the inter-chunk gap the
+ * stall detector measures — which is what makes both halves of that detector
+ * testable: gaps under the bound must NOT stall, and going quiet must. With
+ * `thenSilent` the response body stays open forever after the last delta, which is
+ * the shape of a provider that answered, started producing, and died — distinct
+ * from `stubProviderHang`, where nothing ever arrives at all.
+ */
+function stubProviderTrickle(input: {
+  deltas: ReadonlyArray<string>
+  gapMs: number
+  thenSilent?: boolean
+}): Wire & { signals: Array<AbortSignal | undefined>; release: () => void } {
+  const original = globalThis.fetch
+  const bodies: Array<any> = []
+  const signals: Array<AbortSignal | undefined> = []
+  const closers: Array<() => void> = []
+  let abandoned = false
+  globalThis.fetch = (async (url: any, init: any) => {
+    const href = typeof url === "string" ? url : (url?.url ?? String(url))
+    if (!href.includes("example.invalid")) return original(url, init)
+    bodies.push(JSON.parse(init.body as string))
+    signals.push(init?.signal as AbortSignal | undefined)
+    const encoder = new TextEncoder()
+    const body = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        let open = true
+        const close = () => {
+          if (!open) return
+          open = false
+          try {
+            controller.close()
+          } catch {
+            // Already closed or cancelled by the consumer; nothing to do.
+          }
+        }
+        closers.push(close)
+        for (const delta of input.deltas) {
+          await new Promise((resolve) => setTimeout(resolve, input.gapMs))
+          if (!open || abandoned) return
+          controller.enqueue(encoder.encode(deltaEvent(delta)))
+        }
+        // Hold the connection open and silent: the stall detector, not the end of
+        // the stream, has to be what ends this request.
+        if (input.thenSilent) return
+        if (!open) return
+        controller.enqueue(encoder.encode(finishEvents()))
+        close()
+      },
+      cancel() {
+        abandoned = true
+      },
+    })
+    return new Response(body, { headers: { "content-type": "text/event-stream" } })
+  }) as typeof fetch
+  return {
+    bodies,
+    signals,
+    restore: () => (globalThis.fetch = original),
+    release: () => {
+      abandoned = true
+      for (const close of closers.splice(0)) close()
+    },
+  }
+}
+
 let wire: Wire | undefined
+
 afterEach(() => {
   wire?.restore()
   wire = undefined
@@ -314,12 +410,21 @@ function wireSampling(
   timeoutMs?: number,
   approvalTimeoutMs?: number,
   livenessIntervalMs?: number,
+  stallTimeoutMs?: number,
 ) {
   return AppRuntime.runPromise(
     Effect.gen(function* () {
       const bridge = yield* EffectBridge.make()
       McpSampling.setActiveSession(client, SESSION)
-      McpSampling.serve(serverName, client as never, bridge, timeoutMs, approvalTimeoutMs, livenessIntervalMs)
+      McpSampling.serve(
+        serverName,
+        client as never,
+        bridge,
+        timeoutMs,
+        approvalTimeoutMs,
+        livenessIntervalMs,
+        stallTimeoutMs,
+      )
     }),
   )
 }
@@ -1175,11 +1280,23 @@ describe("sampling deadlines and liveness", () => {
         // `requestId` 0 for exactly this reason; our token check must test for
         // `undefined`, not for truthiness.
         expect(first.progressToken).toBe(0)
-        // LIVENESS, NOT PROGRESS: a monotonic tick and NO `total`, because
-        // `generateText` is non-streaming and no completion fraction exists.
+        // LIVENESS FROM EVIDENCE: a monotonic tick and NO `total`, because
+        // streaming still cannot say how many chunks are coming, so no fraction is
+        // computable and none is implied. The message reports what was OBSERVED —
+        // and this provider answered nothing at all, so it must say so rather than
+        // claim output. `chunks === 0` is the distinction the whole signal exists
+        // for; counting the SDK's own `start` part would have reported "1 chunk"
+        // for this stone-dead call.
         expect(first.progress).toBe(1)
         expect(first.total).toBeUndefined()
-        expect(String(first.message)).toMatch(/in flight/)
+        expect(String(first.message)).toMatch(/no output yet/)
+        expect(String(first.message)).not.toMatch(/streaming/)
+        // And no model text rode along on the progress channel. Nothing was
+        // produced here, but the assertion is about the CHANNEL, not this call:
+        // partial content is deliberately never sent — see `heartbeat`.
+        for (const notification of h.progressNotifications) {
+          expect(String(notification.params.message)).not.toMatch(/quick brown fox/)
+        }
         const ticks = h.progressNotifications.map((n) => n.params.progress)
         expect(ticks).toEqual([...ticks].sort((a, b) => a - b))
         expect(new Set(ticks).size).toBe(ticks.length)
@@ -1382,10 +1499,17 @@ describe("sampling deadlines and liveness", () => {
     })
   }, 60_000)
 
+  // ⚠️THIS TEST IS A CHANGE-DETECTOR, NOT A PROOF OF BEHAVIOUR, and it is labelled
+  // as such rather than counted as coverage: every assertion below compares a
+  // constant against a literal, so the only way to make it fail is to edit the
+  // constant it pins. Nothing here exercises a code path, and no revert probe
+  // exists for it because there is no mechanism to revert — the behaviour these
+  // numbers govern is covered by the tests above, all of which inject their bounds.
   test("the default bounds are the exported constants", () => {
     expect(McpSampling.DEFAULT_SAMPLING_TIMEOUT).toBe(120_000)
     expect(McpSampling.DEFAULT_SAMPLING_APPROVAL_TIMEOUT).toBe(30_000)
     expect(McpSampling.DEFAULT_LIVENESS_INTERVAL).toBe(15_000)
+    expect(McpSampling.DEFAULT_SAMPLING_STALL_TIMEOUT).toBe(45_000)
     // The approval default must stay UNDER the SDK's own 60 s request timeout, so
     // a peer that never opted into progress still has budget for the model after
     // a maximal approval wait. This is the one mechanical constraint the number
@@ -1393,7 +1517,285 @@ describe("sampling deadlines and liveness", () => {
     expect(McpSampling.DEFAULT_SAMPLING_APPROVAL_TIMEOUT).toBeLessThan(60_000)
     // Several beats must fit inside one peer timeout window.
     expect(McpSampling.DEFAULT_LIVENESS_INTERVAL * 3).toBeLessThan(60_000)
+    // The stall bound's one mechanical constraint, the same way: at least two
+    // liveness notifications reach a peer before a stall is declared, so a peer
+    // never learns of a stall from silence. Like the others this is NOT a
+    // measurement of the slowest legitimate gap a provider produces — see the
+    // constant's comment for the false-positive risk that leaves open.
+    expect(McpSampling.DEFAULT_SAMPLING_STALL_TIMEOUT).toBe(McpSampling.DEFAULT_LIVENESS_INTERVAL * 3)
+    // And the stall detector must be able to fire before the backstop behind it,
+    // or the backstop would still be the operative guard and nothing would have
+    // changed.
+    expect(McpSampling.DEFAULT_SAMPLING_STALL_TIMEOUT).toBeLessThan(McpSampling.DEFAULT_SAMPLING_TIMEOUT)
   })
+})
+
+/**
+ * STREAMING, AND THE STALL SIGNAL IT MAKES POSSIBLE.
+ *
+ * A non-streaming model call is opaque: "has this hung?" is unanswerable from
+ * inside it, so the only available defence was a total wall-clock bound and a
+ * guessed number to fill it. These tests pin the two things streaming buys —
+ * liveness reported from OBSERVED output, and a stall detector that fires on real
+ * silence — plus the thing it must NOT change, which is the single-result response
+ * contract a server sees.
+ *
+ * EVERY BOUND HERE IS INJECTED so the suite runs in CI time, exactly as in the
+ * block above: production passes none and gets 45 s for the stall bound behind a
+ * 120 s backstop. Sub-second bounds prove the MECHANISM, never that any particular
+ * production value is right; the default values are pinned separately by the
+ * constant assertions, and no test that finishes in seconds also waits out 45 s.
+ */
+describe("sampling streams, and a stalled stream is observable", () => {
+  test("the model call streams, and the single-result contract is unchanged", async () => {
+    wire = stubProvider(TRANSCRIPT)
+    await withInstance(config({ mcp: { fixture: { type: "local", command: ["true"], sampling: "allow" } } }), async () => {
+      const h = await harness({ text: "hi" })
+      await wireSampling(h.client)
+      const result = await h.client.callTool({ name: "transcribe_audio_fixture", arguments: {} }, CallToolResultSchema, {
+        timeout: 30_000,
+      })
+      // THE SWITCH ITSELF, asserted FIRST and observed at the PROVIDER's HTTP
+      // boundary rather than by inspecting our own call site: a streaming request
+      // is what went out. Checked before the result so that a non-streaming
+      // regression is reported as "the request was not a stream" rather than as
+      // some downstream symptom of it.
+      expect(wire!.bodies).toHaveLength(1)
+      expect(wire!.bodies[0].stream).toBe(true)
+      // And the fixture really did answer in several deltas, so the assembled text
+      // below was concatenated from a stream and not delivered in one piece.
+      expect(splitDeltas(TRANSCRIPT).length).toBeGreaterThan(1)
+      expect(result.isError).toBeFalsy()
+
+      // THE CONTRACT DID NOT MOVE. Still one `CreateMessageResult`, still text-only,
+      // still the same four fields with the same values — the server cannot tell
+      // from its result that anything changed, which is the point.
+      const detail = h.samplingOutcomes[0].detail as any
+      expect(h.samplingOutcomes).toHaveLength(1)
+      expect(h.samplingOutcomes[0].ok).toBe(true)
+      expect(detail.role).toBe("assistant")
+      expect(detail.content).toEqual({ type: "text", text: TRANSCRIPT })
+      expect(detail.model).toBe(`${PROVIDER_ID}/mimo-v2.5`)
+      expect(detail.stopReason).toBe("endTurn")
+      // No extra field crept in alongside the streaming change.
+      expect(Object.keys(detail).sort()).toEqual(["content", "model", "role", "stopReason"])
+      await h.client.close()
+    })
+  }, 60_000)
+
+  test("liveness reports OBSERVED output, and never the model's text", async () => {
+    // Slow enough that several beats land mid-stream, so the notifications describe
+    // a call in progress rather than one already finished.
+    const INTERVAL = 150
+    const trickle = stubProviderTrickle({ deltas: splitDeltas(TRANSCRIPT), gapMs: 120 })
+    await withInstance(config({ mcp: { fixture: { type: "local", command: ["true"], sampling: "allow" } } }), async () => {
+      const warm = stubProvider(TRANSCRIPT)
+      try {
+        const first = await harness({ text: "hi" })
+        await wireSampling(first.client)
+        await first.client.callTool({ name: "transcribe_audio_fixture", arguments: {} }, CallToolResultSchema, {
+          timeout: 30_000,
+        })
+        await first.client.close()
+      } finally {
+        warm.restore()
+      }
+
+      wire = trickle
+      try {
+        const h = await harness({ text: "hi", onprogress: () => {}, requestTimeout: 30_000 })
+        await wireSampling(h.client, "fixture", 25_000, 25_000, INTERVAL, 20_000)
+        const result = await h.client.callTool(
+          { name: "transcribe_audio_fixture", arguments: {} },
+          CallToolResultSchema,
+          { timeout: 30_000 },
+        )
+        // The call SUCCEEDED, so these beats were emitted around real output.
+        expect(result.isError).toBeFalsy()
+        expect((result.content as Array<{ text: string }>)[0].text).toBe(TRANSCRIPT)
+
+        expect(h.progressNotifications.length).toBeGreaterThanOrEqual(2)
+        const messages = h.progressNotifications.map((n) => String(n.params.message))
+        // THE UPGRADE OVER A FIXED TICK: at least one beat reports output the
+        // provider actually produced. A timer-driven tick cannot say this, which is
+        // why it could not tell "our process is alive" from "the model is working".
+        expect(messages.some((m) => /model streaming, \d+ chunks \/ \d+ characters/.test(m))).toBe(true)
+        // Counts only ever go forward, and the last beat saw real characters.
+        const counts = messages
+          .map((m) => m.match(/(\d+) chunks \/ (\d+) characters/))
+          .filter((m): m is RegExpMatchArray => m !== null)
+          .map((m) => [Number(m[1]), Number(m[2])] as const)
+        expect(counts.length).toBeGreaterThanOrEqual(1)
+        const chunkCounts = counts.map(([c]) => c)
+        expect(chunkCounts).toEqual(chunkCounts.slice().sort((a, b) => a - b))
+        expect(counts.at(-1)![1]).toBeGreaterThan(0)
+
+        // AND NO PARTIAL CONTENT WENT OUT. `onprogress` asks for liveness, not for
+        // output, and a request that later fails delivers no text at all — so a
+        // prefix on this channel would disclose in the failure case exactly what
+        // the contract says was never delivered. Checked word by word so no single
+        // delta leaked either.
+        for (const message of messages) {
+          for (const word of TRANSCRIPT.split(" ")) expect(message).not.toContain(word)
+        }
+        expect(h.progressNotifications.every((n) => n.params.total === undefined)).toBe(true)
+        await h.client.close()
+      } finally {
+        trickle.release()
+        trickle.restore()
+      }
+    })
+  }, 90_000)
+
+  test("a stalled stream is reported as a stall, distinctly from the model bound, and says whether output ever started", async () => {
+    const STALL_BOUND = 700
+
+    // PHASE 1 — the provider never answers at all. Nothing is produced, so the
+    // stall must say `chunks: 0`.
+    let never: any
+    await withInstance(config({ mcp: { fixture: { type: "local", command: ["true"], sampling: "allow" } } }), async () => {
+      const warm = stubProvider(TRANSCRIPT)
+      try {
+        const first = await harness({ text: "hi" })
+        await wireSampling(first.client)
+        await first.client.callTool({ name: "transcribe_audio_fixture", arguments: {} }, CallToolResultSchema, {
+          timeout: 30_000,
+        })
+        await first.client.close()
+      } finally {
+        warm.restore()
+      }
+      const hang = stubProviderHang()
+      wire = hang
+      try {
+        const h = await harness({ text: "hi", requestTimeout: 30_000 })
+        // Model bound and approval bound left LARGE on purpose: if the stall
+        // detector did not exist, one of those would have to be what ends this, and
+        // the assertions below would see `phase: "model"` or `phase: "total"`.
+        await wireSampling(h.client, "fixture", 25_000, 25_000, 10_000, STALL_BOUND)
+        const result = await h.client.callTool(
+          { name: "transcribe_audio_fixture", arguments: {} },
+          CallToolResultSchema,
+          { timeout: 30_000 },
+        )
+        expect(result.isError).toBe(true)
+        never = h.samplingOutcomes[0].detail
+        expect(hang.bodies).toHaveLength(1)
+        // THE STALL REACHES THE PROVIDER, not just our own waiting for it.
+        expect(hang.signals[0]!.aborted).toBe(true)
+        await h.client.close()
+      } finally {
+        hang.release()
+        hang.restore()
+      }
+    })
+
+    // PHASE 2 — the provider answers, streams a few deltas, then goes quiet
+    // forever. Output DID start, so the stall must say so.
+    let died: any
+    const trickle = stubProviderTrickle({ deltas: ["the ", "quick ", "brown "], gapMs: 80, thenSilent: true })
+    await withInstance(config({ mcp: { fixture: { type: "local", command: ["true"], sampling: "allow" } } }), async () => {
+      const warm = stubProvider(TRANSCRIPT)
+      try {
+        const first = await harness({ text: "hi" })
+        await wireSampling(first.client)
+        await first.client.callTool({ name: "transcribe_audio_fixture", arguments: {} }, CallToolResultSchema, {
+          timeout: 30_000,
+        })
+        await first.client.close()
+      } finally {
+        warm.restore()
+      }
+      wire = trickle
+      try {
+        const h = await harness({ text: "hi", requestTimeout: 30_000 })
+        await wireSampling(h.client, "fixture", 25_000, 25_000, 10_000, STALL_BOUND)
+        const result = await h.client.callTool(
+          { name: "transcribe_audio_fixture", arguments: {} },
+          CallToolResultSchema,
+          { timeout: 30_000 },
+        )
+        expect(result.isError).toBe(true)
+        died = h.samplingOutcomes[0].detail
+        await h.client.close()
+      } finally {
+        trickle.release()
+        trickle.restore()
+      }
+    })
+
+    // Both are still `-32001` and both still carry `data.server` — that field is
+    // the ONLY discriminator against the SDK's own `-32001`, since `data.timeout`
+    // is set by our bounds too.
+    expect(never.code).toBe(McpSampling.TIMEOUT_CODE)
+    expect(died.code).toBe(McpSampling.TIMEOUT_CODE)
+    expect(never.data).toMatchObject({ server: "fixture", phase: "stall", timeout: STALL_BOUND, chunks: 0 })
+    expect(died.data).toMatchObject({ server: "fixture", phase: "stall", timeout: STALL_BOUND })
+    // THE OBSERVABILITY PAYOFF, and the reason this is not merely a shorter
+    // timeout: the error itself distinguishes a provider that never produced
+    // anything from one that produced and then died.
+    expect(never.data.chunks).toBe(0)
+    expect(never.data.characters).toBe(0)
+    expect(died.data.chunks).toBeGreaterThan(0)
+    expect(died.data.characters).toBeGreaterThan(0)
+    // DISTINCT FROM THE TOTAL-BOUND EXPIRY, in words and in `phase`. (Matched, not
+    // compared: `McpError` prefixes `MCP error -32001: ` on each hop.)
+    for (const detail of [never, died]) {
+      expect(String(detail.message)).toMatch(/sampling stalled: the model produced no output/)
+      expect(String(detail.message)).not.toMatch(/waiting for the model/)
+      expect(String(detail.message)).not.toMatch(/waiting for approval/)
+      expect(detail.data.phase).not.toBe("model")
+      expect(detail.data.phase).not.toBe("total")
+      expect(detail.data.phase).not.toBe("approval")
+    }
+  }, 120_000)
+
+  test("a slow stream is not a stalled one: every chunk resets the clock", async () => {
+    // The stream runs for MANY TIMES the stall bound in total while never pausing
+    // for as long as the bound. That combination is the whole property: a bound on
+    // the GAP, not on the duration. Were the clock not reset per chunk, this call
+    // would be killed at ~STALL_BOUND despite producing output the entire time.
+    const STALL_BOUND = 900
+    const GAP = 250
+    const deltas = splitDeltas(TRANSCRIPT)
+    expect(deltas.length * GAP).toBeGreaterThan(STALL_BOUND * 2)
+    const trickle = stubProviderTrickle({ deltas, gapMs: GAP })
+    await withInstance(config({ mcp: { fixture: { type: "local", command: ["true"], sampling: "allow" } } }), async () => {
+      const warm = stubProvider(TRANSCRIPT)
+      try {
+        const first = await harness({ text: "hi" })
+        await wireSampling(first.client)
+        await first.client.callTool({ name: "transcribe_audio_fixture", arguments: {} }, CallToolResultSchema, {
+          timeout: 30_000,
+        })
+        await first.client.close()
+      } finally {
+        warm.restore()
+      }
+      wire = trickle
+      try {
+        const h = await harness({ text: "hi", requestTimeout: 30_000 })
+        await wireSampling(h.client, "fixture", 25_000, 25_000, 10_000, STALL_BOUND)
+        const started = Date.now()
+        const result = await h.client.callTool(
+          { name: "transcribe_audio_fixture", arguments: {} },
+          CallToolResultSchema,
+          { timeout: 30_000 },
+        )
+        const elapsed = Date.now() - started
+        expect(result.isError).toBeFalsy()
+        expect((result.content as Array<{ text: string }>)[0].text).toBe(TRANSCRIPT)
+        // It genuinely outlived the stall bound, so "it did not stall" is a real
+        // result and not an artefact of the call finishing too fast to test.
+        expect(elapsed).toBeGreaterThan(STALL_BOUND)
+        expect(h.samplingOutcomes[0].ok).toBe(true)
+        await h.client.close()
+      } finally {
+        trickle.release()
+        trickle.restore()
+      }
+    })
+  }, 90_000)
 })
 
 describe("the approval prompt", () => {
