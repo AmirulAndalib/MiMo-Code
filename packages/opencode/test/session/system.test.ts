@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test"
+import { $ } from "bun"
+import os from "os"
 import path from "path"
 import { Effect } from "effect"
 import { Agent } from "../../src/agent/agent"
@@ -13,6 +15,131 @@ function load<A>(dir: string, fn: (svc: Agent.Interface) => Effect.Effect<A>) {
 }
 
 describe("session.system", () => {
+  test("Anthropic template does not contain machine-specific snapshots", () => {
+    const prompt = SystemPrompt.provider(
+      ProviderTest.model({
+        id: ModelID.make("claude-sonnet-4-6"),
+        providerID: ProviderID.make("anthropic"),
+        api: { id: "claude-sonnet-4-6" } as never,
+      }),
+    )[0]
+
+    expect(prompt).not.toContain("/Users/mi/Desktop/MCracker")
+    expect(prompt).not.toContain("feat/wiki-seal-cot-recovery")
+    expect(prompt).not.toContain("# Environment")
+    expect(prompt).not.toContain("gitStatus:")
+  })
+
+  test("renders machine and repository environment only for Claude models", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await $`git branch -M prompt-test`.cwd(tmp.path).quiet()
+    await $`git config init.defaultBranch prompt-test`.cwd(tmp.path).quiet()
+    await Bun.write(path.join(tmp.path, "dirty.txt"), "dirty\n")
+    const now = Date.UTC(2026, 6, 30)
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const prompts = await Effect.runPromise(
+          Effect.gen(function* () {
+            const system = yield* SystemPrompt.Service
+            return yield* Effect.all([
+              system.environment(
+                ProviderTest.model({
+                  id: ModelID.make("claude-sonnet-4-6"),
+                  providerID: ProviderID.make("anthropic"),
+                  name: "Claude Sonnet 4.6",
+                  api: { id: "claude-sonnet-4-6-20260730" } as never,
+                }),
+                now,
+              ),
+              system.environment(ProviderTest.model(), now),
+            ])
+          }).pipe(Effect.provide(SystemPrompt.defaultLayer)),
+        )
+        const claude = prompts[0].join("\n")
+        const gpt = prompts[1].join("\n")
+
+        expect(claude).toContain("# Environment")
+        expect(claude).toContain(` - Primary working directory: ${tmp.path}`)
+        expect(claude).toContain(` - Platform: ${process.platform}`)
+        expect(claude).toContain(` - OS Version: ${os.type()} ${os.release()}`)
+        expect(claude).toContain("The exact model ID is anthropic/claude-sonnet-4-6-20260730")
+        expect(claude).toContain("Current branch: prompt-test")
+        expect(claude).toContain("Main branch (you will usually use this for PRs): prompt-test")
+        expect(claude).toContain("Git user: Test")
+        expect(claude).toContain("?? dirty.txt")
+        expect(claude).toContain("root commit")
+        expect(gpt).not.toContain("gitStatus:")
+        expect(gpt).not.toContain("Current branch:")
+        expect(gpt).not.toContain("Git user:")
+      },
+    })
+  })
+
+  test("uses the selected system template to decide whether to render the Claude environment", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const now = Date.UTC(2026, 6, 30)
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const prompts = await Effect.runPromise(
+          Effect.gen(function* () {
+            const system = yield* SystemPrompt.Service
+            return yield* Effect.all([
+              system.environment(
+                ProviderTest.model({
+                  id: ModelID.make("gpt-fast"),
+                  api: { id: "claude-sonnet-4-6" } as never,
+                }),
+                now,
+              ),
+              system.environment(
+                ProviderTest.model({
+                  id: ModelID.make("custom-model"),
+                  api: { id: "claude-sonnet-4-6" } as never,
+                }),
+                now,
+              ),
+            ])
+          }).pipe(Effect.provide(SystemPrompt.defaultLayer)),
+        )
+
+        expect(prompts[0].join("\n")).not.toContain("gitStatus:")
+        expect(prompts[1].join("\n")).toContain("gitStatus:")
+      },
+    })
+  })
+
+  test("keeps the Claude repository snapshot stable for a session", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const now = Date.UTC(2026, 6, 30)
+    const model = ProviderTest.model({
+      id: ModelID.make("claude-sonnet-4-6"),
+      providerID: ProviderID.make("anthropic"),
+      api: { id: "claude-sonnet-4-6" } as never,
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const render = () =>
+          Effect.runPromise(
+            Effect.gen(function* () {
+              return yield* (yield* SystemPrompt.Service).environment(model, now)
+            }).pipe(Effect.provide(SystemPrompt.defaultLayer)),
+          )
+        const first = await render()
+        await Bun.write(path.join(tmp.path, "created-after-render.txt"), "later\n")
+        const second = await render()
+
+        expect(second).toEqual(first)
+        expect(second.join("\n")).not.toContain("created-after-render.txt")
+      },
+    })
+  })
+
   test("GPT prompt aligns exec and parallel-call guidance", () => {
     const prompt = SystemPrompt.provider(ProviderTest.model())[0]
 
@@ -78,10 +205,7 @@ describe("session.system", () => {
       subagent,
       ProviderTest.model({ id: ModelID.make("claude-sonnet-4-6"), api: { id: "claude-sonnet-4-6" } as never }),
     ).join("\n")
-    const toolLess = SystemPrompt.agent(
-      { ...subagent, toolAllowlist: [] },
-      ProviderTest.model(),
-    ).join("\n")
+    const toolLess = SystemPrompt.agent({ ...subagent, toolAllowlist: [] }, ProviderTest.model()).join("\n")
 
     expect(nonGPT).toBe("Explore files.")
     expect(toolLess).toBe("Explore files.")

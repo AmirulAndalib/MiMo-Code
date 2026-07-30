@@ -1,6 +1,10 @@
 import { Context, Effect, Layer } from "effect"
+import os from "os"
 
 import { Instance } from "../project/instance"
+import { Git } from "@/git"
+import { Shell } from "@/shell/shell"
+import { which } from "@/util/which"
 
 import PROMPT_ANTHROPIC from "./prompt/anthropic.txt"
 import PROMPT_DEFAULT from "./prompt/default.txt"
@@ -22,6 +26,13 @@ import { Permission } from "@/permission"
 import { Skill } from "@/skill"
 import { isSkillSearchDisabled, type SkillSearchModel } from "@/skill/search"
 import { usesGPTToolset } from "@/tool/gpt"
+
+function renderGitResult(result: Git.Result, fallback = "(none)") {
+  if (result.exitCode !== 0) return fallback
+  return result.text().trim() || fallback
+}
+
+const anthropicEnvironment = new Map<string, string>()
 
 export function provider(model: Provider.Model) {
   const prompt = (id: string) => {
@@ -58,11 +69,56 @@ export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const skill = yield* Skill.Service
-    const provider = yield* Provider.Service
+    const providerService = yield* Provider.Service
+    const git = yield* Git.Service
 
     return Service.of({
       environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model, now: number) {
         const project = Instance.project
+        if (provider(model)[0] === PROMPT_ANTHROPIC) {
+          const key = `${Instance.directory}\0${now}\0${model.providerID}\0${model.api.id}`
+          const cached = anthropicEnvironment.get(key)
+          if (cached)
+            return [cached, `IMPORTANT: Your response must ALWAYS strictly follow the same major language as the user.`]
+
+          const [branch, base, user, status, commits] = yield* Effect.all(
+            [
+              git.branch(Instance.directory),
+              git.defaultBranch(Instance.directory),
+              git.run(["config", "user.name"], { cwd: Instance.directory }),
+              git.run(["status", "--short", "--untracked-files=all"], { cwd: Instance.directory }),
+              git.run(["log", "-2", "--oneline", "--decorate=no"], { cwd: Instance.directory }),
+            ],
+            { concurrency: 5 },
+          )
+          const prompt = [
+            `# Environment`,
+            `You have been invoked in the following environment:`,
+            ` - Primary working directory: ${Instance.directory}`,
+            ` - Is a git repository: ${project.vcs === "git" ? "true" : "false"}`,
+            ` - Platform: ${process.platform}`,
+            ` - Shell: ${Shell.name(Shell.preferred())}`,
+            ` - OS Version: ${os.type()} ${os.release()}`,
+            ` - You are powered by the model named ${model.name}. The exact model ID is ${model.providerID}/${model.api.id}.`,
+            ...(which("claude") ? [` - Claude Code is available as a CLI in the terminal.`] : []),
+            ``,
+            `gitStatus: This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.`,
+            ``,
+            `Current branch: ${branch ?? "(detached or unavailable)"}`,
+            ``,
+            `Main branch (you will usually use this for PRs): ${base?.name ?? "(unknown)"}`,
+            ``,
+            `Git user: ${renderGitResult(user, "(unknown)")}`,
+            ``,
+            `Status:`,
+            renderGitResult(status, project.vcs === "git" ? "(clean)" : "(unavailable)"),
+            ``,
+            `Recent commits:`,
+            renderGitResult(commits),
+          ].join("\n")
+          anthropicEnvironment.set(key, prompt)
+          return [prompt, `IMPORTANT: Your response must ALWAYS strictly follow the same major language as the user.`]
+        }
         const base = [
           [
             `You are MiMo Code Agent, built by Xiaomi MiMo Team. You are an interactive agent that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.`,
@@ -88,8 +144,8 @@ export const layer = Layer.effect(
           // NOTE: vision models are resolved per-call (lazy). If provider list changes
           // mid-session, this block may differ between turns and break cached system prefix.
           // In practice provider config is stable within a session.
-          const preferred = yield* provider.getVisionModel().pipe(Effect.orElseSucceed(() => undefined))
-          const visionModels = yield* provider
+          const preferred = yield* providerService.getVisionModel().pipe(Effect.orElseSucceed(() => undefined))
+          const visionModels = yield* providerService
             .list()
             .pipe(
               Effect.map((providers) =>
@@ -157,6 +213,10 @@ export const layer = Layer.effect(
   }),
 )
 
-export const defaultLayer = layer.pipe(Layer.provide(Skill.defaultLayer), Layer.provide(Provider.defaultLayer))
+export const defaultLayer = layer.pipe(
+  Layer.provide(Skill.defaultLayer),
+  Layer.provide(Provider.defaultLayer),
+  Layer.provide(Git.defaultLayer),
+)
 
 export * as SystemPrompt from "./system"
