@@ -566,19 +566,8 @@ describe("MCP client-side sampling, end to end", () => {
    * and assert the "user declined" message. That conflated two different refusals,
    * and a ruleset deny is now refused up front (next test) precisely so that
    * `mcp.<server>.sampling: "allow"` cannot bury it — so that config no longer
-   * reaches a prompt and no longer produces "declined".
-   *
-   * NOT COVERED HERE, and deliberately not faked: the genuine human-rejection path
-   * (`permission.reply({ reply: "reject" })`). `Permission.ask` races the approval
-   * Deferred against its `abortSignal` using `Effect.race`, and `Effect.race`
-   * treats a FAILURE as "not a winner" — it waits for the other side. A rejection
-   * fails the Deferred, the abort side never settles, and the ask parks until an
-   * outer bound reaps it. Verified against this branch's own HEAD with the source
-   * unmodified: the server got no answer and `inFlightCount` stayed at 1. That is
-   * a pre-existing defect in shared permission code, out of scope for this PR and
-   * reported separately. A test asserting the correct behaviour would fail today,
-   * and one asserting the hang would pin a bug in place, so this test covers the
-   * part that IS sound: the model call is gated behind the approval.
+   * reaches a prompt and no longer produces "declined". The genuine human
+   * rejection it never covered is now its own test, below.
    */
   test("policy ask requires approval: no provider call happens until it is answered", async () => {
     wire = stubProvider(TRANSCRIPT)
@@ -597,6 +586,116 @@ describe("MCP client-side sampling, end to end", () => {
       await AppRuntime.runPromise(McpSampling.cancelAll(h.client))
       await h.client.close()
       await pending
+    })
+  }, 60_000)
+
+  /**
+   * THE GENUINE HUMAN REJECTION — `permission.reply({ reply: "reject" })` against a
+   * prompt that was actually raised. Distinct from every "deny" test around it:
+   * those refuse before a prompt exists, so they never exercise the approval
+   * Deferred at all, and the `-1` declined error in `handle` was therefore
+   * unreachable in practice.
+   *
+   * It was unreachable for a reason, which is what this test pins. `Permission.ask`
+   * races the approval Deferred against the caller's `abortSignal`, and sampling
+   * always passes `extra.signal`. `Effect.race` resolves with the first *success*
+   * and treats a failure as "not a winner"; a rejection FAILS the Deferred and the
+   * abort side never settles on its own, so the ask parked forever. `raceFirst`
+   * (first side to *complete*, success or failure) is the fix.
+   *
+   * THE TIMEOUT BOUND IS INJECTED (8 s) SO THIS TEST FAILS FAST RATHER THAN
+   * HANGING. It is not part of the property being proven: the assertions below
+   * require the *declined* answer well inside the bound, so a regression that
+   * re-parks the ask is caught by the bound reaping it with "sampling timed out"
+   * (code -32001) instead — a failure, not a pass. This is a bounded proof, not an
+   * unbounded one.
+   */
+  test("a human rejection answers the server with the declined error and drains the fiber", async () => {
+    const BOUND = 8_000
+    wire = stubProvider(TRANSCRIPT)
+    await withInstance(config({ mcp: { fixture: { type: "local", command: ["true"] } } }), async () => {
+      const h = await harness({ text: "hi" })
+      await wireSampling(h.client, "fixture", BOUND)
+      const pending = h.client
+        .callTool({ name: "transcribe_audio_fixture", arguments: {} }, CallToolResultSchema, { timeout: 30_000 })
+        .catch(() => undefined)
+      const request = await waitForAsk()
+      expect(McpSampling.inFlightCount(h.client)).toBe(1)
+
+      const rejectedAt = Date.now()
+      await AppRuntime.runPromise(
+        Effect.gen(function* () {
+          const permission = yield* Permission.Service
+          yield* permission.reply({ requestID: request.id, reply: "reject" })
+        }),
+      )
+
+      // THE SYMPTOM, not the bookkeeping: the server's own sampling request must
+      // come back answered. Before the fix it came back with nothing at all.
+      for (let attempt = 0; attempt < 400 && h.samplingOutcomes.length === 0; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 25))
+      }
+      expect(h.samplingOutcomes).toHaveLength(1)
+      expect(h.samplingOutcomes[0].ok).toBe(false)
+      const detail = h.samplingOutcomes[0].detail as any
+      // `-1` + "declined" + `data.server`, all three: our request-timeout error
+      // and the SDK's own both use -32001 and both carry `data.timeout`, so code
+      // alone cannot tell a declined answer from a reaped one.
+      expect(detail.code).toBe(-1)
+      expect(String(detail.message)).toMatch(/declined/)
+      expect(detail.data).toMatchObject({ server: "fixture" })
+      // Answered by the rejection, not by the bound expiring.
+      expect(Date.now() - rejectedAt).toBeLessThan(BOUND / 2)
+      // A refusal never reaches a model.
+      expect(wire!.bodies).toHaveLength(0)
+      // Polled, not synchronous: the server's request settles when our JSON-RPC
+      // error is written, which is not ordered against `serve`'s finally block.
+      await drainInFlight(h.client)
+      expect(McpSampling.inFlightCount(h.client)).toBe(0)
+      await h.client.close()
+      await pending
+    })
+  }, 60_000)
+
+  /**
+   * THE MIRROR CASE, so the fix cannot buy the rejection path at the cost of
+   * promptness on a real abort. A server-issued cancellation aborts `extra.signal`
+   * while the prompt is still pending; the ask must abandon it immediately, not sit
+   * there until an outer bound reaps it.
+   *
+   * This one passes both before and after the fix and is a REGRESSION GUARD, not a
+   * reproducer — stated plainly because the two are not the same evidence. Under
+   * `race` an abort happened to work only because it fails BOTH sides (the callback
+   * resumes with a failure *and* it fails the Deferred), and `race` does surface a
+   * failure once every side has failed. The rejection path failed only one side,
+   * which is the whole asymmetry. A fix that bought the rejection path by dropping
+   * the abort composition would still satisfy the existing cancellation test, which
+   * polls for the outcome and so tolerates arriving at the bound; this does not.
+   *
+   * The bound is injected LARGE (20 s) on purpose: the assertion is that the answer
+   * arrives in a small fraction of it, which is only possible via the abort path,
+   * since the only other exit is the bound itself.
+   */
+  test("an abort while the prompt is pending abandons it promptly, not at the timeout bound", async () => {
+    const BOUND = 20_000
+    wire = stubProvider(TRANSCRIPT)
+    await withInstance(config({ mcp: { fixture: { type: "local", command: ["true"] } } }), async () => {
+      const h = await harness({ text: "hi", cancelAfterAsk: true })
+      await wireSampling(h.client, "fixture", BOUND)
+      const startedAt = Date.now()
+      const result = await h.client.callTool({ name: "transcribe_audio_fixture", arguments: {} }, CallToolResultSchema, {
+        timeout: 30_000,
+      })
+      expect(result.isError).toBe(true)
+      expect(h.samplingOutcomes).toHaveLength(1)
+      expect(h.samplingOutcomes[0].ok).toBe(false)
+      // The abort answered it, not the bound: a 20 s bound against a 5 s ceiling,
+      // so a regression that fell back to the bound could not slip through.
+      expect(Date.now() - startedAt).toBeLessThan(5_000)
+      expect(wire!.bodies).toHaveLength(0)
+      await drainInFlight(h.client)
+      expect(McpSampling.inFlightCount(h.client)).toBe(0)
+      await h.client.close()
     })
   }, 60_000)
 
