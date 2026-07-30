@@ -517,8 +517,18 @@ export interface Bridge {
  *     fiber, lock or scope with the fiber awaiting `client.callTool`.
  *
  * Both directions therefore make progress independently.
+ *
+ * `timeoutMs` is the wall-clock bound on one request and defaults to
+ * DEFAULT_SAMPLING_TIMEOUT; production passes nothing. It is a parameter so the
+ * bound-enforcement path can be driven in a test without waiting two minutes —
+ * the default value itself is pinned by an assertion on the exported constant.
  */
-export function serve(server: string, client: SamplingClient, bridge: Bridge) {
+export function serve(
+  server: string,
+  client: SamplingClient,
+  bridge: Bridge,
+  timeoutMs: number = DEFAULT_SAMPLING_TIMEOUT,
+) {
   client.setRequestHandler(CreateMessageRequestSchema, async (request, extra) => {
     const params = (request.params ?? {}) as CreateMessageParams
     // Effect 4 exposes no `timeoutFail` (it survives only in doc comments), so
@@ -529,14 +539,14 @@ export function serve(server: string, client: SamplingClient, bridge: Bridge) {
       sessionID: activeSessions.get(client),
       signal: extra?.signal,
     }).pipe(
-      Effect.timeoutOption(DEFAULT_SAMPLING_TIMEOUT),
+      Effect.timeoutOption(timeoutMs),
       Effect.flatMap((result) =>
         Option.isSome(result)
           ? Effect.succeed(result.value)
           : Effect.fail(
               new SamplingError(TIMEOUT_CODE, "sampling timed out", {
                 server,
-                timeout: DEFAULT_SAMPLING_TIMEOUT,
+                timeout: timeoutMs,
               }),
             ),
       ),

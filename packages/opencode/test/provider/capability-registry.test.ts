@@ -244,4 +244,47 @@ describe("selectModel: filter then rank", () => {
     if (result.ok) throw new Error("unreachable")
     expect(result.rejections).toEqual([])
   })
+
+  /**
+   * The `unknown` fail-closed path at the GATE, not just at the leaf.
+   *
+   * Measured: collapsing `unknown` into an eligible state (replacing
+   * `rejectionFor`'s unknown branch with `continue`) left the
+   * `adapterDeclaration` and `modelDeclaration` assertions above GREEN — they pin
+   * the declaration table, not the decision — and `selectModel`, the function the
+   * sampling handler actually calls, had no `unknown` case at all. Only
+   * `rejectionFor`'s reason-kind assertion failed. These two tests put the
+   * refusal itself under assertion.
+   */
+  test("an unknown-support model is refused by the gate, distinctly from known-absent", () => {
+    const unproven = model({ id: "future", npm: "@ai-sdk/unheard-of", audio: true })
+    const result = ModelCapability.selectModel({ models: [unproven], requirements: [TEXT, AUDIO_WAV] })
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error("unreachable")
+    expect(result.rejections).toEqual([
+      { model: "mimo/future", reason: { kind: "modality-unknown", modality: "audio" } },
+    ])
+    // The operator-facing text separates "we do not know" from "this cannot
+    // work". These two lines pin wording only; they are not sensitive to a
+    // fail-open regression in the gate, which the assertions above cover.
+    expect(ModelCapability.describeRejection(result.rejections[0].reason)).toBe("has no declared audio support")
+    expect(ModelCapability.describeRejection({ kind: "modality-unsupported", modality: "audio" })).toBe(
+      "does not accept audio input",
+    )
+  })
+
+  test("a hint cannot promote an unknown-support model over an eligible one", () => {
+    // The known-absent counterpart of this is asserted above; `unknown` needs its
+    // own case because it is a different branch. A hint ranks eligible models and
+    // must never widen eligibility to one whose support is merely unproven.
+    const models = [
+      model({ id: "future", npm: "@ai-sdk/unheard-of", audio: true }),
+      model({ id: "mimo-v2.5", audio: true }),
+    ]
+    const result = ModelCapability.selectModel({ models, requirements: [AUDIO_WAV], hints: [{ name: "future" }] })
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error("unreachable")
+    expect(String(result.model.id)).toBe("mimo-v2.5")
+    expect(result.via).toBe("first-eligible")
+  })
 })

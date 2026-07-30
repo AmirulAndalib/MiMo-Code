@@ -150,6 +150,18 @@ flight for it, so an orphaned model call cannot outlive its transport.
 > `0` is falsy. The *first* server-initiated request on a connection is therefore
 > uncancellable upstream; later ones cancel correctly. The 120 s request timeout
 > is the backstop that keeps even that case from leaking.
+>
+> MiMoCode does not work around this, because it cannot: the id at risk belongs to
+> the **server's** outgoing request counter, which only the server can advance.
+> Spending an id from the client side — a ping at connection setup, say — advances
+> the client's own counter and leaves the server's at `0`, so the server's
+> cancellations still do not land. Measured, together with the failing and working
+> cases, in `test/mcp/sampling-e2e.test.ts`; those tests fail if an SDK upgrade
+> changes this behaviour.
+>
+> The residual, stated plainly: **when a server abandons the first sampling request
+> it issues on a connection, MiMoCode does not learn of it and keeps the model call
+> running until the 120 s timeout reaps it.** That timeout is the only bound.
 
 ## Security boundaries
 

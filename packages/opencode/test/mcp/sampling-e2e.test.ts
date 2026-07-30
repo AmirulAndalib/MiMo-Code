@@ -63,11 +63,19 @@ const sdk = await (async () => {
     McpServer: server.McpServer as unknown as typeof McpServerType,
     InMemoryTransport: inMemory.InMemoryTransport,
     CallToolResultSchema: types.CallToolResultSchema,
+    CreateMessageRequestSchema: types.CreateMessageRequestSchema,
     CreateMessageResultSchema: types.CreateMessageResultSchema,
   }
 })()
 
-const { Client, McpServer, InMemoryTransport, CallToolResultSchema, CreateMessageResultSchema } = sdk
+const {
+  Client,
+  McpServer,
+  InMemoryTransport,
+  CallToolResultSchema,
+  CreateMessageRequestSchema,
+  CreateMessageResultSchema,
+} = sdk
 
 const TRANSCRIPT = "the quick brown fox jumps over the lazy dog"
 const SESSION = "ses_sampling_e2e" as SessionID
@@ -127,6 +135,44 @@ function stubProvider(text: string): Wire {
     )
   }) as typeof fetch
   return { bodies, restore: () => (globalThis.fetch = original) }
+}
+
+/**
+ * Like `stubProvider`, but the chat-completions call NEVER answers — the shape of
+ * a provider that has accepted the request and gone quiet. `release()` settles the
+ * abandoned calls after the assertions so no promise is left dangling.
+ */
+function stubProviderHang(): Wire & { release: () => void } {
+  const original = globalThis.fetch
+  const bodies: Array<any> = []
+  const pending: Array<(response: Response) => void> = []
+  globalThis.fetch = (async (url: any, init: any) => {
+    const href = typeof url === "string" ? url : (url?.url ?? String(url))
+    if (!href.includes("example.invalid")) return original(url, init)
+    bodies.push(JSON.parse(init.body as string))
+    return new Promise<Response>((resolve) => pending.push(resolve))
+  }) as typeof fetch
+  return {
+    bodies,
+    restore: () => (globalThis.fetch = original),
+    release: () => {
+      for (const resolve of pending.splice(0)) {
+        resolve(
+          new Response(
+            JSON.stringify({
+              id: "chatcmpl-late",
+              object: "chat.completion",
+              created: 1,
+              model: "mimo-v2.5",
+              choices: [{ index: 0, message: { role: "assistant", content: "too late" }, finish_reason: "stop" }],
+              usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+            }),
+            { headers: { "content-type": "application/json" } },
+          ),
+        )
+      }
+    },
+  }
 }
 
 let wire: Wire | undefined
@@ -226,12 +272,12 @@ async function harness(input: {
 }
 
 /** Register production sampling handling on a client inside a live Instance. */
-function wireSampling(client: ClientType, serverName = "fixture") {
+function wireSampling(client: ClientType, serverName = "fixture", timeoutMs?: number) {
   return AppRuntime.runPromise(
     Effect.gen(function* () {
       const bridge = yield* EffectBridge.make()
       McpSampling.setActiveSession(client, SESSION)
-      McpSampling.serve(serverName, client as never, bridge)
+      McpSampling.serve(serverName, client as never, bridge, timeoutMs)
     }),
   )
 }
@@ -430,6 +476,67 @@ describe("MCP client-side sampling, end to end", () => {
     })
   }, 60_000)
 
+  /**
+   * The OTHER fail-closed branch: the adapter's audio support is `unknown`, not
+   * known-absent. The test above exercises `unsupported`; nothing exercised
+   * `unknown` past the registry's own leaf function.
+   *
+   * `@ai-sdk/mistral` is bundled (so this stays offline and installs nothing) and
+   * carries no entry in the registry's adapter table — exactly the shape of a
+   * provider added after that table was written. The model itself declares audio
+   * input, so the MODEL gate passes and only the adapter verdict can refuse.
+   */
+  test("audio is refused when the only audio-declaring model's adapter support is UNKNOWN", async () => {
+    wire = stubProvider(TRANSCRIPT)
+    const data = wav(1).toString("base64")
+    const UNDECLARED_ID = "undeclaredfixture"
+    await withInstance(
+      config({
+        provider: {
+          [UNDECLARED_ID]: {
+            name: "Undeclared Adapter Fixture",
+            npm: "@ai-sdk/mistral",
+            env: [],
+            api: "https://example.invalid/v1",
+            options: { apiKey: "test-key", baseURL: "https://example.invalid/v1" },
+            models: {
+              "sonic-1": {
+                name: "Sonic 1",
+                tool_call: true,
+                modalities: { input: ["text", "audio"], output: ["text"] },
+                limit: { context: 128_000, output: 8_000 },
+              },
+            },
+          },
+        },
+        enabled_providers: [UNDECLARED_ID],
+        model: `${UNDECLARED_ID}/sonic-1`,
+        mcp: { fixture: { type: "local", command: ["true"], sampling: "allow" } },
+      }),
+      async () => {
+        const h = await harness({ audio: { data, mimeType: "audio/wav" } })
+        await wireSampling(h.client)
+        const result = await h.client.callTool({ name: "transcribe_audio_fixture", arguments: {} }, CallToolResultSchema, {
+          timeout: 30_000,
+        })
+        expect(result.isError).toBe(true)
+        expect(h.samplingOutcomes[0].ok).toBe(false)
+        const detail = h.samplingOutcomes[0].detail as any
+        expect(detail.code).toBe(-32602)
+        expect(detail.message).toMatch(/no configured model can accept/)
+        // "has no declared" — NOT "does not accept". An operator can tell an
+        // unproven adapter from a disproven one.
+        expect(detail.data.rejected).toEqual([
+          { model: `${UNDECLARED_ID}/sonic-1`, reason: "has no declared audio support" },
+        ])
+        // The unproven adapter was not "tried anyway": no request was built, and
+        // the bundled Mistral adapter was never even loaded.
+        expect(wire!.bodies).toHaveLength(0)
+        await h.client.close()
+      },
+    )
+  }, 60_000)
+
   test("policy deny refuses before any model or provider work", async () => {
     wire = stubProvider(TRANSCRIPT)
     await withInstance(config({ mcp: { fixture: { type: "local", command: ["true"], sampling: "deny" } } }), async () => {
@@ -588,6 +695,80 @@ describe("MCP client-side sampling, end to end", () => {
     })
   }, 60_000)
 
+  /**
+   * The REQUEST-TIMEOUT bound. Cancellation (above) was the only exercised exit
+   * from a parked request; the timeout was implemented and untested. It matters
+   * more than a redundant second exit, because the upstream SDK drops a
+   * cancellation whose JSON-RPC id is 0 (pinned in the last describe block of this
+   * file), which makes this bound the ONLY thing that reaps the first
+   * server-initiated sampling request of a connection when the server abandons it.
+   *
+   * The bound is INJECTED (1 s) because a test cannot wait out 120 s. Production
+   * passes no bound at all, so it gets `serve`'s parameter default; that default's
+   * value is pinned by the DEFAULT_SAMPLING_TIMEOUT assertion below, which is a
+   * constant check and is deliberately NOT sensitive to the timeout path — no test
+   * that runs in CI time can be.
+   */
+  test("a provider that never responds is reaped at the timeout bound and leaves the in-flight set", async () => {
+    expect(McpSampling.DEFAULT_SAMPLING_TIMEOUT).toBe(120_000)
+    const BOUND = 1_000
+    await withInstance(config({ mcp: { fixture: { type: "local", command: ["true"], sampling: "allow" } } }), async () => {
+      // Warm the provider and the bundled adapter on a client with the DEFAULT
+      // bound, so the tight bound below is spent waiting on the provider rather
+      // than racing a cold module load.
+      const warm = stubProvider(TRANSCRIPT)
+      try {
+        const first = await harness({ text: "hi" })
+        await wireSampling(first.client)
+        const ok = await first.client.callTool({ name: "transcribe_audio_fixture", arguments: {} }, CallToolResultSchema, {
+          timeout: 30_000,
+        })
+        expect(ok.isError).toBeFalsy()
+        await first.client.close()
+      } finally {
+        warm.restore()
+      }
+
+      const hang = stubProviderHang()
+      wire = hang
+      try {
+        const h = await harness({ text: "hi" })
+        await wireSampling(h.client, "fixture", BOUND)
+        const result = await h.client.callTool(
+          { name: "transcribe_audio_fixture", arguments: {} },
+          CallToolResultSchema,
+          // Far longer than BOUND. If OUR bound stopped firing, the SDK's own
+          // request timeout would fire here instead — a different error, which the
+          // assertions below reject by name rather than by "something timed out".
+          { timeout: 20_000 },
+        )
+        expect(result.isError).toBe(true)
+        expect(h.samplingOutcomes).toHaveLength(1)
+        expect(h.samplingOutcomes[0].ok).toBe(false)
+
+        const detail = h.samplingOutcomes[0].detail as any
+        expect(detail.code).toBe(McpSampling.TIMEOUT_CODE)
+        // OURS: the SDK's own timeout says "Request timed out" and carries no
+        // `server`, so this pair cannot be satisfied by the SDK's error.
+        expect(String(detail.message)).toMatch(/sampling timed out/)
+        expect(detail.data).toMatchObject({ server: "fixture", timeout: BOUND })
+
+        // The model call was genuinely started and then abandoned mid-flight —
+        // this is the timeout path, not a pre-flight refusal.
+        expect(hang.bodies).toHaveLength(1)
+
+        // THE POINT OF THE GAP: the timed-out fiber is removed from the in-flight
+        // set. `serve`'s finally block runs before the JSON-RPC error is written,
+        // so this is asserted SYNCHRONOUSLY; polling would also pass while a leak
+        // drained on its own.
+        expect(McpSampling.inFlightCount(h.client)).toBe(0)
+        await h.client.close()
+      } finally {
+        hang.release()
+      }
+    })
+  }, 60_000)
+
   test("cancelAll interrupts sampling still in flight so the server stops waiting", async () => {
     wire = stubProvider(TRANSCRIPT)
     await withInstance(config({ mcp: { fixture: { type: "local", command: ["true"] } } }), async () => {
@@ -716,4 +897,138 @@ describe("the approval prompt", () => {
       await h.client.close()
     })
   }, 60_000)
+})
+
+/**
+ * UPSTREAM SDK BEHAVIOUR, PINNED — @modelcontextprotocol/sdk 1.27.1.
+ *
+ * `Protocol._oncancel` opens with `if (!notification.params.requestId) return`
+ * (dist/esm/shared/protocol.js:170), so a `notifications/cancelled` naming request
+ * id **0** is silently dropped and the receiving handler's `extra.signal` is never
+ * aborted. `_requestMessageId` is initialised to 0 (protocol.js:16) and is PER
+ * PROTOCOL INSTANCE, counting only the requests that instance SENDS — so the id at
+ * risk belongs to the SERVER's outgoing counter, and nothing our client does can
+ * advance it. Consequence for us: the FIRST server-initiated sampling request of a
+ * connection cannot be cancelled by the server, and the request-timeout bound is
+ * the only thing that reaps it.
+ *
+ * These tests exist so an SDK upgrade is VISIBLE. If upstream drops the falsy
+ * check, cases 1 and 2 flip to `aborted === true` and fail here rather than
+ * quietly changing behaviour under us.
+ */
+describe("upstream: a cancellation for JSON-RPC id 0 is dropped by the SDK", () => {
+  const settle = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+  interface Pin {
+    client: ClientType
+    server: McpServerType
+    /** Signals handed to the client's sampling handler, in arrival order. */
+    signals: AbortSignal[]
+    /** Every JSON-RPC message the SERVER put on the wire. */
+    sent: Array<any>
+    close: () => Promise<void>
+  }
+
+  /**
+   * A real client whose `sampling/createMessage` handler PARKS, so a server
+   * cancellation arrives while the request is genuinely open. A bare SDK handler
+   * on purpose: what is under test is the SDK's notification routing, not ours.
+   */
+  async function pin(): Promise<Pin> {
+    const server = new McpServer({ name: "cancelpin", version: "1.0.0" })
+    const client = new Client({ name: "mimocode", version: "test" }, MCP.CLIENT_OPTIONS)
+    const signals: AbortSignal[] = []
+    const release: Array<() => void> = []
+    client.setRequestHandler(CreateMessageRequestSchema, (async (_request: any, extra: any) => {
+      signals.push(extra.signal)
+      await new Promise<void>((resolve) => release.push(resolve))
+      return { role: "assistant", content: { type: "text", text: "unused" }, model: "m", stopReason: "endTurn" }
+    }) as never)
+
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    const sent: Array<any> = []
+    const send = serverTransport.send.bind(serverTransport)
+    serverTransport.send = ((message: any, options: any) => {
+      sent.push(message)
+      return send(message, options)
+    }) as never
+    await Promise.all([client.connect(clientTransport), server.server.connect(serverTransport)])
+    return {
+      client,
+      server,
+      signals,
+      sent,
+      close: async () => {
+        for (const resolve of release.splice(0)) resolve()
+        await client.close()
+      },
+    }
+  }
+
+  /** Issue a server→client sampling request, then abandon it. */
+  async function abandonSamplingRequest(p: Pin) {
+    const controller = new AbortController()
+    const outcome = p.server.server
+      .request(
+        {
+          method: "sampling/createMessage",
+          params: { messages: [{ role: "user", content: { type: "text", text: "hi" } }], maxTokens: 16 },
+        },
+        CreateMessageResultSchema,
+        { signal: controller.signal, timeout: 20_000 },
+      )
+      .then(
+        () => "resolved",
+        () => "rejected",
+      )
+    // Do not cancel before the handler has been entered, or there would be no
+    // abort controller registered to find and the test would prove nothing.
+    for (let attempt = 0; attempt < 200 && p.signals.length === 0; attempt++) await settle(10)
+    expect(p.signals).toHaveLength(1)
+    controller.abort(new Error("server abandoned the request"))
+    expect(await outcome).toBe("rejected")
+    // Let the notification cross the in-memory transport.
+    await settle(100)
+  }
+
+  /** The requestId the server named in its `notifications/cancelled`. */
+  function cancelledId(p: Pin) {
+    const notification = p.sent.find((message) => message?.method === "notifications/cancelled")
+    expect(notification).toBeDefined()
+    return notification.params.requestId
+  }
+
+  test("case 1: the FIRST server-initiated request is id 0 and its cancellation never aborts our signal", async () => {
+    const p = await pin()
+    await abandonSamplingRequest(p)
+    expect(cancelledId(p)).toBe(0)
+    // The bug, measured: the notification was sent and delivered, and the
+    // receiving handler's signal is still live.
+    expect(p.signals[0].aborted).toBe(false)
+    await p.close()
+  }, 30_000)
+
+  test("case 2: a CLIENT-side request first does not help — the server's counter is still at 0", async () => {
+    const p = await pin()
+    // A client→server round trip. This is what "burn id 0 at connection setup"
+    // would amount to from our side, and it advances OUR outgoing counter, not
+    // the server's — so it cannot make the server's cancellations land.
+    await p.client.ping()
+    await abandonSamplingRequest(p)
+    expect(cancelledId(p)).toBe(0)
+    expect(p.signals[0].aborted).toBe(false)
+    await p.close()
+  }, 30_000)
+
+  test("case 3: once the SERVER has spent id 0, the very same cancellation works", async () => {
+    const p = await pin()
+    // Only the server can advance its own outgoing id.
+    await p.server.server.ping()
+    await abandonSamplingRequest(p)
+    expect(cancelledId(p)).toBe(1)
+    // The control for cases 1 and 2: cancellation delivery works end to end, so
+    // their `aborted === false` is the falsy-id check and nothing else.
+    expect(p.signals[0].aborted).toBe(true)
+    await p.close()
+  }, 30_000)
 })
