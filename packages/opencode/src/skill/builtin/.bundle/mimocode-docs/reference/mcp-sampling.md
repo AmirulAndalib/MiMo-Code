@@ -100,7 +100,7 @@ The default policy is **ask**. The approval prompt shows:
 - the content types present, and the size of any audio,
 - previews of the system prompt and the user text prompt.
 
-Two independent controls:
+Two independent controls, and a `deny` from **either** one refuses the request:
 
 - `permission.mcp_sampling` — standard permission rule, keyed by MCP server name
   (`{ "*": "ask", "mimo-cut": "allow" }`).
@@ -109,7 +109,11 @@ Two independent controls:
 
 `deny` refuses before any prompt, model selection, or provider call. `allow`
 skips the prompt but is **not** a bypass: request size caps, the request
-timeout, and model capability checks all still apply.
+timeout, and model capability checks all still apply — and it does **not**
+override a `permission.mcp_sampling` deny. Because `allow` skips the approval
+step entirely, the handler evaluates the permission ruleset itself rather than
+relying on the prompt to surface a deny; the error names which control refused
+(`data.deniedBy`).
 
 If a sampling request arrives while no turn is in flight for that server, the
 `ask` policy fails closed rather than raising a prompt no UI is listening to.
@@ -121,6 +125,12 @@ If a sampling request arrives while no turn is in flight for that server, the
 | Media (image/audio) per item, decoded | 20 MiB |
 | Text per item, and `systemPrompt` | 1 MiB |
 | Whole request, including the approval wait | 120 s |
+
+Reaching the 120 s bound aborts the provider call as well as MiMoCode's wait for
+it. That is not automatic: interrupting the Effect fiber does not cancel an HTTP
+request already in flight inside it, so the handler hands the provider the union
+of its own fiber's abort signal and the MCP request signal. Both the timeout and
+a client teardown therefore reach the provider.
 
 The media cap is a **client-side safety limit**, not a claim about any
 provider's real limit. It exists so a buggy or hostile server cannot push an
@@ -140,16 +150,19 @@ independent reasons:
    lock, or scope with the fiber parked on `callTool`.
 
 Requests are served concurrently. A cancelled request unwinds through the
-handler's abort signal, which is threaded into both the approval wait and the
-provider call. Closing or replacing a client interrupts any sampling still in
-flight for it, so an orphaned model call cannot outlive its transport.
+handler's abort signal, which is threaded into the approval wait and, composed
+with the handler fiber's own signal, into the provider call. Closing or replacing
+a client interrupts any sampling still in flight for it and aborts its provider
+call, so an orphaned model call cannot outlive its transport.
 
 > **Upstream caveat.** In `@modelcontextprotocol/sdk` 1.27.1 a cancellation whose
 > JSON-RPC `requestId` is `0` is silently dropped
 > (`if (!notification.params.requestId) return` in `shared/protocol.js`), because
 > `0` is falsy. The *first* server-initiated request on a connection is therefore
 > uncancellable upstream; later ones cancel correctly. The 120 s request timeout
-> is the backstop that keeps even that case from leaking.
+> is the backstop that keeps even that case from leaking, and because that bound
+> aborts the provider call it ends the model call rather than merely stopping us
+> waiting for it.
 >
 > MiMoCode does not work around this, because it cannot: the id at risk belongs to
 > the **server's** outgoing request counter, which only the server can advance.
@@ -160,8 +173,9 @@ flight for it, so an orphaned model call cannot outlive its transport.
 > changes this behaviour.
 >
 > The residual, stated plainly: **when a server abandons the first sampling request
-> it issues on a connection, MiMoCode does not learn of it and keeps the model call
-> running until the 120 s timeout reaps it.** That timeout is the only bound.
+> it issues on a connection, MiMoCode does not learn of it, so that request keeps a
+> model call running — and a paid one — for up to 120 s before the bound aborts
+> it.** The bound caps the waste; it does not avoid it.
 
 ## Security boundaries
 

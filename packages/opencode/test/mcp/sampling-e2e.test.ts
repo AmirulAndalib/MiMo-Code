@@ -141,19 +141,26 @@ function stubProvider(text: string): Wire {
  * Like `stubProvider`, but the chat-completions call NEVER answers — the shape of
  * a provider that has accepted the request and gone quiet. `release()` settles the
  * abandoned calls after the assertions so no promise is left dangling.
+ *
+ * `signals` captures the `AbortSignal` each captive call was issued with, which is
+ * how a test can assert that abandoning a request actually ABORTED the provider
+ * call rather than merely stopping our own waiting for it.
  */
-function stubProviderHang(): Wire & { release: () => void } {
+function stubProviderHang(): Wire & { signals: Array<AbortSignal | undefined>; release: () => void } {
   const original = globalThis.fetch
   const bodies: Array<any> = []
+  const signals: Array<AbortSignal | undefined> = []
   const pending: Array<(response: Response) => void> = []
   globalThis.fetch = (async (url: any, init: any) => {
     const href = typeof url === "string" ? url : (url?.url ?? String(url))
     if (!href.includes("example.invalid")) return original(url, init)
     bodies.push(JSON.parse(init.body as string))
+    signals.push(init?.signal as AbortSignal | undefined)
     return new Promise<Response>((resolve) => pending.push(resolve))
   }) as typeof fetch
   return {
     bodies,
+    signals,
     restore: () => (globalThis.fetch = original),
     release: () => {
       for (const resolve of pending.splice(0)) {
@@ -554,11 +561,49 @@ describe("MCP client-side sampling, end to end", () => {
     })
   }, 60_000)
 
-  test("policy ask requires approval: a rejected ask fails the request", async () => {
+  /**
+   * This test USED to drive its rejection with `permission.mcp_sampling: "deny"`
+   * and assert the "user declined" message. That conflated two different refusals,
+   * and a ruleset deny is now refused up front (next test) precisely so that
+   * `mcp.<server>.sampling: "allow"` cannot bury it — so that config no longer
+   * reaches a prompt and no longer produces "declined".
+   *
+   * NOT COVERED HERE, and deliberately not faked: the genuine human-rejection path
+   * (`permission.reply({ reply: "reject" })`). `Permission.ask` races the approval
+   * Deferred against its `abortSignal` using `Effect.race`, and `Effect.race`
+   * treats a FAILURE as "not a winner" — it waits for the other side. A rejection
+   * fails the Deferred, the abort side never settles, and the ask parks until an
+   * outer bound reaps it. Verified against this branch's own HEAD with the source
+   * unmodified: the server got no answer and `inFlightCount` stayed at 1. That is
+   * a pre-existing defect in shared permission code, out of scope for this PR and
+   * reported separately. A test asserting the correct behaviour would fail today,
+   * and one asserting the hang would pin a bug in place, so this test covers the
+   * part that IS sound: the model call is gated behind the approval.
+   */
+  test("policy ask requires approval: no provider call happens until it is answered", async () => {
+    wire = stubProvider(TRANSCRIPT)
+    await withInstance(config({ mcp: { fixture: { type: "local", command: ["true"] } } }), async () => {
+      const h = await harness({ text: "hi" })
+      await wireSampling(h.client)
+      const pending = h.client
+        .callTool({ name: "transcribe_audio_fixture", arguments: {} }, CallToolResultSchema, { timeout: 30_000 })
+        .catch(() => undefined)
+      const request = await waitForAsk()
+      expect(request.permission).toBe("mcp_sampling")
+      expect(request.patterns).toEqual(["fixture"])
+      // Gated BEHIND the approval, not merely reported after it.
+      expect(wire!.bodies).toHaveLength(0)
+      expect(McpSampling.inFlightCount(h.client)).toBe(1)
+      await AppRuntime.runPromise(McpSampling.cancelAll(h.client))
+      await h.client.close()
+      await pending
+    })
+  }, 60_000)
+
+  test("a permission ruleset deny under policy ask refuses without ever prompting", async () => {
     wire = stubProvider(TRANSCRIPT)
     await withInstance(
       config({
-        // No `sampling` key at all → the default policy must be `ask`.
         mcp: { fixture: { type: "local", command: ["true"] } },
         permission: { mcp_sampling: "deny" },
       }),
@@ -573,7 +618,16 @@ describe("MCP client-side sampling, end to end", () => {
         expect(result.isError).toBe(true)
         const detail = h.samplingOutcomes[0].detail as any
         expect(detail.code).toBe(-1)
-        expect(detail.message).toMatch(/declined/)
+        expect(detail.message).toMatch(/denied/)
+        // A deny is a refusal, not a human declining a prompt that was raised.
+        expect(detail.data).toMatchObject({ server: "fixture", deniedBy: "permission.mcp_sampling" })
+        const prompts = await AppRuntime.runPromise(
+          Effect.gen(function* () {
+            const permission = yield* Permission.Service
+            return yield* permission.list()
+          }),
+        )
+        expect(prompts.filter((item) => item.permission === "mcp_sampling")).toHaveLength(0)
         expect(wire!.bodies).toHaveLength(0)
         await h.client.close()
       },
@@ -757,6 +811,16 @@ describe("MCP client-side sampling, end to end", () => {
         // this is the timeout path, not a pre-flight refusal.
         expect(hang.bodies).toHaveLength(1)
 
+        // THE BOUND MUST REACH THE PROVIDER, not just our own waiting. The fiber
+        // interrupt that `Effect.timeoutOption` performs does NOT by itself cancel
+        // a promise already in flight, so without the abort composition in
+        // `handle` the HTTP call would run to completion after we gave up on it —
+        // exactly the leak this asserts against. Observed on the signal the
+        // provider was handed, so it cannot be satisfied by our own bookkeeping.
+        expect(hang.signals).toHaveLength(1)
+        expect(hang.signals[0]).toBeInstanceOf(AbortSignal)
+        expect(hang.signals[0]!.aborted).toBe(true)
+
         // THE POINT OF THE GAP: the timed-out fiber is removed from the in-flight
         // set. `serve`'s finally block runs before the JSON-RPC error is written,
         // so this is asserted SYNCHRONOUSLY; polling would also pass while a leak
@@ -797,6 +861,99 @@ describe("MCP client-side sampling, end to end", () => {
       await h.client.close()
       await pending
     })
+  }, 60_000)
+
+  /**
+   * The case the test above cannot cover: `cancelAll` while the request is parked
+   * on the PROVIDER rather than on the approval prompt. `Fiber.interrupt` stops our
+   * fiber, but a promise already in flight inside it keeps running unless something
+   * aborts it — so without the abort composition in `handle` this teardown would
+   * leave a live model call behind with no owner. `sampling: "allow"` removes the
+   * prompt so the request is guaranteed to be inside `generateText` when cancelled.
+   */
+  test("cancelAll aborts a provider call already in flight", async () => {
+    await withInstance(config({ mcp: { fixture: { type: "local", command: ["true"], sampling: "allow" } } }), async () => {
+      const hang = stubProviderHang()
+      wire = hang
+      try {
+        const h = await harness({ text: "hi" })
+        await wireSampling(h.client)
+        const pending = h.client
+          .callTool({ name: "transcribe_audio_fixture", arguments: {} }, CallToolResultSchema, { timeout: 30_000 })
+          .catch(() => undefined)
+
+        // Park INSIDE the provider call, not before it.
+        for (let attempt = 0; attempt < 400 && hang.bodies.length === 0; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 25))
+        }
+        expect(hang.bodies).toHaveLength(1)
+        expect(hang.signals[0]).toBeInstanceOf(AbortSignal)
+        // Not yet aborted: proves the assertion below observes the cancellation
+        // rather than a signal that was already aborted for some other reason.
+        expect(hang.signals[0]!.aborted).toBe(false)
+        expect(McpSampling.inFlightCount(h.client)).toBe(1)
+
+        await AppRuntime.runPromise(McpSampling.cancelAll(h.client))
+
+        // THE OUTCOME AT THE PROVIDER: the HTTP call was aborted, so no orphaned
+        // model call outlives the client that owned it.
+        for (let attempt = 0; attempt < 200 && !hang.signals[0]!.aborted; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 25))
+        }
+        expect(hang.signals[0]!.aborted).toBe(true)
+
+        // And the server still gets an answer instead of hanging to its own timeout.
+        for (let attempt = 0; attempt < 200 && h.samplingOutcomes.length === 0; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 25))
+        }
+        expect(h.samplingOutcomes).toHaveLength(1)
+        expect(h.samplingOutcomes[0].ok).toBe(false)
+        expect(McpSampling.inFlightCount(h.client)).toBe(0)
+        await h.client.close()
+        await pending
+      } finally {
+        hang.release()
+      }
+    })
+  }, 60_000)
+
+  /**
+   * FAIL-OPEN GUARD. `mcp.<server>.sampling: "allow"` skips the approval prompt, so
+   * an explicit `permission.mcp_sampling` deny is never seen by `permission.ask` at
+   * all. Unless `handle` evaluates the ruleset itself, the deny is silently
+   * discarded and the model runs — a security control that reads as configured and
+   * does nothing.
+   */
+  test("an explicit permission deny wins over mcp.<server>.sampling allow", async () => {
+    wire = stubProvider(TRANSCRIPT)
+    await withInstance(
+      config({
+        mcp: { fixture: { type: "local", command: ["true"], sampling: "allow" } },
+        permission: { mcp_sampling: { "*": "allow", fixture: "deny" } },
+      }),
+      async () => {
+        const h = await harness({ text: "hi" })
+        await wireSampling(h.client)
+        const result = await h.client.callTool(
+          { name: "transcribe_audio_fixture", arguments: {} },
+          CallToolResultSchema,
+          { timeout: 30_000 },
+        )
+        expect(result.isError).toBe(true)
+        expect(h.samplingOutcomes).toHaveLength(1)
+        expect(h.samplingOutcomes[0].ok).toBe(false)
+        const detail = h.samplingOutcomes[0].detail as any
+        expect(detail.code).toBe(McpSampling.REJECTED_CODE)
+        expect(String(detail.message)).toMatch(/sampling is denied/)
+        // Names WHICH control refused, so this cannot be satisfied by the
+        // pre-existing `mcp.<server>.sampling: "deny"` branch.
+        expect(detail.data).toMatchObject({ server: "fixture", deniedBy: "permission.mcp_sampling" })
+        // Refused before any model work, not after.
+        expect(wire!.bodies).toHaveLength(0)
+        expect(McpSampling.inFlightCount(h.client)).toBe(0)
+        await h.client.close()
+      },
+    )
   }, 60_000)
 
   test("a server that never samples keeps working unchanged", async () => {

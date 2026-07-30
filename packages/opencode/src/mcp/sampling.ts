@@ -21,7 +21,11 @@ const log = Log.create({ service: "mcp.sampling" })
  * Spec: https://modelcontextprotocol.io/specification/2025-11-25/client/sampling
  */
 
-/** Wall-clock ceiling on one sampling request, including the human approval wait. */
+/**
+ * Wall-clock ceiling on one sampling request, including the human approval wait.
+ * Reaching it aborts the provider call as well as our wait for it — see the
+ * abort composition in `handle`.
+ */
 export const DEFAULT_SAMPLING_TIMEOUT = 120_000
 
 /** How much of a prompt is shown in the approval dialog and in logs. */
@@ -294,11 +298,21 @@ export const handle = Effect.fn("MCP.sampling.handle")(function* (input: HandleI
   const cfg = yield* cfgSvc.get()
 
   const policy = policyFor(cfg as never, input.server)
-  if (policy === "deny") {
+  // TWO controls gate sampling and a `deny` from either one wins: the per-server
+  // `mcp.<server>.sampling` policy, and the standard `permission.mcp_sampling`
+  // ruleset. Evaluating the ruleset HERE rather than leaning on permission.ask
+  // is what makes that true — `allow` skips the ask entirely, so an explicit
+  // ruleset deny would otherwise never be consulted at all. Same precedence the
+  // permission service applies internally (permission/index.ts:243-247): a
+  // ruleset deny is not out-rankable by a more permissive setting elsewhere.
+  const ruleset = Permission.fromConfig(cfg.permission ?? {})
+  const ruleDenied = Permission.evaluate(PERMISSION, input.server, ruleset).action === "deny"
+  if (policy === "deny" || ruleDenied) {
     return yield* Effect.fail(
       new SamplingError(REJECTED_CODE, `sampling is denied for MCP server "${input.server}"`, {
         server: input.server,
         policy,
+        deniedBy: policy === "deny" ? "mcp.sampling" : "permission.mcp_sampling",
       }),
     )
   }
@@ -365,7 +379,7 @@ export const handle = Effect.fn("MCP.sampling.handle")(function* (input: HandleI
           permission: PERMISSION,
           patterns: [input.server],
           always: [input.server],
-          ruleset: Permission.fromConfig(cfg.permission ?? {}),
+          ruleset,
           metadata: {
             server: input.server,
             model: modelRef,
@@ -407,9 +421,22 @@ export const handle = Effect.fn("MCP.sampling.handle")(function* (input: HandleI
       ),
     )
 
+  // The signal actually handed to the provider. Assigned by `tryPromise` below
+  // and read by its `catch`, which has to tell "we aborted this" from "the
+  // provider genuinely failed" without assuming which source aborted.
+  let providerSignal: AbortSignal | undefined
+
   const result = yield* Effect.tryPromise({
-    try: () =>
-      generateText({
+    try: (fiberSignal: AbortSignal) => {
+      // COMPOSE both abort sources. `fiberSignal` is aborted whenever this fiber
+      // is interrupted, which covers the internal timeout bound in `serve` and
+      // `cancelAll`; on its own, neither of those reaches the provider, because
+      // interrupting a fiber does not cancel a promise already in flight inside
+      // it. `input.signal` is the MCP SDK's per-request signal and covers a
+      // server-issued cancellation. Either one must stop the HTTP call, so the
+      // provider gets the union of the two, not just one of them.
+      providerSignal = input.signal ? AbortSignal.any([fiberSignal, input.signal]) : fiberSignal
+      return generateText({
         model: language,
         system: input.params.systemPrompt,
         messages: converted.messages,
@@ -418,12 +445,13 @@ export const handle = Effect.fn("MCP.sampling.handle")(function* (input: HandleI
         stopSequences: input.params.stopSequences ? [...input.params.stopSequences] : undefined,
         providerOptions: ProviderTransform.providerOptions(model, {}),
         headers: { ...model.headers, "User-Agent": `mimocode/${InstallationVersion}` },
-        abortSignal: input.signal,
+        abortSignal: providerSignal,
         maxRetries: 1,
-      }),
+      })
+    },
     catch: (error) => {
       const message = error instanceof Error ? error.message : String(error)
-      if (input.signal?.aborted) {
+      if (providerSignal?.aborted ?? input.signal?.aborted) {
         return new SamplingError(ErrorCode.RequestTimeout, "sampling was cancelled", { server: input.server })
       }
       return new SamplingError(ErrorCode.InternalError, "the model provider failed to complete sampling", {
@@ -469,7 +497,11 @@ export function setActiveSession(client: object, sessionID: SessionID) {
 /** In-flight sampling fibers per client, interrupted when the client goes away. */
 const inFlight = new WeakMap<object, Set<Fiber.Fiber<unknown, unknown>>>()
 
-/** Interrupt every sampling request still running for a client. */
+/**
+ * Interrupt every sampling request still running for a client. The interrupt
+ * aborts the in-flight provider call too, because `handle` hands the provider a
+ * signal derived from its own fiber — see the abort composition there.
+ */
 export function cancelAll(client: object) {
   const fibers = inFlight.get(client)
   if (!fibers) return Effect.void
