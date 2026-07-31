@@ -1545,9 +1545,9 @@ export const layer: Layer.Layer<
       // `as MessageID | undefined` while returning `null`, and a caller that
       // then wrote `boundary !== undefined` got a condition that is always true
       // — a guard that typechecks, reads correctly, and does nothing. Every
-      // other caller happened to test truthiness (`!boundary` at prompt.ts:413,
-      // `watermarkBefore ?` at :1131, `boundaryID ?` in nudgedSinceBoundary) and
-      // so never noticed. With an annotation, dropping the `?? undefined` is a
+      // other caller happened to test truthiness (`!boundary` at prompt.ts:413
+      // and `watermarkBefore ?` at :1131) and so never noticed. With an
+      // annotation, dropping the `?? undefined` is a
       // compile error instead of a silent lie.
       const boundary: MessageID | undefined = row?.last_checkpoint_message_id ?? undefined
       return boundary

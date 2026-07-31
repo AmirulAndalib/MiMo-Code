@@ -29,7 +29,7 @@ import { SessionPrune } from "./prune"
 import { SessionCheckpoint } from "./checkpoint"
 import { SessionCompaction } from "./compaction"
 import { computeLastMessageInfo } from "./last-message-info"
-import { contextPressureLevel, pressureLevel, usable, isOverflow as overflowCheck } from "./overflow"
+import { contextPressureLevel, usable, isOverflow as overflowCheck } from "./overflow"
 import { Config } from "@/config"
 import { Global } from "@/global"
 import { Bus } from "../bus"
@@ -208,33 +208,6 @@ function stepSignature(parts: MessageV2.Part[]): string | undefined {
   }
   if (segments.length === 0) return undefined
   return segments.join("\n")
-}
-
-/**
- * Debounce decision for the high-context-pressure memory-flush nudge.
- *
- * Returns true if a nudge (a text part containing `marker`) has already been
- * injected within the *current high-pressure episode*, where the episode is the
- * message window since the last checkpoint boundary.
- *
- * Keying off the checkpoint boundary rather than a fixed message count is
- * deliberate: a single sustained high-pressure turn can emit many tool-call
- * steps — each its own message — so a fixed-size tail would let the
- * already-nudged message slide out of the window and re-fire the nudge
- * mid-turn. The boundary only advances when a checkpoint/rebuild actually
- * discards context, which is exactly when a fresh nudge becomes useful again.
- *
- * When `boundaryID` is undefined (no checkpoint yet) or is not found in `msgs`,
- * the whole conversation is treated as the current episode.
- */
-export function nudgedSinceBoundary(
-  msgs: readonly MessageV2.WithParts[],
-  boundaryID: string | undefined,
-  marker: string,
-): boolean {
-  const boundaryIdx = boundaryID ? msgs.findIndex((m) => m.info.id === boundaryID) : -1
-  const episode = boundaryIdx >= 0 ? msgs.slice(boundaryIdx) : msgs
-  return episode.some((m) => m.parts.some((p) => p.type === "text" && p.text?.includes(marker)))
 }
 
 const STRUCTURED_OUTPUT_DESCRIPTION = `Use this tool to return your final response in the requested structured format.
@@ -3358,64 +3331,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             continue
           }
 
-          // Memory flush nudge at high context pressure.
-          //
-          // Purpose: at high context fill, the session may soon checkpoint and
-          // discard old context, so remind the model to externalize durable
-          // learnings to memory BEFORE that happens. This is a *save-your-work*
-          // reminder, NOT a signal to wrap up.
-          //
-          // Two failure modes this guards against (both observed in prod):
-          //   1. Wording that reads as "we're about to reset — wind down" made
-          //      models prematurely end their turn and hand control back to the
-          //      user mid-task. The text below is explicit: persist memory, then
-          //      KEEP GOING; do not end the turn.
-          //   2. Re-injecting the nudge on every user turn while pressure stays
-          //      high turned a one-time heads-up into per-turn nagging. We now
-          //      dedup across the recent conversation window, not just the
-          //      current user message.
-          if (lastFinished && lastFinished.summary !== true && model) {
-            const cfg = yield* config.get()
-            const pressure = pressureLevel({ cfg, tokens: lastFinished.tokens, model })
-            if (pressure >= 2) {
-              // De-bounce: nudge at most once per high-pressure episode (the
-              // window since the last checkpoint boundary). See
-              // nudgedSinceBoundary for why the boundary — not a fixed message
-              // count — is the right anchor.
-              const NUDGE_MARKER = "Context is filling up"
-              const boundaryID = yield* checkpoint
-                .lastBoundary(sessionID)
-                .pipe(Effect.catch(() => Effect.succeed(undefined)))
-              const alreadyNudged = nudgedSinceBoundary(msgs, boundaryID, NUDGE_MARKER)
-              const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
-              if (lastUserMsg && !alreadyNudged) {
-                lastUserMsg.parts.push({
-                  id: PartID.ascending(),
-                  messageID: lastUserMsg.info.id,
-                  sessionID,
-                  type: "text",
-                  synthetic: true,
-                  text: [
-                    "<system-reminder>",
-                    `Context is filling up (${pressure >= 3 ? ">85%" : ">70%"}).`,
-                    "If you have important learnings or decisions from this session that are",
-                    "not yet in memory, write them now (they may be summarized on the next",
-                    "checkpoint). This is a save-your-work reminder only.",
-                    "IMPORTANT: After writing to memory, CONTINUE with the current task in the",
-                    "same turn. Do NOT stop, wrap up, or hand control back to the user because",
-                    "of this reminder — only finish when the actual work is done.",
-                    "</system-reminder>",
-                  ].join("\n"),
-                })
-              }
-            }
-          }
-
           // Repeated-step nudge: if the last REPEATED_STEP_THRESHOLD finished
           // assistant steps made an identical tool call, the model is likely
-          // stuck looping. Inject a reminder on the last user message asking it
-          // to change approach. Mirrors the memory-flush nudge above (synthetic
-          // text part, deduped per build).
+          // stuck looping. Inject a synthetic reminder on the last user message
+          // asking it to change approach, deduped per build.
           if (lastFinished) {
             const recentSignatures: string[] = []
             for (let i = msgs.length - 1; i >= 0 && recentSignatures.length < REPEATED_STEP_THRESHOLD; i--) {
