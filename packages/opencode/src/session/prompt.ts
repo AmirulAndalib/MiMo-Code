@@ -3467,9 +3467,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             agent?.native === true && agent?.hidden === true
 
           // Fire background checkpoint writers for any newly-crossed thresholds
-          // based on the latest completed assistant message's tokens. Must run
-          // BEFORE the overflow/maxThreshold check below so maxCrossed flag is
-          // set in time to trigger rebuild on this same iteration.
+          // based on the latest completed assistant message's tokens. These
+          // thresholds only keep the checkpoint fresh; `overflowCheck` below is
+          // the single trigger for rebuilding the active context.
           if (!skipOverflowCheck && !isBoundedComputation && lastFinished && lastFinished.tokens) {
             const fireOps = yield* ops()
             yield* prune
@@ -3488,8 +3488,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             !isBoundedComputation &&
             lastFinished &&
             lastFinished.summary !== true &&
-            (overflowCheck({ cfg: yield* config.get(), tokens: lastFinished.tokens, model }) ||
-              (yield* prune.maxThresholdCrossed(sessionID)))
+            overflowCheck({ cfg: yield* config.get(), tokens: lastFinished.tokens, model })
           ) {
             // Subagent overflow → per-actor compaction (lossy LLM summarization
             // scoped to the actor's (sessionID, agent_id) slice). Subagents

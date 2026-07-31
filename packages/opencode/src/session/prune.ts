@@ -152,8 +152,6 @@ export interface Interface {
     promptOps: ActorPromptOps
     agentID?: string
   }) => Effect.Effect<void>
-  /** True when the current tokens have just crossed the max checkpoint threshold. */
-  readonly maxThresholdCrossed: (sessionID: SessionID) => Effect.Effect<boolean>
   /** Clear the crossed-threshold state for a session (e.g. after discard+rebuild). */
   readonly resetThresholds: (sessionID: SessionID) => Effect.Effect<void>
 }
@@ -176,9 +174,6 @@ export const layer: Layer.Layer<
     // (and had a checkpoint writer enqueued). Prevents re-firing on the same
     // threshold every turn.
     const crossed = new Map<SessionID, Set<number>>()
-    // Per-session signal: the max threshold was just crossed; prompt.ts should
-    // trigger discard+rebuild on the next loop iteration.
-    const maxCrossed = new Set<SessionID>()
     // Per-session RECOVERY GATE: the token count at or above which the FINAL
     // threshold is allowed to fire a second time, armed only when that
     // threshold's writer settled with a TRANSIENT failure.
@@ -348,14 +343,9 @@ export const layer: Layer.Layer<
           //
           // WHAT THAT ARGUMENT DOES NOT COVER — the FINAL threshold. "The next
           // threshold is the retry" presumes a next threshold; the last one has
-          // none. Its only would-be successor is the discard+rebuild that
-          // maxThresholdCrossed triggers, because a successful rebuild calls
-          // resetThresholds (prompt.ts:428) and re-arms the whole ladder. But
-          // rebuildFromCheckpoint returns false when lastBoundary is unset
-          // (prompt.ts:413), and the watermark is unset precisely when no
-          // writer has EVER succeeded — so in the one case that needs recovery
-          // most, there is no reset, no further crossing, and the session never
-          // checkpoints again until overflow.
+          // none. Without a recovery gate, a transient failure there would
+          // leave the checkpoint stale until the actual context trigger causes
+          // a rebuild and re-arms the ladder.
           //
           // So the final threshold gets a gate, on two conditions that between
           // them replace the deleted counter:
@@ -421,8 +411,6 @@ export const layer: Layer.Layer<
 
         already.add(t)
         log.info("checkpoint triggered", { threshold: t, currentTokens })
-
-        if (t === maxThreshold) maxCrossed.add(input.sessionID)
       }
 
       crossed.set(input.sessionID, already)
@@ -520,22 +508,15 @@ export const layer: Layer.Layer<
       }
     })
 
-    const maxThresholdCrossed = Effect.fn("SessionPrune.maxThresholdCrossed")(function* (
-      sessionID: SessionID,
-    ) {
-      return maxCrossed.has(sessionID)
-    })
-
     const resetThresholds = Effect.fn("SessionPrune.resetThresholds")(function* (sessionID: SessionID) {
       crossed.delete(sessionID)
-      maxCrossed.delete(sessionID)
       // A rebuild re-arms the whole ladder, which supersedes any pending
       // recovery gate — leaving it set would let the (now re-armable) final
       // threshold fire out of order.
       finalRetryAt.delete(sessionID)
     })
 
-    return Service.of({ prune, fireCheckpoints, maxThresholdCrossed, resetThresholds })
+    return Service.of({ prune, fireCheckpoints, resetThresholds })
   }),
 )
 

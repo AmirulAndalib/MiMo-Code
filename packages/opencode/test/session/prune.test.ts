@@ -368,36 +368,6 @@ describe("SessionPrune.fireCheckpoints writer failure is not retried in place", 
     )
   })
 
-  test("a failed writer at the max threshold leaves maxThresholdCrossed set", async () => {
-    const harness = makeRetryHarness()
-    const promptOps = {} as any
-
-    await runWithHarness(
-      harness,
-      Effect.gen(function* () {
-        const svc = yield* SessionPrune.Service
-        const ssn = yield* SessionNs.Service
-        const info = yield* ssn.create({})
-        const model = createModel({ context: 100_000, output: 32_000 })
-
-        harness.outcomes.push({ outcome: "failure" }, { outcome: "failure" })
-
-        // Cross BOTH thresholds in one fire so the max threshold is crossed and
-        // the observed outcome is a failure.
-        yield* svc.fireCheckpoints({ sessionID: info.id, model, tokens: makeTokensAt(50_000), promptOps })
-        yield* Effect.sleep(150)
-
-        // The old watcher paired `crossed.delete` with `maxCrossed.delete` on a
-        // sub-cap failure, which withdrew the already-raised discard+rebuild
-        // signal that prompt.ts consumes. Overflow readiness must not depend on
-        // whether the checkpoint writer happened to succeed, so the signal
-        // stands: under the old code this read false.
-        expect(yield* svc.maxThresholdCrossed(info.id)).toBe(true)
-      }),
-      { checkpoint: { thresholds: ["30K", "45K"] } },
-    )
-  })
-
   test("the next threshold crossing still fires after a failure", async () => {
     const harness = makeRetryHarness()
     const promptOps = {} as any
