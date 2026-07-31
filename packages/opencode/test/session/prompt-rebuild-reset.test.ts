@@ -31,24 +31,7 @@ const it = testEffect(
   ),
 )
 
-describe("F1 — prune resetThresholds clears sticky maxCrossed", () => {
-  it.live("resetThresholds clears maxThresholdCrossed flag", () =>
-    provideTmpdirInstance(() =>
-      Effect.gen(function* () {
-        const prune = yield* SessionPrune.Service
-        const session = yield* Session.Service
-        const sess = yield* session.create({ title: "t1" })
-
-        // Initially false (never crossed)
-        expect(yield* prune.maxThresholdCrossed(sess.id)).toBe(false)
-
-        // resetThresholds is a no-op when state is empty
-        yield* prune.resetThresholds(sess.id)
-        expect(yield* prune.maxThresholdCrossed(sess.id)).toBe(false)
-      }),
-    ),
-  )
-
+describe("F1 — rebuild resets checkpoint thresholds", () => {
   it.live("prompt.ts rebuild path resets thresholds and sets skipOverflowCheck before continue", () =>
     provideTmpdirInstance(() =>
       Effect.gen(function* () {
@@ -59,8 +42,8 @@ describe("F1 — prune resetThresholds clears sticky maxCrossed", () => {
         // the /rebuild command). Assert BOTH halves of the invariant: (a) the
         // shared helper resets thresholds after a successful insert; (b) site-1
         // sets skipOverflowCheck=true then continue on a successful rebuild — so
-        // the loop can't immediately re-trigger overflow on the same crossed
-        // thresholds.
+        // the loop can't immediately re-trigger overflow on the same token
+        // count.
         //
         // DELIBERATE UPDATE: (b)'s pattern used to be
         //   const inserted = yield* rebuildFromCheckpoint(…)

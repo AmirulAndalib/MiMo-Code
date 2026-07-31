@@ -106,12 +106,13 @@ function withSpawnRef<T>(impl: SpawnImpl | undefined, body: () => Promise<T>): P
  * instant-success stub would have already advanced the watermark by then, so the
  * old code would have rebuilt too and the test would prove nothing.
  */
-function writerThatWritesCheckpointAfter(marker: string, delayMs: number): SpawnImpl {
+function writerThatWritesCheckpointAfter(marker: string, delayMs: number, onSpawn?: () => void): SpawnImpl {
   let counter = 0
   return {
     spawn: (input) =>
       Effect.gen(function* () {
         counter += 1
+        onSpawn?.()
         const parent = (input.parentSessionID ?? input.sessionID) as SessionID
         const outcome = yield* Deferred.make<AgentOutcome>()
         yield* Effect.forkDetach(
@@ -176,13 +177,14 @@ function writerThatFails(): SpawnImpl {
 // usable > 13_000, or SessionPrune.resolveThresholds refuses the window
 // ("too small for checkpoints"). 40_000 satisfies both: usable = 40_000 -
 // 20_100 = 19_900, against the seeded 50_000 tokens.
-function mimocodeConfig(baseURL: string) {
+function mimocodeConfig(baseURL: string, maxContext = 40_000, checkpoint?: { thresholds: string[]; reserved: number }) {
   return JSON.stringify({
     $schema: "https://opencode.ai/config.json",
     enabled_providers: ["alibaba"],
     provider: { alibaba: { options: { apiKey: "test-key", baseURL: `${baseURL}/v1` } } },
     agent: { build: { model: "alibaba/qwen-plus" } },
-    compaction: { reserved: 100, max_context: 40000 },
+    compaction: { reserved: 100, max_context: maxContext },
+    checkpoint,
   })
 }
 
@@ -252,8 +254,8 @@ async function seedFinishedAssistant(sessionID: SessionID, parentID: MessageID, 
 }
 
 // These tests drive the REAL main-agent context-overflow path inside
-// SessionPrompt's runLoop (prompt.ts, the `overflowCheck(...) ||
-// maxThresholdCrossed(...)` branch) against a scripted LLM stub, and assert on
+// SessionPrompt's runLoop (prompt.ts, the `overflowCheck(...)` branch) against
+// a scripted LLM stub, and assert on
 // what the session ends up containing: a `checkpoint` boundary part (rebuild) vs
 // a `compaction` boundary part (degradation).
 //
@@ -271,6 +273,98 @@ async function seedFinishedAssistant(sessionID: SessionID, parentID: MessageID, 
 // with no summary at all. Degrading is therefore a real loss, not a cheaper
 // summary.
 describe("Auto context overflow: write a checkpoint before degrading to compaction", () => {
+  test(
+    "crossing the final checkpoint threshold below the configured context trigger does not rebuild",
+    async () => {
+      const llm = startLLM("reply-before-context-trigger")
+      let writerCalls = 0
+      const writer = writerThatWritesCheckpointAfter("CHECKPOINT_WITHOUT_REBUILD", 400, () => writerCalls++)
+      try {
+        await using tmp = await tmpdir({
+          git: true,
+          init: (dir) =>
+            Bun.write(
+              path.join(dir, "mimocode.json"),
+              mimocodeConfig(llm.origin, 50_000, { thresholds: ["24K"], reserved: 100 }),
+            ),
+        })
+
+        await Instance.provide({
+          directory: tmp.path,
+          fn: () =>
+            run(
+              Effect.gen(function* () {
+                const prompt = yield* SessionPrompt.Service
+                const sessions = yield* Session.Service
+                const info = yield* sessions.create({ title: "checkpoint-without-early-rebuild" })
+
+                // Resolve SessionPrompt's actor layer before replacing the
+                // late-bound writer implementation below.
+                yield* prompt.prompt({
+                  sessionID: info.id,
+                  parts: [{ type: "text", text: "initialize the actor layer" }],
+                  agent: "build",
+                })
+
+                // usable = 50K - 20.1K reserves = 29.9K. The single 24K
+                // checkpoint threshold is below it, so 25K must write a
+                // checkpoint without rebuilding before the 29.9K trigger.
+                const first = yield* Effect.promise(() => seedUserMessage(info.id, "earlier question"))
+                yield* Effect.promise(() => seedFinishedAssistant(info.id, first.id, 25_000))
+
+                // SessionPrompt's layer initialization installs the real
+                // actor implementation into spawnRef, so bind the writer
+                // double after resolving the service and for this call only.
+                const previous = spawnRef.current
+                spawnRef.current = writer
+                yield* prompt
+                  .prompt({
+                    sessionID: info.id,
+                    parts: [{ type: "text", text: "continue below the configured trigger" }],
+                    agent: "build",
+                  })
+                  .pipe(
+                    Effect.ensuring(
+                      Effect.sync(() => {
+                        spawnRef.current = previous
+                      }),
+                    ),
+                  )
+                yield* Effect.sleep(500)
+
+                const after = yield* sessions.messages({ sessionID: info.id })
+                expect(writerCalls).toBe(1)
+                expect(yield* Effect.promise(() => Bun.file(checkpointPath(info.id)).text())).toContain(
+                  "CHECKPOINT_WITHOUT_REBUILD",
+                )
+                const watermark = yield* Effect.sync(() =>
+                  Database.use((db) =>
+                    db
+                      .select({ id: SessionTable.last_checkpoint_message_id })
+                      .from(SessionTable)
+                      .where(eq(SessionTable.id, info.id))
+                      .get(),
+                  ),
+                )
+                expect(watermark?.id).toBeTruthy()
+                expect(after.some((m) => m.parts.some((p) => p.type === "checkpoint"))).toBe(false)
+                expect(after.some((m) => m.parts.some((p) => p.type === "compaction"))).toBe(false)
+                expect(
+                  after.some((m) =>
+                    m.parts.some((p) => p.type === "text" && p.text === "reply-before-context-trigger"),
+                  ),
+                ).toBe(true)
+                expect(llm.calls).toBe(2)
+              }),
+            ),
+        })
+      } finally {
+        await llm.stop()
+      }
+    },
+    { timeout: 60_000 },
+  )
+
   test(
     "no checkpoint + writer succeeds → inserts a checkpoint boundary and does NOT compact",
     async () => {
