@@ -100,6 +100,7 @@ import { DialogTokenPlan } from "../../component/dialog-token-plan"
 import { SessionRetry } from "@/session/retry"
 import { getRevertDiffFiles } from "../../util/revert-diff"
 import * as Collapse from "../../util/collapse"
+import { planSwitchTarget } from "./plan-switch"
 import {
   createFreeApiSunsetSignal,
   freeApiModelNameKey,
@@ -280,16 +281,12 @@ export function Session() {
     const part = evt.properties.part
     if (part.type !== "tool") return
     if (part.sessionID !== route.sessionID) return
-    if (part.state.status !== "completed") return
     if (part.id === lastSwitch) return
 
-    if (part.tool === "plan_exit" && part.state.metadata?.switched) {
-      local.agent.set("build")
-      lastSwitch = part.id
-    } else if (part.tool === "plan_enter") {
-      local.agent.set("plan")
-      lastSwitch = part.id
-    }
+    const agent = planSwitchTarget(part)
+    if (!agent) return
+    local.agent.set(agent)
+    lastSwitch = part.id
   })
 
   let seeded = false
