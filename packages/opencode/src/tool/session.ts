@@ -5,8 +5,9 @@ import DESCRIPTION from "./session.txt"
 import SHELL_DESCRIPTION from "./session.shell.txt"
 import { tokenize } from "./shell-tokenize"
 import z from "zod"
-import { Effect, Deferred } from "effect"
+import { Cause, Effect, Deferred } from "effect"
 import { Session } from "@/session"
+import { classifySession, classifyUnreadableActors } from "@/session/visibility"
 import { Worktree } from "@/worktree"
 import { Instance } from "@/project/instance"
 import { InstanceRef } from "@/effect/instance-ref"
@@ -929,6 +930,47 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
       }
 
       if (op.action === "switch") {
+        // Same prohibition the renderer enforces (cli/cmd/tui/routes/session/index.tsx).
+        // The renderer is the choke point, but refusing here too is what reaches
+        // the model mid-turn: a silent no-op would just make it retry.
+        // NotFoundError is a synchronous throw inside an Effect.fn (a DEFECT, not
+        // a typed failure — see the Worktree.create note above), so Effect.catch
+        // can't see it; Effect.exit captures any non-success.
+        const targetExit = yield* Effect.exit(sessions.get(op.sessionID as SessionID))
+        if (targetExit._tag !== "Success")
+          return {
+            title: `Refused switch to ${op.sessionID}`,
+            output: `Refused to move the UI to ${op.sessionID}: no such session. Run \`session list\` to see the child sessions you can switch to.`,
+            metadata: { sessionID: op.sessionID } as Metadata,
+          }
+        const target = targetExit.value
+        // Same shared helpers the renderer uses, so the criterion cannot drift
+        // between the two enforcement points: they read the TARGET's own actor
+        // rows, not its parent's child list.
+        //
+        // listBySession is typed as never-failing, so a DB error surfaces as a
+        // defect — the same shape as the NotFoundError above, and equally
+        // invisible to Effect.catch. Left unwrapped it would abort the whole tool
+        // call, which reaches the model as a crash rather than as a decision; and
+        // "rows could not be read" must NOT reach classifySession, because there
+        // it would be indistinguishable from "this session has no rows" and would
+        // fail open onto exactly the population the prohibition exists to refuse.
+        const actorsExit = yield* Effect.exit(actorReg.listBySession(target.id as SessionID))
+        const verdict =
+          actorsExit._tag === "Success"
+            ? classifySession(target, actorsExit.value)
+            : classifyUnreadableActors(target, Cause.pretty(actorsExit.cause))
+        if (!verdict.renderable)
+          return {
+            title: `Refused switch to ${op.sessionID}`,
+            output:
+              `Refused to move the UI to ${op.sessionID}: ${verdict.reason}. ` +
+              (actorsExit._tag === "Success"
+                ? `A session hosting a runtime-spawned agent is never rendered. `
+                : `That is a read failure, not a prohibition: retry the switch, and if it keeps failing the actor registry is broken. `) +
+              `Run \`session list\` to see the child sessions you can switch to, or switch to this session's parent instead.`,
+            metadata: { sessionID: op.sessionID } as Metadata,
+          }
         yield* Effect.promise(() => Bus.publish(TuiEvent.SessionSelect, { sessionID: op.sessionID as SessionID }))
         return {
           title: `Switched to ${op.sessionID}`,
