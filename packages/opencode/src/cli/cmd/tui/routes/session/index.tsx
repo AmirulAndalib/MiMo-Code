@@ -1,5 +1,4 @@
 import {
-  batch,
   createContext,
   createEffect,
   createMemo,
@@ -68,7 +67,9 @@ import { DialogPrompt } from "@tui/ui/dialog-prompt"
 import { DialogTimeline } from "./dialog-timeline"
 import { DialogForkFromTimeline } from "./dialog-fork-from-timeline"
 import { DialogSessionRename } from "../../component/dialog-session-rename"
-import { Sidebar } from "./sidebar"
+import { Sidebar, SIDEBAR_WIDTH } from "./sidebar"
+import { sidebarToggle, sidebarVisibleFor, type SidebarPreference } from "./sidebar-state"
+import { createPress } from "../../ui/press"
 import { WorkflowTree } from "@tui/component/workflow-tree"
 import { SubagentFooter } from "./subagent-footer.tsx"
 import { DialogSubagent } from "./dialog-subagent.tsx"
@@ -142,19 +143,19 @@ function use() {
 
 function SidebarToggleButton(props: { visible: boolean; onToggle: () => void }) {
   const { theme } = useTheme()
-  const [hover, setHover] = createSignal(false)
+  const press = createPress(() => props.onToggle())
   return (
     <box
       width={3}
       height="100%"
       justifyContent="flex-start"
       alignItems="center"
-      backgroundColor={hover() ? theme.backgroundElement : undefined}
-      onMouseOver={() => setHover(true)}
-      onMouseOut={() => setHover(false)}
-      onMouseUp={() => props.onToggle()}
+      backgroundColor={press.hover() ? theme.backgroundElement : undefined}
+      {...press.props}
     >
-      <text fg={hover() ? theme.text : theme.textMuted}>{props.visible ? "▶" : "◀"}</text>
+      <text selectable={false} fg={press.hover() ? theme.text : theme.textMuted}>
+        {props.visible ? "▶" : "◀"}
+      </text>
     </box>
   )
 }
@@ -196,8 +197,7 @@ export function Session() {
   })
 
   const dimensions = useTerminalDimensions()
-  const [sidebar, setSidebar] = kv.signal<"auto" | "hide">("sidebar", "auto")
-  const [sidebarOpen, setSidebarOpen] = createSignal(false)
+  const [sidebar, setSidebar] = kv.signal<SidebarPreference>("sidebar", "auto")
   const [conceal, setConceal] = createSignal(true)
   const thinking = useThinkingMode()
   const thinkingMode = thinking.mode
@@ -229,14 +229,14 @@ export function Session() {
   const fromWorkflowRunID = createMemo(() => route.fromWorkflowRunID)
 
   const wide = createMemo(() => dimensions().width > 120)
-  const sidebarVisible = createMemo(() => {
-    if (currentAgentID() !== "main") return false
-    if (sidebarOpen()) return true
-    if (sidebar() === "auto" && wide()) return true
-    return false
-  })
+  // Subagent views have no sidebar at all, so neither the panel nor its control belongs there.
+  const sidebarAllowed = createMemo(() => currentAgentID() === "main")
+  const sidebarVisible = createMemo(() => sidebarAllowed() && sidebarVisibleFor(sidebar(), wide()))
+  // Only a docked sidebar consumes layout width; the narrow overlay floats above the transcript.
+  const sidebarDocked = createMemo(() => sidebarVisible() && wide())
+  const toggleSidebar = () => setSidebar(() => sidebarToggle(sidebar(), wide()))
   const showTimestamps = createMemo(() => timestamps() === "show")
-  const contentWidth = createMemo(() => dimensions().width - (sidebarVisible() ? 42 : 0) - 4)
+  const contentWidth = createMemo(() => dimensions().width - (sidebarDocked() ? SIDEBAR_WIDTH : 0) - 4)
   const providers = createMemo(() => Model.index(sync.data.provider))
 
   const scrollAcceleration = createMemo(() => getScrollAcceleration(tuiConfig))
@@ -791,12 +791,9 @@ export function Session() {
       value: "session.sidebar.toggle",
       keybind: "sidebar_toggle",
       category: "session",
+      enabled: sidebarAllowed(),
       onSelect: (dialog) => {
-        batch(() => {
-          const isVisible = sidebarVisible()
-          setSidebar(() => (isVisible ? "hide" : "auto"))
-          setSidebarOpen(!isVisible)
-        })
+        toggleSidebar()
         dialog.clear()
       },
     },
@@ -1477,17 +1474,8 @@ export function Session() {
           </Show>
           <Toast />
         </box>
-        <Show when={wide() || sidebarVisible()}>
-          <SidebarToggleButton
-            visible={sidebarVisible()}
-            onToggle={() => {
-              batch(() => {
-                const isVisible = sidebarVisible()
-                setSidebar(() => (isVisible ? "hide" : "auto"))
-                setSidebarOpen(!isVisible)
-              })
-            }}
-          />
+        <Show when={sidebarAllowed() && wide()}>
+          <SidebarToggleButton visible={sidebarVisible()} onToggle={toggleSidebar} />
         </Show>
         <Show when={sidebarVisible()}>
           <Switch>
@@ -1495,15 +1483,19 @@ export function Session() {
               <Sidebar sessionID={route.sessionID} />
             </Match>
             <Match when={!wide()}>
+              {/* The control rides inside the overlay so it keeps the same position
+                  relative to the sidebar as when docked: immediately to its left. */}
               <box
                 position="absolute"
                 top={0}
                 left={0}
                 right={0}
                 bottom={0}
-                alignItems="flex-end"
+                flexDirection="row"
+                justifyContent="flex-end"
                 backgroundColor={RGBA.fromInts(0, 0, 0, 70)}
               >
+                <SidebarToggleButton visible={sidebarVisible()} onToggle={toggleSidebar} />
                 <Sidebar sessionID={route.sessionID} />
               </box>
             </Match>
