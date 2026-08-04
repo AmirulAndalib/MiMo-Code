@@ -1009,6 +1009,38 @@ export function message(msgs: ModelMessage[], model: Provider.Model, options: Re
   return msgs
 }
 
+// OpenAI's Responses API treats a function tool that OMITS `strict` as strict,
+// and `@ai-sdk/openai` only emits the field when the tool sets it
+// (`...tool.strict != null ? { strict: tool.strict } : {}`) — so by default we
+// were opting into constrained decoding by accident.
+//
+// Our tool schemas are deliberately NOT strict-compatible: optional parameters
+// stay out of `required`, not every object carries `additionalProperties: false`,
+// and discriminated unions keep an `anyOf`. Rather than reject the request, the
+// Codex backend auto-patches such a schema (observed on the wire: all 17 tools
+// came back tagged `strict: true`, `bash.required` grew from 2 entries to 5, and
+// `task.parameters.properties.operation` gained `additionalProperties: false`)
+// and then fails to compile the resulting decoding grammar. Because the failure
+// happens at GENERATION time, the 200 is already committed and the error can
+// only arrive mid-stream as `event: error` (`server_error`) + `response.failed` —
+// i.e. "the answer stops half-written". Sending `strict: true` explicitly with
+// the same schema gets a clean 502 instead, which is why this read as random
+// upstream flakiness rather than a deterministic schema problem.
+//
+// So state the intent explicitly. Scoped to the SDKs that reach an OpenAI
+// Responses endpoint AND forward `tool.strict`:
+//   - `@ai-sdk/openai`
+//   - `@ai-sdk/azure`, which builds `OpenAIResponsesLanguageModel` from
+//     `@ai-sdk/openai/internal`
+// The vendored Copilot Responses SDK (`provider/sdk/copilot/responses`) already
+// always emits `strict`, and every other SDK is left alone on purpose:
+// `@ai-sdk/anthropic` warns ("strict mode is not supported by this provider")
+// for any non-null `strict`, so a blanket default would spam warnings there.
+//
+// An explicit per-tool `strict` is preserved, so a tool that has been made
+// strict-compatible can still opt in.
+const EXPLICIT_NON_STRICT_TOOL_SDKS = ["@ai-sdk/openai", "@ai-sdk/azure"]
+
 // Place a cache breakpoint on the tool definitions. The cache hierarchy is
 // `tools` → `system` → `messages`, so marking the LAST tool caches the entire
 // tool-schema block (often several KB) as a stable prefix that sits in front of
@@ -1017,6 +1049,12 @@ export function message(msgs: ModelMessage[], model: Provider.Model, options: Re
 // the SDK-keyed marker via `cacheMarkerFor`. Tool registration order is stable
 // (insertion order of the tools record), so "last tool" is deterministic.
 export function tools<T extends Record<string, any>>(tools: T, model: Provider.Model): T {
+  if (EXPLICIT_NON_STRICT_TOOL_SDKS.includes(model.api.npm)) {
+    for (const tool of Object.values(tools)) {
+      if (tool && tool.strict == null) tool.strict = false
+    }
+  }
+
   if (!supportsCacheMarkers(model)) return tools
   const marker = cacheMarkerFor(model)
   if (!marker) return tools
