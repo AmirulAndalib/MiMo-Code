@@ -1039,17 +1039,37 @@ export function message(msgs: ModelMessage[], model: Provider.Model, options: Re
 //
 // An explicit per-tool `strict` is preserved, so a tool that has been made
 // strict-compatible can still opt in.
+//
+// Azure's `useCompletionUrls` branch sends the same tools to Chat Completions
+// instead, where the field lands as `function.strict: false` — a documented
+// boolean whose default is already false, so that path is unaffected.
 const EXPLICIT_NON_STRICT_TOOL_SDKS = ["@ai-sdk/openai", "@ai-sdk/azure"]
 
-// Place a cache breakpoint on the tool definitions. The cache hierarchy is
-// `tools` → `system` → `messages`, so marking the LAST tool caches the entire
-// tool-schema block (often several KB) as a stable prefix that sits in front of
-// the system + message caches. Tools are passed to the SDK separately from
-// `message()` and never go through its providerID→SDK-key remap, so we resolve
-// the SDK-keyed marker via `cacheMarkerFor`. Tool registration order is stable
-// (insertion order of the tools record), so "last tool" is deterministic.
+// The single choke point for the outbound tool set (session/llm.ts passes the
+// result straight to `streamText`). Two responsibilities:
+//
+// 1. Pin `strict: false` for EXPLICIT_NON_STRICT_TOOL_SDKS — see above for why
+//    omitting the field breaks the Codex backend mid-stream.
+// 2. Place a cache breakpoint on the tool definitions. The cache hierarchy is
+//    `tools` → `system` → `messages`, so marking the LAST tool caches the entire
+//    tool-schema block (often several KB) as a stable prefix that sits in front
+//    of the system + message caches. Tools are passed to the SDK separately from
+//    `message()` and never go through its providerID→SDK-key remap, so we
+//    resolve the SDK-keyed marker via `cacheMarkerFor`. Tool registration order
+//    is stable (insertion order of the tools record), so "last tool" is
+//    deterministic.
+//
+// Both mutate in place. That is safe because the record and every tool object in
+// it are rebuilt per request: `resolveTools` allocates a fresh record and calls
+// `tool()` per entry, and MCP entries come from `convertMcpTool`, which returns
+// a new `dynamicTool()` on every `MCP.tools()` call. Nothing here outlives the
+// request, so a model switch between steps cannot carry `strict` over to a
+// provider that would reject or warn on it.
 export function tools<T extends Record<string, any>>(tools: T, model: Provider.Model): T {
   if (EXPLICIT_NON_STRICT_TOOL_SDKS.includes(model.api.npm)) {
+    // Guarded because this walks every entry; the single `last` lookup below can
+    // assume a well-formed record, but a loop over N values is cheaper to make
+    // safe than to debug as a crash in the request path.
     for (const tool of Object.values(tools)) {
       if (tool && tool.strict == null) tool.strict = false
     }
@@ -1064,6 +1084,45 @@ export function tools<T extends Record<string, any>>(tools: T, model: Provider.M
   const last = tools[names[names.length - 1]]
   last.providerOptions = mergeDeep(last.providerOptions ?? {}, marker)
   return tools
+}
+
+// The `response_format` / `text.format` sibling of the tool `strict` problem
+// above. `generateObject`/`streamObject` ship our zod schema as a `json_schema`
+// response format, and there the OpenAI SDKs default `strictJsonSchema` to TRUE
+// — `@ai-sdk/openai` on both the chat and responses paths, and
+// `@ai-sdk/openai-compatible` — so `strict: true` goes out EXPLICITLY rather
+// than being omitted.
+//
+// Our judge schema is not strict-compatible: `SessionGoal.Verdict` marks
+// `impossible` optional, so `required` ships 2 of its 3 properties and OpenAI
+// rejects the request (strict mode requires every key in `properties` to appear
+// in `required`). Verified on the wire: `text.format` goes out as `strict: true`
+// with `required: ["ok", "reason"]`. Because `goal.ts` judges with the SESSION's
+// model, this breaks the stop-condition judge on every OpenAI-backed model.
+//
+// Unlike the tool case this fails cleanly at validation instead of mid-stream, so
+// it is a separate, visible bug — but the root cause is the same: a strict
+// default meeting a deliberately non-strict schema.
+//
+// Making the schema strict-compatible is the wrong trade here. `impossible` is
+// optional BY DESIGN — JUDGE_SYSTEM tells the judge to return `{"ok": false}`
+// WITHOUT `impossible` when in doubt — so forcing it into `required` would change
+// what the judge is asked to produce. State `strict: false` instead, exactly as
+// for tools.
+//
+// Scoped to the SDKs that read `strictJsonSchema` AND default it to true.
+// `@ai-sdk/openai-compatible` is included: it looks up provider options under the
+// name it was constructed with, which provider.ts sets to `model.providerID` —
+// the same key `providerOptions()` falls back to when `sdkKey()` has no mapping.
+//
+// Schemas that ARE strict-compatible (e.g. the agent-config schema in
+// agent/agent.ts) are deliberately left alone so they keep constrained decoding.
+const DEFAULT_STRICT_SCHEMA_SDKS = ["@ai-sdk/openai", "@ai-sdk/azure", "@ai-sdk/openai-compatible"]
+
+// Feed through `providerOptions()` before handing to generateObject/streamObject.
+export function structuredOutputOptions(model: Provider.Model) {
+  if (!DEFAULT_STRICT_SCHEMA_SDKS.includes(model.api.npm)) return {}
+  return { strictJsonSchema: false }
 }
 
 export function temperature(model: Provider.Model) {

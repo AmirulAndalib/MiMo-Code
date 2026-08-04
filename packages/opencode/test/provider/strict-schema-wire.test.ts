@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import { createAnthropic } from "@ai-sdk/anthropic"
 import { createOpenAI } from "@ai-sdk/openai"
-import { generateText, jsonSchema, tool } from "ai"
+import { dynamicTool, generateObject, generateText, jsonSchema, tool } from "ai"
+import z from "zod"
 import { ProviderTransform } from "../../src/provider"
 
 // WIRE-LEVEL proof that function tools ship with an explicit `strict: false` to
@@ -117,9 +118,7 @@ async function outbound(tools: Record<string, any>, reply: unknown, build: (fetc
 }
 
 const openaiResponses = (tools: Record<string, any>) =>
-  outbound(tools, responsesReply, (fetch) =>
-    createOpenAI({ apiKey: "test-key", fetch }).responses("gpt-5.1-codex"),
-  )
+  outbound(tools, responsesReply, (fetch) => createOpenAI({ apiKey: "test-key", fetch }).responses("gpt-5.1-codex"))
 
 const anthropicMessages = (tools: Record<string, any>) =>
   outbound(tools, anthropicReply, (fetch) => createAnthropic({ apiKey: "test-key", fetch })("claude-sonnet-4"))
@@ -167,6 +166,28 @@ describe("function tools reach the OpenAI Responses API with an explicit strict:
       ["read", false],
     ])
   })
+
+  // MCP tools are built by `convertMcpTool` as `dynamicTool()`, i.e.
+  // `type: "dynamic"` rather than a plain function tool. `ai`'s
+  // `prepareToolsAndToolChoice` funnels `dynamic` through the same
+  // `case "function"` branch, so `strict` must survive for them too — MCP tool
+  // schemas are server-supplied and the least likely to be strict-compatible.
+  test("dynamic (MCP) tools also ship `strict: false`", async () => {
+    const tools = {
+      mcp_server_query: dynamicTool({
+        description: "Query a server",
+        inputSchema: jsonSchema<any>({
+          type: "object",
+          properties: { q: { type: "string" }, page: { type: "number" } },
+          required: ["q"],
+          additionalProperties: false,
+        }),
+        execute: async () => "ok",
+      }),
+    }
+    const body = await openaiResponses(ProviderTransform.tools(tools, model("@ai-sdk/openai")))
+    expect(body.tools.map((entry: any) => [entry.name, entry.strict])).toEqual([["mcp_server_query", false]])
+  })
 })
 
 describe("non-OpenAI SDKs are left alone", () => {
@@ -199,5 +220,73 @@ describe("non-OpenAI SDKs are left alone", () => {
   test("openai-compatible proxies are untouched", () => {
     const tools = ProviderTransform.tools(toolset(), model("@ai-sdk/openai-compatible"))
     for (const entry of Object.values(tools)) expect(entry).not.toHaveProperty("strict")
+  })
+})
+
+// The `response_format` sibling of the above. Here the SDKs default
+// `strictJsonSchema` to TRUE, so `strict: true` goes out EXPLICITLY — the
+// opposite direction from the tool case, and it fails cleanly at validation
+// rather than mid-stream.
+describe("structured output declares strict: false for non-strict-compatible schemas", () => {
+  // `SessionGoal.Verdict`. `impossible` is optional BY DESIGN — JUDGE_SYSTEM
+  // tells the judge to omit it when in doubt.
+  const Verdict = z.object({ ok: z.boolean(), impossible: z.boolean().optional(), reason: z.string() })
+
+  async function format(schema: any, options: Record<string, unknown>) {
+    let captured: any
+    const openai = createOpenAI({
+      apiKey: "test-key",
+      fetch: (async (_url: any, init: any) => {
+        captured = JSON.parse(init.body as string)
+        return new Response("{}", { headers: { "content-type": "application/json" } })
+      }) as any,
+    })
+    await generateObject({
+      model: openai.responses("gpt-5.1-codex"),
+      prompt: "hi",
+      schema,
+      providerOptions: options as any,
+    }).catch(() => {})
+    return captured?.text?.format
+  }
+
+  test("CONTROL: Verdict would ship strict: true with an incomplete `required` (the defect)", async () => {
+    const sent = await format(Verdict, {})
+    expect(sent.strict).toBe(true)
+    // 3 properties, 2 required — exactly what OpenAI's strict mode rejects.
+    expect(Object.keys(sent.schema.properties)).toEqual(["ok", "impossible", "reason"])
+    expect(sent.schema.required).toEqual(["ok", "reason"])
+  })
+
+  test("structuredOutputOptions turns strict off for the openai SDK", async () => {
+    const sent = await format(
+      Verdict,
+      ProviderTransform.providerOptions(model("@ai-sdk/openai"), {
+        ...ProviderTransform.structuredOutputOptions(model("@ai-sdk/openai")),
+      }),
+    )
+    expect(sent.strict).toBe(false)
+    // The schema is untouched — `impossible` stays optional.
+    expect(sent.schema.required).toEqual(["ok", "reason"])
+  })
+
+  test("azure and openai-compatible are covered; anthropic is not", () => {
+    expect(ProviderTransform.structuredOutputOptions(model("@ai-sdk/openai"))).toEqual({ strictJsonSchema: false })
+    expect(ProviderTransform.structuredOutputOptions(model("@ai-sdk/azure"))).toEqual({ strictJsonSchema: false })
+    expect(ProviderTransform.structuredOutputOptions(model("@ai-sdk/openai-compatible"))).toEqual({
+      strictJsonSchema: false,
+    })
+    expect(ProviderTransform.structuredOutputOptions(model("@ai-sdk/anthropic"))).toEqual({})
+  })
+
+  // agent.ts's schema is deliberately NOT opted out: it is strict-compatible, so
+  // it still gets constrained decoding. This pins that property — adding an
+  // optional field there would silently reintroduce the Verdict bug, and this
+  // test is the tripwire that points at structuredOutputOptions.
+  test("the agent-config schema stays strict-compatible, so strict decoding is kept", async () => {
+    const sent = await format(z.object({ identifier: z.string(), whenToUse: z.string(), systemPrompt: z.string() }), {})
+    expect(sent.strict).toBe(true)
+    expect(sent.schema.required).toEqual(Object.keys(sent.schema.properties))
+    expect(sent.schema.additionalProperties).toBe(false)
   })
 })

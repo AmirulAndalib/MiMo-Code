@@ -205,6 +205,12 @@ export const layer = Layer.effect(
         ],
         model: language,
         schema: Verdict,
+        // `Verdict.impossible` is optional by design, which strict mode rejects.
+        // See ProviderTransform.structuredOutputOptions for the full reasoning.
+        providerOptions: ProviderTransform.providerOptions(
+          resolved,
+          ProviderTransform.structuredOutputOptions(resolved),
+        ),
       } satisfies Parameters<typeof generateObject>[0]
 
       if (isOpenaiOauth) {
@@ -214,6 +220,7 @@ export const layer = Layer.effect(
             providerOptions: ProviderTransform.providerOptions(resolved, {
               instructions: JUDGE_SYSTEM,
               store: false,
+              ...ProviderTransform.structuredOutputOptions(resolved),
             }),
             onError: () => {},
           })
