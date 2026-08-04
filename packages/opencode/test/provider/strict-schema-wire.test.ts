@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { createAnthropic } from "@ai-sdk/anthropic"
 import { createOpenAI } from "@ai-sdk/openai"
+import { createXai } from "@ai-sdk/xai"
 import { dynamicTool, generateObject, generateText, jsonSchema, tool } from "ai"
 import z from "zod"
 import { ProviderTransform } from "../../src/provider"
@@ -221,6 +222,23 @@ describe("non-OpenAI SDKs are left alone", () => {
     const tools = ProviderTransform.tools(toolset(), model("@ai-sdk/openai-compatible"))
     for (const entry of Object.values(tools)) expect(entry).not.toHaveProperty("strict")
   })
+
+  // xai also reaches a Responses endpoint (provider.ts:331) and forwards
+  // `tool.strict` with the same omit-when-null guard, so it looks like it belongs
+  // in the list. It does not: its prepare-tools strips `additionalProperties:
+  // false` from every schema, which strict mode REQUIRES — a strict-by-default xAI
+  // would reject every tool call the SDK makes, so it cannot be strict by default.
+  // Pinned so the exclusion reads as a decision rather than an oversight.
+  test("xai is excluded — its SDK strips additionalProperties, so it cannot be strict by default", async () => {
+    const tools = ProviderTransform.tools(toolset(), model("@ai-sdk/xai"))
+    for (const entry of Object.values(tools)) expect(entry).not.toHaveProperty("strict")
+
+    const stripped = await outbound(tools, responsesReply, (fetch) =>
+      createXai({ apiKey: "test-key", fetch }).responses("grok-4"),
+    )
+    expect(stripped.tools).toHaveLength(2)
+    for (const entry of stripped.tools) expect(entry).not.toHaveProperty("strict")
+  })
 })
 
 // The `response_format` sibling of the above. Here the SDKs default
@@ -276,7 +294,10 @@ describe("structured output declares strict: false for non-strict-compatible sch
     expect(ProviderTransform.structuredOutputOptions(model("@ai-sdk/openai-compatible"))).toEqual({
       strictJsonSchema: false,
     })
-    expect(ProviderTransform.structuredOutputOptions(model("@ai-sdk/anthropic"))).toEqual({})
+    // undefined, not {} — so goal.ts attaches no provider-options bag at all for
+    // SDKs that don't default json_schema strict on.
+    expect(ProviderTransform.structuredOutputOptions(model("@ai-sdk/anthropic"))).toBeUndefined()
+    expect(ProviderTransform.structuredOutputOptions(model("@ai-sdk/xai"))).toBeUndefined()
   })
 
   // agent.ts's schema is deliberately NOT opted out: it is strict-compatible, so

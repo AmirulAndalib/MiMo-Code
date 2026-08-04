@@ -1027,15 +1027,32 @@ export function message(msgs: ModelMessage[], model: Provider.Model, options: Re
 // the same schema gets a clean 502 instead, which is why this read as random
 // upstream flakiness rather than a deterministic schema problem.
 //
-// So state the intent explicitly. Scoped to the SDKs that reach an OpenAI
-// Responses endpoint AND forward `tool.strict`:
-//   - `@ai-sdk/openai`
-//   - `@ai-sdk/azure`, which builds `OpenAIResponsesLanguageModel` from
-//     `@ai-sdk/openai/internal`
-// The vendored Copilot Responses SDK (`provider/sdk/copilot/responses`) already
-// always emits `strict`, and every other SDK is left alone on purpose:
-// `@ai-sdk/anthropic` warns ("strict mode is not supported by this provider")
-// for any non-null `strict`, so a blanket default would spam warnings there.
+// So state the intent explicitly.
+//
+// This list is keyed by npm package, but the Responses-vs-Chat decision is made
+// per PROVIDER in `provider.ts` `getModel`. Those two can drift, so here is the
+// full set of `sdk.responses()` call sites and why each is or is not listed:
+//
+//   provider.ts:323  openai                    @ai-sdk/openai  → LISTED
+//   provider.ts:359  azure                     @ai-sdk/azure   → LISTED, builds
+//                    `OpenAIResponsesLanguageModel` from `@ai-sdk/openai/internal`
+//   provider.ts:379  azure-cognitive-services  @ai-sdk/azure   → covered by the above
+//                    (catalog pins the provider's npm to `@ai-sdk/azure`)
+//   provider.ts:340  github-copilot            → the npm id resolves to the VENDORED
+//                    `./sdk/copilot`, whose prepare-tools already always emits
+//                    `strict`, so it is immune and must stay out of this list
+//   provider.ts:331  xai                       @ai-sdk/xai     → NOT listed. It
+//                    forwards `tool.strict` with the same omit-when-null guard, but
+//                    its prepare-tools runs every tool schema through
+//                    `removeAdditionalPropertiesFalse` (xai/dist:319). Strict mode
+//                    REQUIRES `additionalProperties: false`, so a strict-by-default
+//                    xAI would reject every tool call the SDK makes. It therefore
+//                    cannot be strict by default, and forcing the field here would
+//                    assert a constraint xAI has not been shown to honour.
+//
+// Everything else is left alone on purpose: `@ai-sdk/anthropic` warns ("strict mode
+// is not supported by this provider") for any non-null `strict`, so a blanket
+// default would spam warnings on every Anthropic request.
 //
 // An explicit per-tool `strict` is preserved, so a tool that has been made
 // strict-compatible can still opt in.
@@ -1120,8 +1137,11 @@ export function tools<T extends Record<string, any>>(tools: T, model: Provider.M
 const DEFAULT_STRICT_SCHEMA_SDKS = ["@ai-sdk/openai", "@ai-sdk/azure", "@ai-sdk/openai-compatible"]
 
 // Feed through `providerOptions()` before handing to generateObject/streamObject.
+// Returns undefined — not `{}` — for SDKs that do not default strict on, so
+// callers can skip attaching a provider-options bag entirely rather than sending
+// an empty one to every other provider.
 export function structuredOutputOptions(model: Provider.Model) {
-  if (!DEFAULT_STRICT_SCHEMA_SDKS.includes(model.api.npm)) return {}
+  if (!DEFAULT_STRICT_SCHEMA_SDKS.includes(model.api.npm)) return undefined
   return { strictJsonSchema: false }
 }
 

@@ -188,6 +188,12 @@ export const layer = Layer.effect(
         messages: JSON.stringify(fullMessages, clip),
       })
 
+      // `Verdict.impossible` is optional by design, which strict mode rejects.
+      // See ProviderTransform.structuredOutputOptions for the full reasoning.
+      // undefined for SDKs that don't default json_schema strict on, so those
+      // models keep sending no provider options at all.
+      const structuredOutput = ProviderTransform.structuredOutputOptions(resolved)
+
       const params = {
         experimental_telemetry: {
           isEnabled: cfg.experimental?.openTelemetry,
@@ -205,12 +211,7 @@ export const layer = Layer.effect(
         ],
         model: language,
         schema: Verdict,
-        // `Verdict.impossible` is optional by design, which strict mode rejects.
-        // See ProviderTransform.structuredOutputOptions for the full reasoning.
-        providerOptions: ProviderTransform.providerOptions(
-          resolved,
-          ProviderTransform.structuredOutputOptions(resolved),
-        ),
+        providerOptions: structuredOutput && ProviderTransform.providerOptions(resolved, structuredOutput),
       } satisfies Parameters<typeof generateObject>[0]
 
       if (isOpenaiOauth) {
@@ -220,7 +221,7 @@ export const layer = Layer.effect(
             providerOptions: ProviderTransform.providerOptions(resolved, {
               instructions: JUDGE_SYSTEM,
               store: false,
-              ...ProviderTransform.structuredOutputOptions(resolved),
+              ...structuredOutput,
             }),
             onError: () => {},
           })
