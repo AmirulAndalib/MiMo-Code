@@ -225,19 +225,53 @@ describe("non-OpenAI SDKs are left alone", () => {
 
   // xai also reaches a Responses endpoint (provider.ts:331) and forwards
   // `tool.strict` with the same omit-when-null guard, so it looks like it belongs
-  // in the list. It does not: its prepare-tools strips `additionalProperties:
-  // false` from every schema, which strict mode REQUIRES — a strict-by-default xAI
-  // would reject every tool call the SDK makes, so it cannot be strict by default.
-  // Pinned so the exclusion reads as a decision rather than an oversight.
-  test("xai is excluded — its SDK strips additionalProperties, so it cannot be strict by default", async () => {
+  // in the list. It does not — see the next test for the reason. Pinned so the
+  // exclusion reads as a decision rather than an oversight.
+  test("xai tools are left untouched, so nothing reaches the wire", async () => {
     const tools = ProviderTransform.tools(toolset(), model("@ai-sdk/xai"))
     for (const entry of Object.values(tools)) expect(entry).not.toHaveProperty("strict")
 
-    const stripped = await outbound(tools, responsesReply, (fetch) =>
+    const body = await outbound(tools, responsesReply, (fetch) =>
       createXai({ apiKey: "test-key", fetch }).responses("grok-4"),
     )
-    expect(stripped.tools).toHaveLength(2)
-    for (const entry of stripped.tools) expect(entry).not.toHaveProperty("strict")
+    expect(body.tools).toHaveLength(2)
+    for (const entry of body.tools) expect(entry).not.toHaveProperty("strict")
+  })
+
+  // The premise the exclusion above rests on, asserted rather than cited.
+  //
+  // @ai-sdk/xai runs every tool schema through `removeAdditionalPropertiesFalse`
+  // (xai/dist:319, called from prepareResponsesTools). OpenAI strict mode REQUIRES
+  // `additionalProperties: false` on every object, so a strict-by-default xAI
+  // would reject every tool call its own SDK makes — self-contradictory. That is
+  // why forcing `strict: false` there would assert a constraint xAI has not been
+  // shown to honour.
+  //
+  // If xai ever stops stripping the field, this test fails and the exclusion is
+  // due for re-evaluation — which is the whole point of asserting it here.
+  test("xai strips additionalProperties: false, which strict mode requires", async () => {
+    const withAdditionalProperties = () => ({
+      query: dynamicTool({
+        description: "Query a server",
+        inputSchema: jsonSchema<any>({
+          type: "object",
+          properties: { q: { type: "string" } },
+          required: ["q"],
+          additionalProperties: false,
+        }),
+        execute: async () => "ok",
+      }),
+    })
+
+    const viaXai = await outbound(withAdditionalProperties(), responsesReply, (fetch) =>
+      createXai({ apiKey: "test-key", fetch }).responses("grok-4"),
+    )
+    expect(viaXai.tools[0].parameters).not.toHaveProperty("additionalProperties")
+
+    // CONTRAST: the OpenAI SDK ships the same schema with the field intact, so the
+    // stripping is xai-specific and not something `ai` core does upstream.
+    const viaOpenai = await openaiResponses(withAdditionalProperties())
+    expect(viaOpenai.tools[0].parameters.additionalProperties).toBe(false)
   })
 })
 
