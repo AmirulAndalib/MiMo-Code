@@ -241,11 +241,13 @@ describe("non-OpenAI SDKs are left alone", () => {
   // The premise the exclusion above rests on, asserted rather than cited.
   //
   // @ai-sdk/xai runs every tool schema through `removeAdditionalPropertiesFalse`
-  // (xai/dist:319, called from prepareResponsesTools). OpenAI strict mode REQUIRES
-  // `additionalProperties: false` on every object, so a strict-by-default xAI
-  // would reject every tool call its own SDK makes — self-contradictory. That is
-  // why forcing `strict: false` there would assert a constraint xAI has not been
-  // shown to honour.
+  // (xai/dist:319, called from prepareResponsesTools; verified against the pinned
+  // @ai-sdk/xai 3.0.102 — note bun.lock also records a TRANSITIVE xai 3.0.82 under
+  // ai-gateway-provider that predates the stripping, so check the direct dependency
+  // when re-verifying). OpenAI strict mode REQUIRES `additionalProperties: false`
+  // on every object, so a strict-by-default xAI would reject every tool call its
+  // own SDK makes — self-contradictory. That is why forcing `strict: false` there
+  // would assert a constraint xAI has not been shown to honour.
   //
   // If xai ever stops stripping the field, this test fails and the exclusion is
   // due for re-evaluation — which is the whole point of asserting it here.
