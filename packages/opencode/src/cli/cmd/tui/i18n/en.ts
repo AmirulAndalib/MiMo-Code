@@ -61,6 +61,7 @@ export const dict: Record<string, string> = {
     "Looking for a shortcut? Ask {highlight}Which slash commands can I use?{/highlight} directly in chat",
   "tui.tips.background":
     "Run {highlight}/background{/highlight} to set a custom image as your home background",
+  "tui.tips.vivid": "Run {highlight}/vivid{/highlight} to switch between Vivid and Minimal visuals as needed",
   "tui.tips.compose_next":
     "Try {highlight}/compose-next{/highlight} instead of the Compose agent for frontier models",
   "tui.tips.undo": "Use {highlight}/undo{/highlight} to revert the last message and file changes",

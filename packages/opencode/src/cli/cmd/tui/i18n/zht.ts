@@ -63,6 +63,7 @@ export const dict = {
   "tui.tips.ask_slash_commands":
     "想找快捷指令？直接在聊天中問 {highlight}有哪些 slash 快捷指令？{/highlight}",
   "tui.tips.background": "執行 {highlight}/background{/highlight} 設定自訂圖片作為主頁背景",
+  "tui.tips.vivid": "執行 {highlight}/vivid{/highlight}，根據需要在豐富視覺模式和簡潔模式間切換",
   "tui.tips.compose_next":
     "推薦前沿模型使用 {highlight}/compose-next{/highlight} 代替 Compose 智慧體",
   "tui.tips.undo": "使用 {highlight}/undo{/highlight} 復原最後一條訊息及其檔案變更",

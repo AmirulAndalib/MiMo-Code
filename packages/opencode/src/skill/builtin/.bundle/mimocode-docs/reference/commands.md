@@ -31,6 +31,8 @@ Run `mimo <command> --help` for flags on any command.
 
 Notable TUI flags: `--continue`/`-c` (resume last session), `--session`/`-s`, `--model`/`-m`, `--agent`, `--never-ask`, `--trust`, and `--dangerously-skip-permissions` (auto-approve everything not explicitly denied; prompts once for confirmation — see permissions.md).
 
+For terminal compatibility, TUI rendering or lag, and local rendering over SSH with `mimo serve` + `mimo attach`, see @guide.md.
+
 ## Slash commands (inside the TUI)
 
 Type `/` to see the commands available in the current context. You can also ask in chat, for example, “Which slash commands can I use?” or “How do I switch models?” MiMoCode will explain the relevant command without requiring you to remember its name.
