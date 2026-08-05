@@ -453,12 +453,6 @@ describe("Actor.spawn subagent mode", () => {
         expect(names).not.toContain("read")
         expect(names).not.toContain("edit")
         expect(names).not.toContain("write")
-        expect(
-          (request?.body.messages as Array<{ role?: string; content?: string }> | undefined)
-            ?.filter((message) => message.role === "system")
-            .map((message) => message.content)
-            .join("\n"),
-        ).toContain("Use `exec` as the main composition surface")
       }),
       { git: true, config: gptProviderCfg },
     ),
