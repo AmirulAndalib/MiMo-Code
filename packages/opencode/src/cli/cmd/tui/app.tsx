@@ -926,11 +926,6 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
           ? "tui.command.visual_mode.title_on"
           : "tui.command.visual_mode.title_off",
       ),
-      description: t(
-        resolveVisualMode(kv.get("visual_mode", "vivid")) === "vivid"
-          ? "tui.command.visual_mode.description_on"
-          : "tui.command.visual_mode.description_off",
-      ),
       value: "app.toggle.visual_mode",
       slash: {
         name: "vivid",

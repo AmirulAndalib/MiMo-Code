@@ -1,9 +1,9 @@
 ---
 feature: tui-quiet-mode
-status: delivered
+status: in-progress
 updated: 2026-08-05
 branch: feature/tui-quiet-mode
-commits: 91dc9d14c263d76f7e843eaf6cce3f112ee1ddda..5931f015
+commits:
 ---
 
 # TUI Quiet Mode
@@ -14,7 +14,7 @@ commits: 91dc9d14c263d76f7e843eaf6cce3f112ee1ddda..5931f015
 
 Logo, star field, prompt, task, workflow, and agent states share the same `vivid && animations_enabled` motion contract. Runtime preference changes clean up and restart eligible timers without requiring a TUI restart.
 
-**Verification** — `bun test test/cli/tui/visual-mode.test.ts` passed 4 tests; `bun test test/cli/tui test/cli/cmd/tui` passed 266 tests and 728 assertions; bundled skill tests passed 8 tests and 41 assertions; `bun typecheck` passed; `git diff --check` passed. An isolated development TUI confirmed the vivid default, `/vivid` switching to minimal, localized ON/OFF palette states and toasts, switching back through `ctrl+p`, and KV persistence.
+**Verification** — Pending copy simplification verification.
 
 **Journey log**
 
@@ -29,7 +29,7 @@ The current vivid presentation redraws the home screen for stars, meteors, and l
 
 ## [S2] Design
 
-Add an independent KV-backed `visual_mode` preference with `minimal` and `vivid` values. It is switched by the same command from the command palette or `/vivid`, persists across launches, and defaults to `vivid`. The command title, description, and completion toast distinguish the enabled and disabled states in every existing TUI-specific locale dictionary; locales without a TUI dictionary use the standard English fallback, matching `/voice`. The existing `animations_enabled` preference remains a separate accessibility and performance override.
+Add an independent KV-backed `visual_mode` preference with `minimal` and `vivid` values. It is switched by the same command from the command palette or `/vivid`, persists across launches, and defaults to `vivid`. A concise command title and completion toast distinguish the enabled and disabled states in every existing TUI-specific locale dictionary; locales without a TUI dictionary use the standard English fallback, matching `/voice`. The existing `animations_enabled` preference remains a separate accessibility and performance override.
 
 In `minimal` mode:
 
