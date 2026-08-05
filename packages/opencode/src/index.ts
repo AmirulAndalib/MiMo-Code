@@ -64,10 +64,10 @@ function show(out: string) {
   const text = out.trimStart()
   if (!text.startsWith("mimo ")) {
     process.stderr.write(UI.logo() + EOL + EOL)
-    process.stderr.write(text)
+    process.stderr.write(UI.withTrailingEOL(text))
     return
   }
-  process.stderr.write(out)
+  process.stderr.write(UI.withTrailingEOL(out))
 }
 
 const cli = yargs(args)
