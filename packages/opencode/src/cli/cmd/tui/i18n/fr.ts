@@ -67,6 +67,8 @@ export const dict = {
     "Vous cherchez un raccourci ? Demandez {highlight}Quelles commandes slash puis-je utiliser ?{/highlight} directement dans le chat",
   "tui.tips.background":
     "Exécutez {highlight}/background{/highlight} pour définir une image personnalisée comme fond d'écran d'accueil",
+  "tui.tips.vivid":
+    "Exécutez {highlight}/vivid{/highlight} pour basculer entre les affichages enrichi et minimal selon vos besoins",
   "tui.tips.compose_next":
     "Essayez {highlight}/compose-next{/highlight} au lieu de l'agent Compose pour les modèles avancés",
   "tui.tips.undo": "Utilisez {highlight}/undo{/highlight} pour annuler le dernier message et ses modifications",

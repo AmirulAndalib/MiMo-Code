@@ -67,6 +67,8 @@ export const dict = {
     "¿Buscas un atajo? Pregunta {highlight}¿Qué comandos slash puedo usar?{/highlight} directamente en el chat",
   "tui.tips.background":
     "Ejecuta {highlight}/background{/highlight} para usar una imagen personalizada como fondo de inicio",
+  "tui.tips.vivid":
+    "Ejecuta {highlight}/vivid{/highlight} para alternar entre las vistas enriquecida y mínima según sea necesario",
   "tui.tips.compose_next":
     "Prueba {highlight}/compose-next{/highlight} en vez del agente Compose para modelos avanzados",
   "tui.tips.undo":
