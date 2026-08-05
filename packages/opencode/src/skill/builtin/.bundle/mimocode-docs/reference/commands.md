@@ -60,6 +60,7 @@ Most client commands run only when the whole input is the command. `/btw <questi
 | `/themes` | — | Choose a color theme |
 | `/background` | — | Choose the home-screen background |
 | `/logo` | — | Choose the home-screen logo style |
+| `/vivid` | — | Toggle Vivid and Minimal visuals |
 | `/dark` | — | Switch to dark mode |
 | `/light` | — | Switch to light mode |
 | `/help` | — | Open command help |

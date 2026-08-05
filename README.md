@@ -238,6 +238,13 @@ The first two options remove the corresponding skills from the agent's available
 
 </details>
 
+<details>
+<summary><strong>Vivid and Minimal visuals</strong></summary>
+
+MiMoCode starts in Vivid mode, with the star field, meteors, logo effects, and animated activity indicators enabled. Run `/vivid` to switch between Vivid and Minimal visuals, or use the **Vivid mode** setting from the `ctrl+p` command palette. Minimal mode removes decorative motion and uses stable activity indicators. The separate **Disable animations** setting can stop high-frequency motion without changing the selected visual mode.
+
+</details>
+
 ### Voice Input
 
 Real-time streaming voice input powered by TenVAD and MiMo ASR. Activate with `/voice`, then speak — audio is segmented by pauses and transcribed incrementally into the input. Available for MiMo logged-in users. Requires `sox` (`brew install sox` on macOS, other platforms similar).

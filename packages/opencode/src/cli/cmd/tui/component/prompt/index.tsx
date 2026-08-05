@@ -43,6 +43,7 @@ import { DialogPrompt } from "../../ui/dialog-prompt"
 import { useToast } from "../../ui/toast"
 import { createPress } from "../../ui/press"
 import { useKV } from "../../context/kv"
+import { useVisualMode } from "../../context/visual"
 import { createFadeIn } from "../../util/signal"
 import { useTextareaKeybindings } from "../textarea-keybindings"
 import { DialogSkill } from "../dialog-skill"
@@ -135,7 +136,8 @@ export function Prompt(props: PromptProps) {
   const renderer = useRenderer()
   const { theme, syntax } = useTheme()
   const kv = useKV()
-  const animationsEnabled = createMemo(() => kv.get("animations_enabled", true))
+  const visual = useVisualMode()
+  const animationsEnabled = visual.motion
   const voiceEnabled = createMemo(() => kv.get("voice_enabled", false))
   const voiceSendEnabled = createMemo(() => kv.get("voice_send_command", false))
   const voiceControlEnabled = createMemo(() => kv.get("voice_control_enabled", false))
@@ -1898,7 +1900,7 @@ export function Prompt(props: PromptProps) {
             >
               <box flexShrink={0} flexDirection="row" gap={1}>
                 <box marginLeft={1}>
-                  <Show when={kv.get("animations_enabled", true)} fallback={<text fg={theme.textMuted}>[⋯]</text>}>
+                  <Show when={visual.motion()} fallback={<text fg={theme.textMuted}>⋯</text>}>
                     <spinner color={spinnerDef().color} frames={spinnerDef().frames} interval={40} />
                   </Show>
                 </box>
