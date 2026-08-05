@@ -1,8 +1,8 @@
 ---
 feature: context-budget-control
-status: delivered
-updated: 2026-07-31
-branch: fix/context-limit-threshold-rebuild
+status: in-progress
+updated: 2026-08-05
+branch: investigate/context-limit-double-rebuild
 commits: 028f3178..3b15062d
 ---
 
@@ -104,6 +104,12 @@ Checkpoint percentages use `usable()` as their denominator, and the final 80%/90
 2. Never exceeds the provider's effective cap — the setting clamps, it never raises.
 3. Discoverable from the TUI without editing JSON, and the resulting number must be printable ("what is my current context window, and where will it compact?").
 4. The provider-layer Codex bug fixed correctly and independently of (1)–(3).
+
+### S1.6 A completed high-usage turn is rebuilt twice
+
+`SessionProcessor` marks a successfully completed model turn as `"overflow"` when its reported usage reaches `Overflow.usable()`. The post-process overflow handler rebuilds immediately, but the same completed assistant usage remains visible to later prompt loops. The next user turn can therefore consume that usage again in the preflight overflow check, insert a second checkpoint boundary, re-arm checkpoint thresholds, and run tail microcompaction again.
+
+For a configured 372K budget with the default 20K reserve, the first trigger is 352K (`94.6%` of the configured limit). This is the intended trigger. The defect is processing that one high-water usage record twice, not the trigger percentage.
 
 ## [S2] Design — route-independent core
 
@@ -215,6 +221,14 @@ The TUI may import `Overflow.window` directly — TUI modules already import fro
 
 Note this intentionally changes an existing user-visible number: the footer `%` will read higher than before for models whose reserves are large, because it is now measured against the value that actually triggers compaction. That is the point of the change and must be called out in the PR description.
 
+### S2.7 One recovery per assistant usage record
+
+Every overflow recovery path that successfully frees context in the post-process phase sets `skipOverflowCheck` before continuing the current run loop. Across run loops, a checkpoint or compaction boundary with an ascending message ID newer than the completed assistant marks that usage as already recovered. Boundary timestamps are backdated to the checkpoint watermark, so this comparison uses message IDs rather than timestamps.
+
+The next iteration or user turn may call the model on the rebuilt or compacted context, but must not run checkpoint scheduling, preflight overflow, or exit-time pruning against the same completed assistant usage. This applies to main-agent checkpoint rebuilds and subagent/fork compaction paths. If recovery inserts nothing (`insert-failed`), no marker exists and the usage remains eligible because no context was freed.
+
+The invariant is behavioral, not time-based: no cooldown or percentage margin is introduced. A later assistant turn with newly measured high usage may still trigger its own recovery.
+
 ## [S3] Routes — decision required
 
 Storage location for the user's budget. All routes share S2.1–S2.2 and S2.6; they differ in where the value lives and therefore in scope, persistence, and cost.
@@ -297,3 +311,5 @@ Display (needed by any route):
 - [x] T11: Surface the context window in the `models` CLI command without `--verbose` — acceptance: `mimocode models openai` prints each model's provider window and compact-at (covers: S2.6; depends: T5)
 - [x] T12: Decouple the final checkpoint threshold from the prompt-loop rebuild condition — acceptance: crossing the final checkpoint threshold below `usable()` writes a checkpoint but inserts no rebuild or compaction boundary; reaching `usable()` still follows the existing rebuild path (covers: S1.3, S2.1; depends: T5)
 - [x] T13: Show the configured active limit relative to the provider hard cap in the sidebar — acceptance: a 300K budget on a 922K model renders `limit 300K of 922K`, while the reserve-adjusted trigger remains internal and available in `/status` (covers: S2.6; depends: T5)
+- [x] T14: Consume each assistant usage at most once during overflow recovery — acceptance: post-process recovery sets the current-loop skip guard; across user turns, a newer boundary prevents the recovered assistant from driving checkpoint scheduling, preflight overflow, or exit-time pruning; equivalent subagent/fork recovery paths set the same guard (covers: S1.6, S2.7; depends: T12)
+- [x] T15: Add regression coverage for duplicate recovery — acceptance: a low-usage initialization turn, a successful high-usage turn, and a following user turn produce two distinct checkpoint boundaries on current `main`, but exactly one boundary and one writer after T14; existing preflight and provider-overflow fallback tests remain green (covers: S1.6, S2.7; depends: T14)

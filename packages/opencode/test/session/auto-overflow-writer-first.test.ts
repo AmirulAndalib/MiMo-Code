@@ -33,7 +33,7 @@ function run<A, E>(fx: Effect.Effect<A, E, SessionPrompt.Service | Session.Servi
   )
 }
 
-function chat(text: string): ReadableStream<Uint8Array> {
+function chat(text: string, promptTokens?: number): ReadableStream<Uint8Array> {
   const payload =
     [
       `data: ${JSON.stringify({
@@ -50,6 +50,10 @@ function chat(text: string): ReadableStream<Uint8Array> {
         id: "chatcmpl-1",
         object: "chat.completion.chunk",
         choices: [{ delta: {}, finish_reason: "stop" }],
+        usage:
+          promptTokens === undefined
+            ? undefined
+            : { prompt_tokens: promptTokens, completion_tokens: 1, total_tokens: promptTokens + 1 },
       })}`,
       "data: [DONE]",
     ].join("\n\n") + "\n\n"
@@ -60,6 +64,30 @@ function chat(text: string): ReadableStream<Uint8Array> {
       ctrl.close()
     },
   })
+}
+
+function startUsageLLM(replies: Array<{ text: string; promptTokens: number }>) {
+  let calls = 0
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const url = new URL(req.url)
+      if (!url.pathname.endsWith("/chat/completions")) return new Response("not found", { status: 404 })
+      const reply = replies[Math.min(calls, replies.length - 1)]!
+      calls++
+      return new Response(chat(reply.text, reply.promptTokens), {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      })
+    },
+  })
+  return {
+    origin: server.url.origin,
+    get calls() {
+      return calls
+    },
+    stop: () => server.stop(true),
+  }
 }
 
 function startLLM(reply: string) {
@@ -273,6 +301,81 @@ async function seedFinishedAssistant(sessionID: SessionID, parentID: MessageID, 
 // with no summary at all. Degrading is therefore a real loss, not a cheaper
 // summary.
 describe("Auto context overflow: write a checkpoint before degrading to compaction", () => {
+  test(
+    "a completed high-usage turn is rebuilt exactly once",
+    async () => {
+      const llm = startUsageLLM([
+        { text: "initialized", promptTokens: 1_000 },
+        { text: "high-usage reply", promptTokens: 25_000 },
+        { text: "reply after rebuild", promptTokens: 1_000 },
+      ])
+      let writerCalls = 0
+      const writer = writerThatWritesCheckpointAfter("HIGH_USAGE_CHECKPOINT", 400, () => writerCalls++)
+      try {
+        await using tmp = await tmpdir({
+          git: true,
+          init: (dir) => Bun.write(path.join(dir, "mimocode.json"), mimocodeConfig(llm.origin)),
+        })
+
+        await Instance.provide({
+          directory: tmp.path,
+          fn: () =>
+            run(
+              Effect.gen(function* () {
+                const prompt = yield* SessionPrompt.Service
+                const sessions = yield* Session.Service
+                const info = yield* sessions.create({ title: "high-usage-single-rebuild" })
+
+                // The first prompt resolves the late-bound actor layer, which
+                // installs its real spawn implementation.
+                yield* prompt.prompt({
+                  sessionID: info.id,
+                  parts: [{ type: "text", text: "initialize the actor layer" }],
+                  agent: "build",
+                })
+
+                // Bind the deterministic writer after layer initialization.
+                const previous = spawnRef.current
+                spawnRef.current = writer
+                yield* prompt
+                  .prompt({
+                    sessionID: info.id,
+                    parts: [{ type: "text", text: "produce one high-usage turn" }],
+                    agent: "build",
+                  })
+                  .pipe(
+                    Effect.ensuring(
+                      Effect.sync(() => {
+                        spawnRef.current = previous
+                      }),
+                    ),
+                  )
+
+                yield* prompt.prompt({
+                  sessionID: info.id,
+                  parts: [{ type: "text", text: "continue after the automatic rebuild" }],
+                  agent: "build",
+                })
+
+                const after = yield* sessions.messages({ sessionID: info.id })
+                const checkpoints = after.filter((m) => m.parts.some((p) => p.type === "checkpoint"))
+                expect(checkpoints).toHaveLength(1)
+                expect(new Set(checkpoints.map((m) => m.info.id)).size).toBe(1)
+                expect(writerCalls).toBe(1)
+                expect(llm.calls).toBe(3)
+                expect(
+                  after.some((m) => m.parts.some((p) => p.type === "text" && p.text === "reply after rebuild")),
+                ).toBe(true)
+              }),
+            ),
+        })
+      } finally {
+        await llm.stop()
+      }
+    },
+    { timeout: 60_000 },
+  )
+
   test(
     "crossing the final checkpoint threshold below the configured context trigger does not rebuild",
     async () => {
