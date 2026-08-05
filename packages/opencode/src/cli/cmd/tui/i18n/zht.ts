@@ -352,6 +352,8 @@ export const dict = {
   "tui.dialog.image.import.success": "背景圖片已匯入",
   "tui.dialog.image.none": "無（使用星空背景）",
   "tui.command.logo.switch.title": "切換 Logo 樣式",
+  "tui.command.visual_mode.minimal": "使用極簡視覺",
+  "tui.command.visual_mode.vivid": "使用豐富視覺",
   "tui.dialog.logo.title": "Logo 樣式",
   "tui.dialog.logo.option.classic": "經典（粗體）",
   "tui.dialog.logo.option.thin": "纖細（半塊）",

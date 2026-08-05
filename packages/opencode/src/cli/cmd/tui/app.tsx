@@ -56,6 +56,7 @@ import { Session as SessionApi } from "@/session"
 import { orchestratorDir } from "@/global"
 import { TuiEvent } from "./event"
 import { KVProvider, useKV } from "./context/kv"
+import { resolveVisualMode } from "./context/visual"
 import { LanguageProvider, UiI18nBridge, useLanguage } from "./context/language"
 import type { Locale } from "./i18n/locales"
 import { LOCALES } from "./i18n/locales"
@@ -918,6 +919,22 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
         dialog.replace(() => <DialogLogoDesign />)
       },
       category: "system",
+    },
+    {
+      title: t(
+        resolveVisualMode(kv.get("visual_mode", "minimal")) === "minimal"
+          ? "tui.command.visual_mode.vivid"
+          : "tui.command.visual_mode.minimal",
+      ),
+      value: "app.toggle.visual_mode",
+      category: "system",
+      onSelect: (dialog) => {
+        kv.set(
+          "visual_mode",
+          resolveVisualMode(kv.get("visual_mode", "minimal")) === "minimal" ? "vivid" : "minimal",
+        )
+        dialog.clear()
+      },
     },
     {
       title: t("tui.command.theme.switch_mode.to_dark"),

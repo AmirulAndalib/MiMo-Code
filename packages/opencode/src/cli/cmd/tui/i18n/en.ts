@@ -329,6 +329,8 @@ export const dict: Record<string, string> = {
   "tui.dialog.image.import.success": "Background image imported",
   "tui.dialog.image.none": "None (use starry background)",
   "tui.command.logo.switch.title": "Switch logo design",
+  "tui.command.visual_mode.minimal": "Use minimal visuals",
+  "tui.command.visual_mode.vivid": "Use vivid visuals",
   "tui.dialog.logo.title": "Logo design",
   "tui.dialog.logo.option.classic": "Classic (bold)",
   "tui.dialog.logo.option.thin": "Thin (half-block)",

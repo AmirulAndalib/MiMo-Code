@@ -2569,7 +2569,7 @@ function WorkflowPanel(props: {
     >
       <box flexDirection="row" gap={1} paddingLeft={3}>
         <Show when={props.running} fallback={<text fg={theme.accent} attributes={TextAttributes.BOLD}>⚡</text>}>
-          <spinner frames={["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]} interval={80} color={theme.accent} />
+          <Spinner color={theme.accent} />
         </Show>
         <text attributes={TextAttributes.BOLD} fg={theme.accent}>
           {props.name}

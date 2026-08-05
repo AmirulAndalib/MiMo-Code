@@ -372,6 +372,8 @@ export const dict = {
   "tui.command.opencode.status.title": "Ver estado",
   "tui.command.theme.switch.title": "Cambiar tema",
   "tui.command.logo.switch.title": "Cambiar diseño de logo",
+  "tui.command.visual_mode.minimal": "Usar visuales mínimos",
+  "tui.command.visual_mode.vivid": "Usar visuales intensos",
   "tui.dialog.logo.title": "Diseño de logo",
   "tui.dialog.logo.option.classic": "Clásico (negrita)",
   "tui.dialog.logo.option.thin": "Fino (medio bloque)",

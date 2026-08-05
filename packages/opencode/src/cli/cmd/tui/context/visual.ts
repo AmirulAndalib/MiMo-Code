@@ -1,0 +1,23 @@
+import { createMemo } from "solid-js"
+import { useKV } from "./kv"
+
+export type VisualMode = "minimal" | "vivid"
+
+export function resolveVisualMode(value: unknown): VisualMode {
+  return value === "vivid" ? "vivid" : "minimal"
+}
+
+export function visualMotionEnabled(mode: VisualMode, animationsEnabled: boolean) {
+  return mode === "vivid" && animationsEnabled
+}
+
+export function useVisualMode() {
+  const kv = useKV()
+  const mode = createMemo(() => resolveVisualMode(kv.get("visual_mode", "minimal")))
+  const animationsEnabled = createMemo(() => kv.get("animations_enabled", true) === true)
+  return {
+    mode,
+    vivid: createMemo(() => mode() === "vivid"),
+    motion: createMemo(() => visualMotionEnabled(mode(), animationsEnabled())),
+  }
+}

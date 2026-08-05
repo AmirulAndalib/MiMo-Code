@@ -304,6 +304,8 @@ export const dict = {
   "tui.command.opencode.status.title": "ステータスを表示",
   "tui.command.theme.switch.title": "テーマを切り替え",
   "tui.command.logo.switch.title": "ロゴデザインを切り替え",
+  "tui.command.visual_mode.minimal": "ミニマル表示を使用",
+  "tui.command.visual_mode.vivid": "リッチ表示を使用",
   "tui.dialog.logo.title": "ロゴデザイン",
   "tui.dialog.logo.option.classic": "クラシック（太字）",
   "tui.dialog.logo.option.thin": "細字（ハーフブロック）",

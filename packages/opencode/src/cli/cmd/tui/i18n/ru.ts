@@ -375,6 +375,8 @@ export const dict = {
   "tui.command.opencode.status.title": "Посмотреть статус",
   "tui.command.theme.switch.title": "Сменить тему",
   "tui.command.logo.switch.title": "Сменить дизайн логотипа",
+  "tui.command.visual_mode.minimal": "Использовать минимальное оформление",
+  "tui.command.visual_mode.vivid": "Использовать яркое оформление",
   "tui.dialog.logo.title": "Дизайн логотипа",
   "tui.dialog.logo.option.classic": "Классический (жирный)",
   "tui.dialog.logo.option.thin": "Тонкий (полублок)",
