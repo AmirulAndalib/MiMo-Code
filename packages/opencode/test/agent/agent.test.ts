@@ -9,6 +9,9 @@ import { ToolRegistry } from "../../src/tool"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
 import { testEffect } from "../lib/effect"
+import PROMPT_GENERATE from "../../src/agent/generate.txt"
+import PROMPT_GENERATE_GPT from "../../src/agent/prompt/generate-gpt.txt"
+import PROMPT_EXPLORE from "../../src/agent/prompt/explore.txt"
 
 const itTool = testEffect(
   Layer.mergeAll(ToolRegistry.defaultLayer, Agent.defaultLayer, CrossSpawnSpawner.defaultLayer),
@@ -26,6 +29,19 @@ function load<A>(dir: string, fn: (svc: Agent.Interface) => Effect.Effect<A>) {
 
 afterEach(async () => {
   await Instance.disposeAll()
+})
+
+test("agent prompts use runtime tool names and GPT generation guidance", () => {
+  expect(PROMPT_EXPLORE).toContain("Tool names and availability are model-specific")
+  expect(PROMPT_EXPLORE).not.toContain("Use Glob")
+  expect(PROMPT_EXPLORE).not.toContain("Use Grep")
+  expect(PROMPT_EXPLORE).not.toContain("Use Read")
+  expect(PROMPT_GENERATE).toContain("use the actor tool")
+  expect(PROMPT_GENERATE).not.toContain("use the Agent tool")
+  expect(PROMPT_GENERATE_GPT).toContain("`exec`")
+  expect(PROMPT_GENERATE_GPT).toContain("`apply_patch`")
+  expect(PROMPT_GENERATE_GPT).toContain("`view_image`")
+  expect(PROMPT_GENERATE_GPT).toContain("`actor`")
 })
 
 test("returns default native agents when no config", async () => {
@@ -211,6 +227,22 @@ test("explore agent asks for external directories and allows Truncate.GLOB", asy
       expect(explore).toBeDefined()
       expect(Permission.evaluate("external_directory", "/some/other/path", explore!.permission).action).toBe("ask")
       expect(Permission.evaluate("external_directory", Truncate.GLOB, explore!.permission).action).toBe("allow")
+    },
+  })
+})
+
+test("general and explore agents use dedicated prompts", async () => {
+  await using tmp = await tmpdir()
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const general = await load(tmp.path, (svc) => svc.get("general"))
+      const explore = await load(tmp.path, (svc) => svc.get("explore"))
+      expect(general?.prompt).toContain("You are an agent for MiMoCode")
+      expect(general?.prompt).toContain("the caller will relay this to the user")
+      expect(general?.completionGate).toBe(true)
+      expect(explore?.prompt).toContain("file search specialist working for a parent agent")
+      expect(explore?.prompt).not.toBe(general?.prompt)
     },
   })
 })

@@ -168,6 +168,7 @@ describe("session.system", () => {
       {
         name: "general",
         mode: "subagent",
+        prompt: "You are an agent for MiMoCode. The caller will relay this to the user.",
         permission: [],
         options: {},
       },
@@ -179,7 +180,10 @@ describe("session.system", () => {
     expect(prompt).toContain("Use `apply_patch` for project text edits")
     expect(prompt).toContain("Use `view_image`")
     expect(prompt).toContain("`rg --files`")
-    expect(general).toContain("On GPT models, use `exec` as the main composition surface")
+    expect(general).toContain("You are an agent for MiMoCode.")
+    expect(general).toContain("The caller will relay this to the user.")
+    expect(general).toContain("Use `exec` as the main composition surface")
+    expect(general).not.toContain("# Working with the user")
   })
 
   test("prefers the catalog model ID when the API deployment ID is opaque", () => {

@@ -6,10 +6,13 @@ import { ModelID, ProviderID } from "../provider/schema"
 import { generateObject, streamObject, type ModelMessage } from "ai"
 import { Instance } from "../project/instance"
 import { Truncate } from "../tool"
+import { usesGPTToolset } from "../tool/gpt"
 import { Auth } from "../auth"
 import { ProviderTransform } from "../provider"
 
 import PROMPT_GENERATE from "./generate.txt"
+import PROMPT_GENERATE_GPT from "./prompt/generate-gpt.txt"
+import PROMPT_GENERAL from "./prompt/general.txt"
 import PROMPT_EXPLORE from "./prompt/explore.txt"
 import PROMPT_DREAM from "./prompt/dream.txt"
 import PROMPT_DISTILL from "./prompt/distill.txt"
@@ -52,6 +55,7 @@ export const Info = z
     modelRef: z.string().optional(),
     variant: z.string().optional(),
     prompt: z.string().optional(),
+    completionGate: z.boolean().optional(),
     options: z.record(z.string(), z.any()),
     steps: z.number().int().positive().optional(),
     toolAllowlist: z.array(z.string()).optional(),
@@ -260,6 +264,8 @@ export const layer = Layer.effect(
             ),
             options: {},
             mode: "subagent",
+            prompt: PROMPT_GENERAL,
+            completionGate: true,
             native: true,
           },
           explore: {
@@ -563,7 +569,7 @@ export const layer = Layer.effect(
           ? Option.getOrUndefined(yield* Effect.serviceOption(OtelTracer.OtelTracer))
           : undefined
 
-        const system = [PROMPT_GENERATE]
+        const system = [PROMPT_GENERATE, ...(usesGPTToolset(resolved.id) ? [PROMPT_GENERATE_GPT] : [])]
         yield* plugin.trigger("experimental.chat.system.transform", { model: resolved }, { system })
         const existing = yield* InstanceState.useEffect(state, (s) => s.list())
 
