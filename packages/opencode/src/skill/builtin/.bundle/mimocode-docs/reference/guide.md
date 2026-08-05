@@ -10,6 +10,29 @@ How-to for the features users most often ask about. For config keys see @config.
 
 For a custom base URL, API key, or OpenAI-/Anthropic-compatible model, read @providers.md before editing config; it covers protocol selection, adapter names, provider reuse, secret handling, and local verification.
 
+## TUI rendering, lag & remote use
+
+**macOS default terminal** — MiMoCode does not support the built-in Terminal.app. For misaligned output, flicker, or other rendering problems, use the VS Code integrated terminal or install iTerm2:
+
+```bash
+brew install --cask iterm2
+```
+
+**SSH rendering** — if running the TUI directly over SSH is slow, render it locally and run only the server from the remote project directory:
+
+```bash
+# Remote host
+mimo serve --port 4096
+
+# Local host: keep this tunnel open
+ssh -N -L 4096:127.0.0.1:4096 user@remote-host
+
+# Local host: connect from another terminal
+mimo attach http://127.0.0.1:4096
+```
+
+**Decorative animation** — run `/vivid`, or configure the visual-mode option in `ctrl+p`, to switch between Vivid and Minimal visuals as needed. The separate animation override can stop high-frequency motion without changing the selected visual mode.
+
 ## Memory: making MiMoCode remember
 
 Memory persists across sessions and is auto-injected on resume, so the agent doesn't relearn project context.

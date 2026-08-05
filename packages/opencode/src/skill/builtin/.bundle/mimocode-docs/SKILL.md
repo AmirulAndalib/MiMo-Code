@@ -1,6 +1,6 @@
 ---
 name: mimocode-docs
-description: "Use whenever the user asks about MiMoCode itself: features, TUI or CLI commands, keybindings, agent modes (build / plan / compose) and how to switch between them, configuration, file locations, providers, models, authentication, or custom OpenAI-compatible or Anthropic-compatible API endpoints. Especially trigger when a prompt supplies or asks to configure a base URL/baseURL, API key/apiKey, model name or ID, provider, Anthropic Messages API, or global/project mimocode.json/jsonc, or when the user asks how to enter or leave plan mode. Use this skill to inspect existing config safely, make minimal changes, and verify them without guessing schema fields or model capabilities."
+description: "Use whenever the user asks about MiMoCode itself: features, TUI or CLI commands, keybindings, terminal compatibility, rendering glitches, TUI lag, SSH or remote rendering, agent modes (build / plan / compose) and how to switch between them, configuration, file locations, providers, models, authentication, or custom OpenAI-compatible or Anthropic-compatible API endpoints. Especially trigger when a prompt supplies or asks to configure a base URL/baseURL, API key/apiKey, model name or ID, provider, Anthropic Messages API, or global/project mimocode.json/jsonc, or when the user asks how to enter or leave plan mode. Use this skill to inspect existing config safely, make minimal changes, and verify them without guessing schema fields or model capabilities."
 ---
 
 # MiMoCode
@@ -22,7 +22,7 @@ MiMoCode (CLI binary `mimo`) is an agentic coding tool with a terminal UI, built
 | **Task tree** | `T1`, `T1.1`… tree, integrated with checkpoints | `task` tooling |
 | **Goal / stop condition** | Judge model verifies a stop condition before the agent halts | `/goal` |
 | **Compose mode** | Structured spec→ship lifecycle; recommended entry is the `/compose-next` skill on Build. That skill sets `disable-model-invocation`, so only the user can start it — it is absent from the agent's skill catalog and from `skill_search`, and the `skill` tool refuses it. Suggest `/compose-next` to the user when the work warrants it; never enter the workflow unasked | `/compose-next` (see @reference/guide.md) |
-| **Visual modes** | `vivid` (default: star field, meteors, logo effects, animated activity) and `minimal` (quiet visuals, stable activity indicators); independent from the animation override | `/vivid` or the `ctrl+p` Vivid mode setting |
+| **Visual modes** | `vivid` (default: star field, meteors, logo effects, animated activity) and `minimal` (quiet visuals, stable activity indicators); independent from the animation override | `/vivid` or the visual-mode option in `ctrl+p` |
 | **Voice input** | Streaming ASR (TenVAD + MiMo ASR); needs `sox` | `/voice` |
 | **Dream** | Consolidates recent traces into project memory | `/dream` |
 | **Distill** | Packages repeated manual workflows into skills/subagents/commands | `/distill` |
@@ -55,6 +55,7 @@ Read only the reference needed for the request, but read it before changing file
 - Models, providers, API keys, base URLs, or OpenAI-/Anthropic-compatible endpoints: @reference/providers.md
 - Other config keys and on-disk locations: @reference/config.md
 - Task-oriented usage and setup: @reference/guide.md
+- Terminal compatibility, TUI rendering or lag, and SSH remote use: @reference/guide.md
 - CLI and slash commands: @reference/commands.md
 - Permission rules: @reference/permissions.md
 - MCP client-side sampling (servers borrowing your model, audio transcription): @reference/mcp-sampling.md
@@ -62,7 +63,7 @@ Read only the reference needed for the request, but read it before changing file
 
 ## How-To Guide
 
-For task-oriented walkthroughs — signing in & choosing a model, making memory remember project rules, writing custom slash commands, remapping keybinds, adding MCP servers, scheduling prompts (cron/loop), and using compose mode — see @reference/guide.md. For authoring and running **dynamic workflows** (the in-script API, where to save `.js` workflow files, and the `workflow` tool) see @reference/workflows.md.
+For task-oriented walkthroughs — signing in & choosing a model, troubleshooting TUI rendering or lag, using MiMoCode over SSH, making memory remember project rules, writing custom slash commands, remapping keybinds, adding MCP servers, scheduling prompts (cron/loop), and using compose mode — see @reference/guide.md. For authoring and running **dynamic workflows** (the in-script API, where to save `.js` workflow files, and the `workflow` tool) see @reference/workflows.md.
 
 **Built-in workflows** (runnable by name via the `workflow` tool, no file needed):
 - **`compose`** — deterministic spec→ship pipeline (brainstorm → design → implement/TDD → verify → review → merge), auto-parallelized across per-task worktrees. Pass `args.task`.
