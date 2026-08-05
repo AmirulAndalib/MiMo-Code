@@ -1,9 +1,9 @@
 ---
 feature: tui-quiet-mode
-status: in-progress
+status: delivered
 updated: 2026-08-05
 branch: feature/tui-quiet-mode
-commits:
+commits: 91dc9d14c263d76f7e843eaf6cce3f112ee1ddda..0af69913
 ---
 
 # TUI Quiet Mode
@@ -14,7 +14,7 @@ commits:
 
 Logo, star field, prompt, task, workflow, and agent states share the same `vivid && animations_enabled` motion contract. Runtime preference changes clean up and restart eligible timers without requiring a TUI restart.
 
-**Verification** — Pending copy simplification verification.
+**Verification** — `bun test test/cli/tui/visual-mode.test.ts` passed 4 tests; `bun test test/cli/tui test/cli/cmd/tui` passed 266 tests and 728 assertions; bundled skill tests passed 8 tests and 41 assertions; `bun typecheck` passed; `git diff --check` passed. Isolated development TUI runs confirmed the vivid default, concise localized `/vivid` and `ctrl+p` state/action labels, detailed two-line ON/OFF toasts, switching through both entry points, and KV persistence.
 
 **Journey log**
 
@@ -22,6 +22,7 @@ Logo, star field, prompt, task, workflow, and agent states share the same `vivid
 - Split visual style from animation accessibility so either presentation can use the independent animation override.
 - A targeted review found and closed an idle Logo timer outside the home route.
 - Kept `/vivid` and `ctrl+p` on one command entry so state, persistence, and feedback cannot diverge.
+- Kept command rows concise by combining current state and next action in one title, while reserving detailed visual-effect explanations for the toast.
 
 ## [S1] Problem
 
