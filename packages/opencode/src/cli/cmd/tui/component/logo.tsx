@@ -1,6 +1,7 @@
 import { BoxRenderable, MouseButton, MouseEvent, RGBA, TextAttributes } from "@opentui/core"
-import { For, createEffect, createMemo, createSignal, onCleanup, onMount, type JSX } from "solid-js"
+import { For, createEffect, createMemo, createSignal, onCleanup, type JSX } from "solid-js"
 import { useTheme, tint } from "@tui/context/theme"
+import { useVisualMode } from "@tui/context/visual"
 import * as Sound from "@tui/util/sound"
 import { go, logo } from "@/cli/logo"
 
@@ -651,7 +652,7 @@ export function Logo(props: { shape?: LogoShape; ink?: RGBA; animated?: boolean;
   }
 
   createEffect(() => {
-    if (!props.sweep) {
+    if (props.animated === false || !props.sweep) {
       stopSweep()
       return
     }
@@ -665,7 +666,14 @@ export function Logo(props: { shape?: LogoShape; ink?: RGBA; animated?: boolean;
   })
 
   createEffect(() => {
-    if (props.animated !== false) return
+    if (props.animated !== false) {
+      if (props.idle) {
+        setNow(performance.now())
+        start()
+      }
+      return
+    }
+    stopSweep()
     setRings([])
     setHold(undefined)
     setRelease(undefined)
@@ -680,13 +688,6 @@ export function Logo(props: { shape?: LogoShape; ink?: RGBA; animated?: boolean;
     stopSweep()
     hum = false
     Sound.dispose()
-  })
-
-  onMount(() => {
-    if (props.idle && props.animated !== false) {
-      setNow(performance.now())
-      start()
-    }
   })
 
   const hit = (x: number, y: number) => {
@@ -981,6 +982,7 @@ export function Logo(props: { shape?: LogoShape; ink?: RGBA; animated?: boolean;
 
 export function GoLogo() {
   const { theme } = useTheme()
+  const visual = useVisualMode()
   const base = tint(theme.background, theme.text, 0.62)
-  return <Logo shape={go} ink={base} idle />
+  return <Logo shape={go} ink={base} animated={visual.motion()} idle />
 }
