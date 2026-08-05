@@ -168,7 +168,7 @@ describe("session.system", () => {
       {
         name: "general",
         mode: "subagent",
-        prompt: "You are an agent for MiMoCode. The caller will relay this to the user.",
+        prompt: "You are a full-capability general-purpose subagent. The parent agent communicates with the end user.",
         permission: [],
         options: {},
       },
@@ -180,8 +180,8 @@ describe("session.system", () => {
     expect(prompt).toContain("Use `apply_patch` for project text edits")
     expect(prompt).toContain("Use `view_image`")
     expect(prompt).toContain("`rg --files`")
-    expect(general).toContain("You are an agent for MiMoCode.")
-    expect(general).toContain("The caller will relay this to the user.")
+    expect(general).toContain("You are a full-capability general-purpose subagent.")
+    expect(general).toContain("The parent agent communicates with the end user.")
     expect(general).toContain("Use `exec` as the main composition surface")
     expect(general).not.toContain("# Working with the user")
   })

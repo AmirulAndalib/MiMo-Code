@@ -254,14 +254,9 @@ export const layer = Layer.effect(
           general: {
             name: "general",
             color: "#aac4e1",
-            description: `General-purpose agent for researching complex questions and executing multi-step tasks. Use this agent to execute multiple units of work in parallel.`,
-            permission: Permission.merge(
-              defaults,
-              Permission.fromConfig({
-                change_directory: "deny",
-              }),
-              user,
-            ),
+            description:
+              "Full-capability general-purpose subagent for autonomous read/write work, including investigation, implementation, debugging, testing, and multi-step delivery. It inherits the parent's available tool surface and can complete a delegated task end to end.",
+            permission: Permission.merge(defaults, user),
             options: {},
             mode: "subagent",
             prompt: PROMPT_GENERAL,
@@ -494,7 +489,9 @@ export const layer = Layer.effect(
           const agent = agents[name]
           const globs = whitelistedDirs.filter(
             (glob) =>
-              !agent.permission.some((r) => r.permission === "external_directory" && r.action === "deny" && r.pattern === glob),
+              !agent.permission.some(
+                (r) => r.permission === "external_directory" && r.action === "deny" && r.pattern === glob,
+              ),
           )
           if (globs.length === 0) continue
 

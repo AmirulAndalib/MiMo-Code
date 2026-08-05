@@ -13,9 +13,7 @@ import PROMPT_GENERATE from "../../src/agent/generate.txt"
 import PROMPT_GENERATE_GPT from "../../src/agent/prompt/generate-gpt.txt"
 import PROMPT_EXPLORE from "../../src/agent/prompt/explore.txt"
 
-const itTool = testEffect(
-  Layer.mergeAll(ToolRegistry.defaultLayer, Agent.defaultLayer, CrossSpawnSpawner.defaultLayer),
-)
+const itTool = testEffect(Layer.mergeAll(ToolRegistry.defaultLayer, Agent.defaultLayer, CrossSpawnSpawner.defaultLayer))
 
 // Helper to evaluate permission for a tool with wildcard pattern
 function evalPerm(agent: Agent.Info | undefined, permission: string): Permission.Action | undefined {
@@ -167,7 +165,9 @@ test("compose:* skills are denied for build/plan, allowed for compose", async ()
       expect(Permission.evaluate("skill", "compose:tdd", compose!.permission).action).toBe("allow")
       expect(Permission.evaluate("skill", "compose:review", compose!.permission).action).toBe("allow")
       // Non-compose skills remain allowed for all agents
-      expect(Permission.evaluate("skill", "effect", agents.find((a) => a.name === "build")!.permission).action).toBe("allow")
+      expect(Permission.evaluate("skill", "effect", agents.find((a) => a.name === "build")!.permission).action).toBe(
+        "allow",
+      )
       expect(Permission.evaluate("skill", "effect", compose!.permission).action).toBe("allow")
     },
   })
@@ -238,15 +238,24 @@ test("general and explore agents use dedicated prompts", async () => {
     fn: async () => {
       const general = await load(tmp.path, (svc) => svc.get("general"))
       const explore = await load(tmp.path, (svc) => svc.get("explore"))
-      expect(general?.prompt).toContain("You are an agent for MiMoCode")
-      expect(general?.prompt).toContain("the caller will relay this to the user")
+      expect(general?.description).toContain("Full-capability general-purpose subagent")
+      expect(general?.description).toContain("inherits the parent's available tool surface")
+      expect(general?.prompt).toContain("full-capability general-purpose subagent")
+      expect(general?.prompt).toContain("including reading and searching, editing or creating files")
+      expect(general?.prompt).toContain("complete it end to end")
+      expect(general?.prompt).toContain("The parent agent, not you, communicates with the end user")
       expect(general?.completionGate).toBe(true)
+      expect(general?.toolAllowlist).toBeUndefined()
+      expect(Permission.evaluate("read", "src/index.ts", general!.permission).action).toBe("allow")
+      expect(Permission.evaluate("edit", "src/index.ts", general!.permission).action).toBe("allow")
+      expect(Permission.evaluate("write", "src/index.ts", general!.permission).action).toBe("allow")
+      expect(Permission.evaluate("bash", "bun test", general!.permission).action).toBe("allow")
+      expect(Permission.evaluate("change_directory", "/tmp/project", general!.permission).action).toBe("allow")
       expect(explore?.prompt).toContain("file search specialist working for a parent agent")
       expect(explore?.prompt).not.toBe(general?.prompt)
     },
   })
 })
-
 
 test("custom agent from config creates new agent", async () => {
   await using tmp = await tmpdir({
