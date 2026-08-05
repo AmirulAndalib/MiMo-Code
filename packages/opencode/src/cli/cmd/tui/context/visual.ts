@@ -7,6 +7,10 @@ export function resolveVisualMode(value: unknown): VisualMode {
   return value === "minimal" ? "minimal" : "vivid"
 }
 
+export function toggleVisualMode(value: unknown): VisualMode {
+  return resolveVisualMode(value) === "vivid" ? "minimal" : "vivid"
+}
+
 export function visualMotionEnabled(mode: VisualMode, animationsEnabled: boolean) {
   return mode === "vivid" && animationsEnabled
 }

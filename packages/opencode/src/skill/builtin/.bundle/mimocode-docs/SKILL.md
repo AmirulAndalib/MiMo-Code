@@ -22,6 +22,7 @@ MiMoCode (CLI binary `mimo`) is an agentic coding tool with a terminal UI, built
 | **Task tree** | `T1`, `T1.1`… tree, integrated with checkpoints | `task` tooling |
 | **Goal / stop condition** | Judge model verifies a stop condition before the agent halts | `/goal` |
 | **Compose mode** | Structured spec→ship lifecycle; recommended entry is the `/compose-next` skill on Build. That skill sets `disable-model-invocation`, so only the user can start it — it is absent from the agent's skill catalog and from `skill_search`, and the `skill` tool refuses it. Suggest `/compose-next` to the user when the work warrants it; never enter the workflow unasked | `/compose-next` (see @reference/guide.md) |
+| **Visual modes** | `vivid` (default: star field, meteors, logo effects, animated activity) and `minimal` (quiet visuals, stable activity indicators); independent from the animation override | `/vivid` or the `ctrl+p` Vivid mode setting |
 | **Voice input** | Streaming ASR (TenVAD + MiMo ASR); needs `sox` | `/voice` |
 | **Dream** | Consolidates recent traces into project memory | `/dream` |
 | **Distill** | Packages repeated manual workflows into skills/subagents/commands | `/distill` |
@@ -75,7 +76,7 @@ Base dirs follow `MIMOCODE_HOME` (if set, absolute) else XDG. Data typically liv
 
 ## Commands
 
-`mimo` subcommands (`mcp`, `run`, `agent`, `models`, `providers`, `upgrade`, `stats`, `export`/`import`, `github`/`pr`, `serve`, …) and slash commands (`/goal`, `/dream`, `/distill`, `/voice`, `/loop`, `/connect`, `/<skill-name>`) are documented in @reference/commands.md.
+`mimo` subcommands (`mcp`, `run`, `agent`, `models`, `providers`, `upgrade`, `stats`, `export`/`import`, `github`/`pr`, `serve`, …) and slash commands (`/goal`, `/dream`, `/distill`, `/vivid`, `/voice`, `/loop`, `/connect`, `/<skill-name>`) are documented in @reference/commands.md.
 
 ## Helping the User Configure
 

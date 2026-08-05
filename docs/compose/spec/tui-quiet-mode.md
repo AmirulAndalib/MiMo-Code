@@ -28,7 +28,7 @@ The current vivid presentation redraws the home screen for stars, meteors, and l
 
 ## [S2] Design
 
-Add an independent KV-backed `visual_mode` preference with `minimal` and `vivid` values. It is switched from the command palette, persists across launches, and defaults to `vivid`. The existing `animations_enabled` preference remains a separate accessibility and performance override.
+Add an independent KV-backed `visual_mode` preference with `minimal` and `vivid` values. It is switched by the same command from the command palette or `/vivid`, persists across launches, and defaults to `vivid`. The command title, description, and completion toast distinguish the enabled and disabled states in every supported locale. The existing `animations_enabled` preference remains a separate accessibility and performance override.
 
 In `minimal` mode:
 
@@ -49,7 +49,8 @@ The implementation must use the existing theme colors, dimensions, and layout; t
 
 ## Tasks
 
-- [ ] T1: Add the persisted visual mode command — acceptance: the command palette switches between `minimal` and `vivid`, persists the choice, and an unset value resolves to `vivid` (covers: S2)
+- [ ] T1: Add the persisted visual mode command — acceptance: the command palette and `/vivid` map to the same toggle, show localized enabled/disabled state, persist the choice, and an unset value resolves to `vivid` (covers: S2)
 - [x] T2: Apply visual and animation preferences to passive home motion — acceptance: minimal mode has no default celestial background or logo motion; vivid mode preserves current visuals; disabling animations leaves vivid visuals static and preserves functional tip rotation (covers: S2; depends: T1)
 - [x] T3: Stabilize every in-progress indicator — acceptance: prompt, task, workflow, and agent running states render fixed-width static markers unless both vivid mode and animations are enabled (covers: S2; depends: T1)
 - [ ] T4: Add focused regression coverage and verify TUI behavior — acceptance: tests cover preference resolution and relevant package tests and typecheck pass (covers: S2; depends: T1, T2, T3)
+- [ ] T5: Document visual mode controls — acceptance: English and Chinese READMEs and the bundled `mimocode-docs` skill describe `/vivid`, the command palette setting, the default, and the independent animation override (covers: S2; depends: T1)

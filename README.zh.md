@@ -229,6 +229,13 @@ MiMoCode 打包了以下内置技能：
 
 </details>
 
+<details>
+<summary><strong>Vivid 与极简视觉</strong></summary>
+
+MiMoCode 默认使用 Vivid 模式，显示星空、流星、Logo 特效和动态进行中标记。运行 `/vivid` 可在 Vivid 与极简视觉之间切换，也可以在 `ctrl+p` 命令面板中使用 **Vivid 模式** 设置。极简模式会移除装饰性动态效果，并使用稳定的进行中标记。独立的 **禁用动画** 设置可以停止高频动态刷新，而不改变当前选择的视觉模式。
+
+</details>
+
 ### 语音输入
 
 基于 TenVAD 和 MiMo ASR 的实时流式语音输入。通过 `/voice` 激活，按停顿分片转写，文本逐段追加到输入框。仅对 MiMo 登录用户可用。需要安装 `sox`（macOS 上 `brew install sox`，其他平台类似）。

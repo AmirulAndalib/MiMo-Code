@@ -56,7 +56,7 @@ import { Session as SessionApi } from "@/session"
 import { orchestratorDir } from "@/global"
 import { TuiEvent } from "./event"
 import { KVProvider, useKV } from "./context/kv"
-import { resolveVisualMode } from "./context/visual"
+import { resolveVisualMode, toggleVisualMode } from "./context/visual"
 import { LanguageProvider, UiI18nBridge, useLanguage } from "./context/language"
 import type { Locale } from "./i18n/locales"
 import { LOCALES } from "./i18n/locales"
@@ -922,17 +922,28 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
     },
     {
       title: t(
-        resolveVisualMode(kv.get("visual_mode", "vivid")) === "minimal"
-          ? "tui.command.visual_mode.vivid"
-          : "tui.command.visual_mode.minimal",
+        resolveVisualMode(kv.get("visual_mode", "vivid")) === "vivid"
+          ? "tui.command.visual_mode.title_on"
+          : "tui.command.visual_mode.title_off",
+      ),
+      description: t(
+        resolveVisualMode(kv.get("visual_mode", "vivid")) === "vivid"
+          ? "tui.command.visual_mode.description_on"
+          : "tui.command.visual_mode.description_off",
       ),
       value: "app.toggle.visual_mode",
+      slash: {
+        name: "vivid",
+      },
       category: "system",
       onSelect: (dialog) => {
-        kv.set(
-          "visual_mode",
-          resolveVisualMode(kv.get("visual_mode", "vivid")) === "minimal" ? "vivid" : "minimal",
-        )
+        const next = toggleVisualMode(kv.get("visual_mode", "vivid"))
+        kv.set("visual_mode", next)
+        toast.show({
+          message: t(next === "vivid" ? "tui.visual_mode.enabled" : "tui.visual_mode.disabled"),
+          variant: "info",
+          duration: 3000,
+        })
         dialog.clear()
       },
     },
