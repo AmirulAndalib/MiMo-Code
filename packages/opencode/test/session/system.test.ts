@@ -149,37 +149,25 @@ describe("session.system", () => {
     expect(prompt).not.toContain("When possible, prefer parallelization over sequential tool calls")
   })
 
-  test("adds GPT tool guidance to prompted subagents", () => {
-    const model = ProviderTest.model({
-      id: ModelID.make("gpt-5.4"),
-      api: { id: "deployment-primary" } as never,
-    })
-    const prompt = SystemPrompt.agent(
-      {
-        name: "explore",
-        mode: "subagent",
-        prompt: "Explore files without modifying them.",
-        permission: [],
-        options: {},
-      },
-      model,
-    ).join("\n")
-    const general = SystemPrompt.agent(
-      {
-        name: "general",
-        mode: "subagent",
-        permission: [],
-        options: {},
-      },
-      model,
-    ).join("\n")
+  test("uses the same prompted subagent system across models", () => {
+    const subagent = {
+      name: "general",
+      mode: "subagent" as const,
+      prompt: "You are a full-capability general-purpose subagent.",
+      permission: [],
+      options: {},
+    }
+    const gpt = SystemPrompt.agent(
+      subagent,
+      ProviderTest.model({ id: ModelID.make("gpt-5.4"), api: { id: "deployment-primary" } as never }),
+    )
+    const claude = SystemPrompt.agent(
+      subagent,
+      ProviderTest.model({ id: ModelID.make("claude-sonnet-4-6"), api: { id: "claude-sonnet-4-6" } as never }),
+    )
 
-    expect(prompt).toContain("Explore files without modifying them.")
-    expect(prompt).toContain("Use `exec` as the main composition surface")
-    expect(prompt).toContain("Use `apply_patch` for project text edits")
-    expect(prompt).toContain("Use `view_image`")
-    expect(prompt).toContain("`rg --files`")
-    expect(general).toContain("On GPT models, use `exec` as the main composition surface")
+    expect(gpt).toEqual([subagent.prompt])
+    expect(claude).toEqual(gpt)
   })
 
   test("prefers the catalog model ID when the API deployment ID is opaque", () => {
@@ -191,24 +179,6 @@ describe("session.system", () => {
     )[0]
 
     expect(prompt).toContain("You are MiMoCode, an agent based on the GPT-5 family")
-  })
-
-  test("does not add GPT tool guidance to non-GPT or tool-less subagents", () => {
-    const subagent = {
-      name: "explore",
-      mode: "subagent" as const,
-      prompt: "Explore files.",
-      permission: [],
-      options: {},
-    }
-    const nonGPT = SystemPrompt.agent(
-      subagent,
-      ProviderTest.model({ id: ModelID.make("claude-sonnet-4-6"), api: { id: "claude-sonnet-4-6" } as never }),
-    ).join("\n")
-    const toolLess = SystemPrompt.agent({ ...subagent, toolAllowlist: [] }, ProviderTest.model()).join("\n")
-
-    expect(nonGPT).toBe("Explore files.")
-    expect(toolLess).toBe("Explore files.")
   })
 
   test("does not inject vision capability guidance for GPT, Claude, or Gemini models", async () => {
