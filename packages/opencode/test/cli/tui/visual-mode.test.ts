@@ -2,13 +2,13 @@ import { describe, expect, test } from "bun:test"
 import { resolveVisualMode, visualMotionEnabled } from "@/cli/cmd/tui/context/visual"
 
 describe("TUI visual mode", () => {
-  test("defaults missing and invalid state to minimal", () => {
-    expect(resolveVisualMode(undefined)).toBe("minimal")
-    expect(resolveVisualMode("unknown")).toBe("minimal")
+  test("defaults missing and invalid state to vivid", () => {
+    expect(resolveVisualMode(undefined)).toBe("vivid")
+    expect(resolveVisualMode("unknown")).toBe("vivid")
   })
 
-  test("preserves the vivid preference", () => {
-    expect(resolveVisualMode("vivid")).toBe("vivid")
+  test("preserves the minimal preference", () => {
+    expect(resolveVisualMode("minimal")).toBe("minimal")
   })
 
   test("only enables cosmetic motion for vivid visuals with animations enabled", () => {

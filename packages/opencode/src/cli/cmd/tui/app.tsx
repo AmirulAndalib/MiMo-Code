@@ -922,7 +922,7 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
     },
     {
       title: t(
-        resolveVisualMode(kv.get("visual_mode", "minimal")) === "minimal"
+        resolveVisualMode(kv.get("visual_mode", "vivid")) === "minimal"
           ? "tui.command.visual_mode.vivid"
           : "tui.command.visual_mode.minimal",
       ),
@@ -931,7 +931,7 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
       onSelect: (dialog) => {
         kv.set(
           "visual_mode",
-          resolveVisualMode(kv.get("visual_mode", "minimal")) === "minimal" ? "vivid" : "minimal",
+          resolveVisualMode(kv.get("visual_mode", "vivid")) === "minimal" ? "vivid" : "minimal",
         )
         dialog.clear()
       },
