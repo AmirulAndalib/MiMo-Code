@@ -37,7 +37,7 @@ The `memory` tool uses BM25 (OR-joined, relevance-ranked). Common mistakes:
 
 - **Too many generic words**: "config params database connection" — every word dilutes. Pick the 1-3 rarest, most specific terms.
 - **Punctuation in queries**: `.`, `-`, `/`, `:` are stripped during tokenization. `postgres://host:5433` becomes tokens `postgres`, `host`, `5433`. Search one of those, not the full URL.
-- **Wrong scope**: default is current session. Widen progressively: `scope: "sessions"` → `scope: "projects"` → `scope: "global"`.
+- **Wrong scope**: default is current session. Widen progressively: `scope: "sessions"` → `scope: "projects"` → `scope: "global"` → `scope: "cc"` (Claude Code imported memories, if cc_index is enabled).
 
 Good queries: `"T5.3 closure"`, `"permission deadlock"`, `"drizzle inArray"`, a function name, an error code.
 
@@ -115,12 +115,13 @@ ORDER BY m.time_created DESC
 LIMIT 10;
 ```
 
-**Find tool calls by tool name:**
+**Find tool calls by tool name (output only exists for status=completed):**
 
 ```sql
 SELECT m.session_id, m.id, m.agent_id,
        json_extract(p.data, '$.tool') as tool,
-       substr(json_extract(p.data, '$.state.output'), 1, 300) as output_preview
+       json_extract(p.data, '$.state.status') as status,
+       substr(COALESCE(json_extract(p.data, '$.state.output'), json_extract(p.data, '$.state.error')), 1, 300) as result_preview
 FROM message m
 JOIN part p ON p.message_id = m.id AND p.session_id = m.session_id
 WHERE json_extract(m.data, '$.role') = 'assistant'
@@ -147,7 +148,10 @@ ORDER BY m.time_created, p.time_created;
 
 **Find repeated errors across sessions (last 7 days):**
 
+Note: Tool failures (exceptions, aborts) store the error in `$.state.error` with `$.state.status = "error"`, NOT in `$.state.output` (which only exists for completed calls). This query finds completed bash calls whose stdout contains "error"; to find actual tool failures, query `$.state.error` instead.
+
 ```sql
+-- Completed bash calls with "error" in stdout (last 7 days)
 SELECT json_extract(p.data, '$.state.output') as error_output,
        COUNT(*) as occurrences,
        GROUP_CONCAT(DISTINCT m.session_id) as sessions
@@ -155,9 +159,28 @@ FROM part p
 JOIN message m ON m.id = p.message_id AND m.session_id = p.session_id
 WHERE json_extract(p.data, '$.type') = 'tool'
   AND json_extract(p.data, '$.tool') = 'bash'
+  AND json_extract(p.data, '$.state.status') = 'completed'
   AND json_extract(p.data, '$.state.output') LIKE '%error%'
   AND m.time_created > (strftime('%s', 'now') - 7*86400) * 1000
 GROUP BY substr(json_extract(p.data, '$.state.output'), 1, 200)
+HAVING occurrences > 1
+ORDER BY occurrences DESC
+LIMIT 10;
+```
+
+**Find actual tool failures (any tool, last 7 days):**
+
+```sql
+SELECT json_extract(p.data, '$.tool') as tool,
+       json_extract(p.data, '$.state.error') as error_msg,
+       COUNT(*) as occurrences,
+       GROUP_CONCAT(DISTINCT m.session_id) as sessions
+FROM part p
+JOIN message m ON m.id = p.message_id AND m.session_id = p.session_id
+WHERE json_extract(p.data, '$.type') = 'tool'
+  AND json_extract(p.data, '$.state.status') = 'error'
+  AND m.time_created > (strftime('%s', 'now') - 7*86400) * 1000
+GROUP BY json_extract(p.data, '$.tool'), substr(json_extract(p.data, '$.state.error'), 1, 200)
 HAVING occurrences > 1
 ORDER BY occurrences DESC
 LIMIT 10;
