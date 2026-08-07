@@ -1,72 +1,30 @@
 ---
 name: "memory-search"
-description: "Advanced memory and trajectory search techniques. Use when the built-in memory tool returns 0 results, when you need to search raw conversation history in the SQLite database, or when you need to locate specific past commands, tool outputs, decisions, or user statements across sessions. Covers: BM25 query optimization, scope escalation (session → project → global → raw DB), SQLite schema and query templates for the trajectory database, and strategies for finding repeated patterns, decisions, and errors."
+description: "Query the raw trajectory SQLite database directly when the built-in memory and history tools are insufficient. Use when you need structured analysis across sessions: finding repeated errors, grouping tool calls by pattern, verifying what was actually executed, or locating specific past commands/decisions that text search cannot surface. Provides the database schema, ready-to-use SQL query templates, and per-goal strategies."
 ---
 
-# Memory Search Skill
+# Memory Search: SQLite Trajectory Database
 
-Techniques for searching mimocode's memory system and raw trajectory database when the built-in `memory` tool alone is insufficient.
+Direct SQL access to mimocode's trajectory database for structured analysis that the `memory` (BM25 over curated markdown) and `history` (FTS over raw messages) tools cannot perform — aggregation, filtering by tool/status/time, cross-session pattern detection, and execution chain inspection.
 
-## When to use this skill
+## When to use
 
-- The `memory` tool returned 0 results for several query attempts.
-- You need verbatim recall of a specific command, path, token, or connection string that the curated memory may have paraphrased.
-- You need to find patterns across multiple sessions (repeated errors, recurring workflows, user preferences stated long ago).
-- You want to verify whether something was actually said/done in a past session.
+- You need to **aggregate or count** across sessions (e.g. "which tool fails most often?", "how many sessions touched file X?").
+- You need to **filter by structure** — tool name, status, agent_id, time range — not just text content.
+- You need to **view a complete execution chain** for a session (every tool call in order).
+- You need to **verify a memory claim** against what actually happened (the DB is the source of truth).
+- The `memory` and `history` tools returned nothing useful despite multiple query attempts.
 
-## Memory system architecture
-
-```
-<DATA>/memory/
-├── projects/
-│   ├── global/MEMORY.md                      # cross-project user preferences
-│   └── <project_id>/                         # per-project (UUID from .git/mimocode-project-id)
-│       ├── MEMORY.md                         # project-level durable knowledge
-│       └── MEMORY-*.md                       # spillover files when main exceeds budget
-└── sessions/<session_id>/
-    ├── checkpoint.md                         # structured session state (11 sections)
-    ├── notes.md                              # free-form scratchpad
-    └── tasks/<task_id>/progress.md           # per-task subagent findings
-```
-
-`<DATA>` is the mimocode data directory (typically `~/.local/share/mimocode/`).
-
-## Step 1: Optimize memory tool queries
-
-The `memory` tool uses BM25 (OR-joined, relevance-ranked). Common mistakes:
-
-- **Too many generic words**: "config params database connection" — every word dilutes. Pick the 1-3 rarest, most specific terms.
-- **Punctuation in queries**: `.`, `-`, `/`, `:` are stripped during tokenization. `postgres://host:5433` becomes tokens `postgres`, `host`, `5433`. Search one of those, not the full URL.
-- **Wrong scope**: default is current session. Widen progressively: `scope: "sessions"` → `scope: "projects"` → `scope: "global"` → `scope: "cc"` (Claude Code imported memories, if cc_index is enabled).
-
-Good queries: `"T5.3 closure"`, `"permission deadlock"`, `"drizzle inArray"`, a function name, an error code.
-
-## Step 2: Use the history tool
-
-When memory search misses (curated summaries may have dropped the literal), fall back to `history`:
-
-```
-history({ operation: "search", query: "the exact keyword" })
-```
-
-This searches raw conversation messages (user text, assistant text, tool inputs/outputs). Hits include `message_id` — use `history({ operation: "around", message_id: "..." })` to get surrounding context.
-
-## Step 3: Query the raw trajectory database
-
-When history search also misses, or you need cross-session analysis, query the SQLite database directly.
-
-### Locating the database
+## Locating the database
 
 ```bash
-# The DB path is derived from the memory root visible in system instructions.
-# Typically: ~/.local/share/mimocode/mimocode.db
-# If MIMOCODE_DB is set in the environment, it overrides.
-ls ~/.local/share/mimocode/mimocode.db
+# Typically at this path. MIMOCODE_DB env var overrides if set.
+sqlite3 -readonly ~/.local/share/mimocode/mimocode.db ".tables"
 ```
 
-### Schema
+Always use `-readonly` or only SELECT queries — never modify the database.
 
-Key tables:
+## Schema
 
 | Table | Purpose | Key columns |
 |-------|---------|-------------|
@@ -80,14 +38,19 @@ Key tables:
 ### Part types in `part.data`
 
 - `{"type":"text","text":"..."}` — agent text output
-- `{"type":"tool","tool":"<name>","callID":"...","state":{"status":"completed","input":{...},"output":"..."}}` — tool call + result
+- `{"type":"tool","tool":"<name>","callID":"...","state":{"status":"completed","input":{...},"output":"..."}}` — completed tool call
+- `{"type":"tool","tool":"<name>","callID":"...","state":{"status":"error","input":{...},"error":"..."}}` — failed tool call (no `output` field; error message in `$.state.error`)
 - `{"type":"step-start"}` / `{"type":"step-finish","tokens":...}` — step boundaries
-- `{"type":"compaction","auto":true/false}` — compaction boundary (the summary text is in the following assistant message, not this part)
+- `{"type":"compaction","auto":true/false}` — compaction boundary
 - `{"type":"checkpoint",...}` — checkpoint/rebuild boundary
 
-`agent_id = 'main'` = main agent; any other value = subagent (e.g. `"explore-1"`, `"general-1"`).
+### Key conventions
 
-### Query templates
+- `agent_id = 'main'` = main agent; other values = subagent (e.g. `"explore-1"`, `"general-1"`).
+- `$.state.output` only exists when `$.state.status = "completed"`. Failures store the message in `$.state.error`.
+- `time_created` is Unix milliseconds.
+
+## Query templates
 
 **List recent sessions for this project:**
 
@@ -115,7 +78,7 @@ ORDER BY m.time_created DESC
 LIMIT 10;
 ```
 
-**Find tool calls by tool name (output only exists for status=completed):**
+**Find tool calls by tool name:**
 
 ```sql
 SELECT m.session_id, m.id, m.agent_id,
@@ -132,7 +95,7 @@ ORDER BY m.time_created DESC
 LIMIT 20;
 ```
 
-**View a session's full assistant execution chain:**
+**View a session's full execution chain:**
 
 ```sql
 SELECT m.id, m.agent_id,
@@ -146,13 +109,10 @@ WHERE m.session_id = '<SESSION_ID>'
 ORDER BY m.time_created, p.time_created;
 ```
 
-**Find repeated errors across sessions (last 7 days):**
-
-Note: Tool failures (exceptions, aborts) store the error in `$.state.error` with `$.state.status = "error"`, NOT in `$.state.output` (which only exists for completed calls). This query finds completed bash calls whose stdout contains "error"; to find actual tool failures, query `$.state.error` instead.
+**Find repeated stdout errors (completed bash calls, last 7 days):**
 
 ```sql
--- Completed bash calls with "error" in stdout (last 7 days)
-SELECT json_extract(p.data, '$.state.output') as error_output,
+SELECT substr(json_extract(p.data, '$.state.output'), 1, 200) as error_output,
        COUNT(*) as occurrences,
        GROUP_CONCAT(DISTINCT m.session_id) as sessions
 FROM part p
@@ -172,7 +132,7 @@ LIMIT 10;
 
 ```sql
 SELECT json_extract(p.data, '$.tool') as tool,
-       json_extract(p.data, '$.state.error') as error_msg,
+       substr(json_extract(p.data, '$.state.error'), 1, 200) as error_msg,
        COUNT(*) as occurrences,
        GROUP_CONCAT(DISTINCT m.session_id) as sessions
 FROM part p
@@ -186,19 +146,20 @@ ORDER BY occurrences DESC
 LIMIT 10;
 ```
 
-### Search strategies for common goals
+## Search strategies
 
 | Goal | Strategy |
 |------|----------|
-| Find a user's stated rule/preference | Search `LIKE '%always%'`, `'%never%'`, `'%remember%'`, `'%rule%'` in user text parts |
-| Find a design decision | Search `'%decided%'`, `'%tradeoff%'`, `'%reason%'` |
-| Find a specific file path or command | Use exact substring LIKE match on tool output |
-| Find repeated workflows | Group tool call sequences by session, look for recurring patterns |
-| Verify a memory claim | Find the session_id in the memory entry `[ses_xxx]`, then query its full execution chain |
+| Find a user's stated rule/preference | Search user text parts for `'%always%'`, `'%never%'`, `'%remember%'`, `'%rule%'` |
+| Find a design decision | Search `'%decided%'`, `'%tradeoff%'`, `'%reason%'` in user text |
+| Find a specific file path or command | LIKE match on tool output/error |
+| Find repeated workflows | Group tool call sequences by session, look for recurring tool×N patterns |
+| Verify a memory claim | Find the session_id from the memory entry `[ses_xxx]`, then query its full execution chain |
+| Count tool usage | `GROUP BY json_extract(p.data, '$.tool')` with COUNT |
 
-## Important constraints
+## Constraints
 
-- **Read-only**: Never modify the database. Use `sqlite3` in read-only mode or just SELECT queries.
-- **Performance**: The database can be large. Always use LIMIT, filter by session_id or time range when possible.
+- **Read-only**: Never modify the database. Always `sqlite3 -readonly` or SELECT only.
+- **Performance**: The DB can be multi-GB. Always use LIMIT and filter by `session_id` or `time_created` range.
 - **Privacy**: Raw trajectory contains everything the user typed. Treat it with care.
-- **Encoding**: Part data is JSON-in-a-column. Always use `json_extract()` for structured access.
+- **JSON access**: Part data is JSON-in-a-column. Always use `json_extract()` for structured field access.
