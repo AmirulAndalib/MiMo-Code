@@ -290,6 +290,7 @@ export const RunCommand = cmd({
         describe: "role for the injected message (assistant injects text as model output then triggers continuation)",
       })
       .option("dangerously-skip-permissions", {
+        alias: ["yolo"],
         type: "boolean",
         describe: "auto-approve permissions that are not explicitly denied (dangerous!)",
         default: false,
