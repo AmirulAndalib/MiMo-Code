@@ -314,7 +314,7 @@ description: ${description}
     }
   })
 
-  test("does not prompt GPT or Claude models to use skill_search", async () => {
+  test("does not prompt blacklisted models to use skill_search", async () => {
     await using tmp = await tmpdir({ git: true })
 
     await Instance.provide({
@@ -327,14 +327,20 @@ description: ${description}
             return yield* Effect.all([
               system.skills(build!, { id: "gpt-5.4" }),
               system.skills(build!, { id: "claude-sonnet-4-6" }),
+              system.skills(build!, { id: "kimi-k2.5" }),
+              system.skills(build!, { id: "k2p5", family: "kimi-thinking" }),
               system.skills(build!, { id: "mimo-v2" }),
+              system.skills(build!, { id: "deepseek-v3.2" }),
             ])
           }).pipe(Effect.provide(SystemPrompt.defaultLayer)),
         )
 
         expect(prompts[0]).not.toContain("skill_search")
         expect(prompts[1]).not.toContain("skill_search")
-        expect(prompts[2]).toContain("skill_search")
+        expect(prompts[2]).not.toContain("skill_search")
+        expect(prompts[3]).not.toContain("skill_search")
+        expect(prompts[4]).not.toContain("skill_search")
+        expect(prompts[5]).toContain("skill_search")
       },
     })
   })
