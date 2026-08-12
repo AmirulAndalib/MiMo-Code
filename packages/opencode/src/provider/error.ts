@@ -146,6 +146,7 @@ export function parseStreamError(input: unknown): ParsedStreamError | undefined 
   if (body.type !== "error") return
 
   switch (body?.error?.code) {
+    case "server_is_overloaded":
     case "server_error":
       return {
         type: "api_error",

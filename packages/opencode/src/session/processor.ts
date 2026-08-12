@@ -833,6 +833,8 @@ export const layer: Layer.Layer<
             Effect.retry(
               SessionRetry.policy({
                 parse,
+                silentRetry: (error) =>
+                  SessionRetry.isGptModel(input.model) && SessionRetry.isGptServerOverloadedError(error),
                 set: (info) =>
                   isMain
                     ? status.set(ctx.sessionID, {
