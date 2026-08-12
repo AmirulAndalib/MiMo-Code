@@ -330,6 +330,7 @@ description: ${description}
               system.skills(build!, { id: "kimi-k2.5" }),
               system.skills(build!, { id: "k2p5", family: "kimi-thinking" }),
               system.skills(build!, { id: "mimo-v2" }),
+              system.skills(build!, { id: "deepseek-v3.2" }),
             ])
           }).pipe(Effect.provide(SystemPrompt.defaultLayer)),
         )
@@ -338,7 +339,8 @@ description: ${description}
         expect(prompts[1]).not.toContain("skill_search")
         expect(prompts[2]).not.toContain("skill_search")
         expect(prompts[3]).not.toContain("skill_search")
-        expect(prompts[4]).toContain("skill_search")
+        expect(prompts[4]).not.toContain("skill_search")
+        expect(prompts[5]).toContain("skill_search")
       },
     })
   })

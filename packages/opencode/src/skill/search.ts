@@ -17,7 +17,7 @@ export type SkillSearchModel = {
   api?: { id?: string }
 }
 
-const SKILL_SEARCH_MODEL_BLACKLIST = ["claude", "gpt", "kimi"]
+const SKILL_SEARCH_MODEL_BLACKLIST = ["claude", "gpt", "kimi", "mimo"]
 
 function isComposeSkill(skill: Pick<Skill.Info, "name">) {
   return skill.name.startsWith("compose:")

@@ -7,7 +7,7 @@ import {
 import { Flag } from "../../src/flag/flag"
 
 describe("skillSearchReminder", () => {
-  const model = { id: "mimo-v2", name: "MiMo V2", api: { id: "mimo-v2" } }
+  const model = { id: "deepseek-v3.2", name: "DeepSeek V3.2", api: { id: "deepseek-v3.2" } }
 
   test("prompts skill search on the first user query", () => {
     const reminder = skillSearchReminder({ currentUserAt: 1_000 })
@@ -156,6 +156,7 @@ describe("skillSearchReminder", () => {
       { id: "custom-openai-model", api: { id: "gpt-5.4" } },
       { id: "kimi-k2.5", api: { id: "kimi-k2.5" } },
       { id: "k2p5", family: "kimi-thinking", api: { id: "k2p5" } },
+      { id: "mimo-v2", api: { id: "mimo-v2" } },
     ]
 
     try {
