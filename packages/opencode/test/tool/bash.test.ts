@@ -488,6 +488,149 @@ describe("tool.bash permissions", () => {
     })
   })
 
+  // The temp-scoped delete exemption. The interesting assertions are the
+  // fail-closed ones: an exemption that mis-fires silently authorizes an
+  // irreversible action, so every case it CANNOT prove must still ask.
+  each("skips bash_delete for a delete confined to the OS temp dir", async () => {
+    await using tmp = await tmpdir()
+    const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "mimocode-bash-tmpdel-"))
+    await Bun.write(path.join(scratch, "scratch.txt"), "x")
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const bash = await initBash()
+        const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+        await Effect.runPromise(
+          bash.execute(
+            { command: `rm ${path.join(scratch, "scratch.txt")}`, description: "Remove scratch file" },
+            capture(requests),
+          ),
+        )
+        expect(requests.find((r) => r.permission === "bash_delete")).toBeUndefined()
+      },
+    })
+    await fs.rm(scratch, { recursive: true, force: true })
+  })
+
+  each("still asks for bash_delete when a temp path cannot be resolved", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const bash = await initBash()
+        const err = new Error("stop after permission")
+        const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+        await expect(
+          Effect.runPromise(
+            bash.execute(
+              // $BUILD_DIR is unresolvable, so the target is UNKNOWN — and
+              // unknown must never be treated as temp-scoped.
+              { command: "rm -rf $BUILD_DIR/*", description: "Remove build dir" },
+              capture(requests, err),
+            ),
+          ),
+        ).rejects.toThrow(err.message)
+        expect(requests.find((r) => r.permission === "bash_delete")).toBeDefined()
+      },
+    })
+  })
+
+  each("still asks for bash_delete when one target of several is outside temp", async () => {
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "victim.txt"), "x")
+      },
+    })
+    const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "mimocode-bash-tmpdel-"))
+    await Bun.write(path.join(scratch, "scratch.txt"), "x")
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const bash = await initBash()
+        const err = new Error("stop after permission")
+        const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+        await expect(
+          Effect.runPromise(
+            bash.execute(
+              {
+                command: `rm ${path.join(scratch, "scratch.txt")} ${path.join(tmp.path, "victim.txt")}`,
+                description: "Remove two files",
+              },
+              capture(requests, err),
+            ),
+          ),
+        ).rejects.toThrow(err.message)
+        expect(requests.find((r) => r.permission === "bash_delete")).toBeDefined()
+      },
+    })
+    await fs.rm(scratch, { recursive: true, force: true })
+  })
+
+  each("still asks for bash_delete for a project file even when the project is under temp", async () => {
+    // A project genuinely living under os.tmpdir() would be exempted by a naive
+    // "is it under temp?" test, taking the checkout's own files with it. The
+    // shared fixture roots tmpdirs under cwd, so this case has to build the
+    // project inside os.tmpdir() explicitly or it proves nothing.
+    const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mimocode-bash-tmpproj-"))
+    const project = await fs.realpath(projectRoot)
+    await Bun.write(path.join(project, "victim.txt"), "x")
+    await Instance.provide({
+      directory: project,
+      fn: async () => {
+        const bash = await initBash()
+        const err = new Error("stop after permission")
+        const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+        await expect(
+          Effect.runPromise(
+            bash.execute({ command: "rm victim.txt", description: "Remove victim" }, capture(requests, err)),
+          ),
+        ).rejects.toThrow(err.message)
+        expect(requests.find((r) => r.permission === "bash_delete")).toBeDefined()
+      },
+    })
+    await fs.rm(project, { recursive: true, force: true })
+  })
+
+  each("still asks for bash_delete on a destructive git subcommand run from temp", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const bash = await initBash()
+        const err = new Error("stop after permission")
+        const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+        await expect(
+          Effect.runPromise(
+            bash.execute(
+              // Acts on repository state, not on a path in temp — never exempt.
+              { command: "git stash drop", description: "Drop stash" },
+              capture(requests, err),
+            ),
+          ),
+        ).rejects.toThrow(err.message)
+        expect(requests.find((r) => r.permission === "bash_delete")).toBeDefined()
+      },
+    })
+  })
+
+  each("still asks for bash_delete when the target is a temp root itself", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const bash = await initBash()
+        const err = new Error("stop after permission")
+        const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+        await expect(
+          Effect.runPromise(
+            bash.execute({ command: `rm -rf ${os.tmpdir()}`, description: "Remove temp root" }, capture(requests, err)),
+          ),
+        ).rejects.toThrow(err.message)
+        expect(requests.find((r) => r.permission === "bash_delete")).toBeDefined()
+      },
+    })
+  })
+
   if (process.platform === "win32") {
     if (bash) {
       test(

@@ -1,6 +1,6 @@
 import z from "zod"
 import os from "os"
-import { createWriteStream, existsSync, readFileSync } from "node:fs"
+import { createWriteStream, existsSync, readFileSync, realpathSync } from "node:fs"
 import * as Tool from "./tool"
 import path from "path"
 import DESCRIPTION from "./bash.txt"
@@ -32,6 +32,43 @@ import * as BashTokenEfficientHeuristic from "./bash_token_efficient_heuristic"
 const MAX_METADATA_LENGTH = 30_000
 const DEFAULT_TIMEOUT = Flag.MIMOCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS || 2 * 60 * 1000
 const PS = new Set(["powershell", "pwsh"])
+// Delete targets under the OS temp dir are exempt from the forced-ask
+// confirmation: scratch space is where an agent legitimately churns files, and
+// nothing there is the user's durable work. The exemption is deliberately
+// narrow — see `tmpOnlyDelete`, which grants it ONLY when every path argument
+// of every delete command resolves, unambiguously, inside a temp root.
+//
+// macOS reports /tmp and /var as symlinks into /private, so containment must be
+// checked on REALPATHS: a lexical check would reject the literal "/tmp/x" even
+// though it lives inside the canonical os.tmpdir() jail. "/tmp" is listed
+// alongside os.tmpdir() because on macOS they are DIFFERENT directories
+// (/private/tmp vs /private/var/folders/...). Mirrors tool-script.ts's jail.
+function tmpRoots() {
+  return [os.tmpdir(), ...(process.platform === "win32" ? [] : ["/tmp"])]
+}
+
+function realpathBestEffort(p: string) {
+  let cur = p
+  let suffix = ""
+  while (true) {
+    try {
+      return path.join(realpathSync.native(cur), suffix)
+    } catch {
+      suffix = suffix ? path.join(path.basename(cur), suffix) : path.basename(cur)
+      const parent = path.dirname(cur)
+      if (parent === cur) return p
+      cur = parent
+    }
+  }
+}
+
+function insideTmp(resolved: string) {
+  const abs = realpathBestEffort(resolved)
+  return tmpRoots()
+    .map(realpathBestEffort)
+    .some((root) => abs !== root && abs.startsWith(root + path.sep))
+}
+
 const CWD = new Set(["cd", "push-location", "set-location"])
 const FILES = new Set([
   ...CWD,
@@ -536,6 +573,45 @@ export const BashTool = Tool.define(
       return yield* resolvePath(next, cwd, shell)
     })
 
+    // Whether EVERY delete in this command line is a plain removal confined to a
+    // temp root — the one case where the forced-ask confirmation is skipped.
+    //
+    // Fails closed on purpose, in four ways. Any single miss means "ask":
+    //   1. Only DELETE_COMMANDS qualify. Destructive git subcommands
+    //      (reset --hard, push --force, stash drop, …) act on repository state,
+    //      not on a path in tmp, so they can never earn the exemption.
+    //   2. A delete with no path arguments cannot be shown to be tmp-scoped.
+    //   3. An argument `argPath` declines to resolve — a glob, a `$VAR`, a `$(…)`
+    //      substitution (see `dynamic`) — is UNKNOWN, and unknown is not tmp.
+    //      This is the load-bearing case: `rm -rf $BUILD_DIR/*` must still ask.
+    //   4. A resolved path outside a temp root, including a root itself
+    //      (`insideTmp` requires a strict descendant, so `rm -rf /tmp` asks).
+    //   5. A path inside the PROJECT, even when the project itself lives under a
+    //      temp root (a real configuration — the test fixtures do exactly this).
+    //      Scratch space earns the exemption because it holds no durable work;
+    //      a checkout's own files are durable wherever they happen to sit.
+    const tmpOnlyDelete = Effect.fn("BashTool.tmpOnlyDelete")(function* (
+      root: Node,
+      cwd: string,
+      ps: boolean,
+      shell: string,
+    ) {
+      for (const node of commands(root)) {
+        const command = parts(node)
+        const tokens = command.map((item) => item.text)
+        if (!isDelete(tokens, ps)) continue
+        const head = ps ? tokens[0]?.toLowerCase() : tokens[0]
+        if (!head || !DELETE_COMMANDS.has(head)) return false
+        const args = pathArgs(command, ps)
+        if (args.length === 0) return false
+        for (const arg of args) {
+          const resolved = yield* argPath(arg, cwd, ps, shell)
+          if (!resolved || !insideTmp(resolved) || Instance.containsPath(resolved)) return false
+        }
+      }
+      return true
+    })
+
     const collect = Effect.fn("BashTool.collect")(function* (root: Node, cwd: string, ps: boolean, shell: string) {
       const scan: Scan = {
         dirs: new Set<string>(),
@@ -872,9 +948,17 @@ export const BashTool = Tool.define(
               // the delete UI shows the full command (including any external
               // paths it touches), so a separate bash/external_directory
               // prompt would just be a second confirmation of the same thing.
-              // MIMOCODE_AUTO_APPROVE_DELETE trusts deletes and falls back to
-              // the regular ask (where a `bash: deny` rule still blocks).
-              if (scan.deletes.size > 0 && !Flag.MIMOCODE_AUTO_APPROVE_DELETE) {
+              // Two bypasses fall back to the regular ask (where a `bash: deny`
+              // rule still blocks): MIMOCODE_AUTO_APPROVE_DELETE trusts every
+              // delete, and `tmpOnlyDelete` trusts one whose every target is
+              // provably inside a temp root — scratch space holds no durable
+              // user work, and that check fails closed on anything it cannot
+              // resolve.
+              const skipDeleteAsk =
+                scan.deletes.size === 0 ||
+                Flag.MIMOCODE_AUTO_APPROVE_DELETE ||
+                (yield* tmpOnlyDelete(root, cwd, ps, shell))
+              if (!skipDeleteAsk) {
                 yield* askDelete(ctx, scan, params.command)
               } else {
                 yield* ask(ctx, scan)
