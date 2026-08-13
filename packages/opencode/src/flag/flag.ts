@@ -75,7 +75,14 @@ export const Flag = {
   // normal bash-permission ask so it can't be silently pre-approved by a broad
   // `bash: allow` rule. Set MIMOCODE_AUTO_APPROVE_DELETE=true to trust the
   // model with deletes and skip the second confirmation.
-  MIMOCODE_AUTO_APPROVE_DELETE: truthy("MIMOCODE_AUTO_APPROVE_DELETE"),
+  // Read lazily (getter, not an eagerly-evaluated literal) so an embedder can
+  // flip it at runtime: the desktop app runs the server in-process, so its
+  // approval mode — switchable mid-session, like the TUI's /skip-permissions —
+  // has no process boundary at which to re-read env. A literal would freeze
+  // this at module-evaluation time and make every later write a no-op.
+  get MIMOCODE_AUTO_APPROVE_DELETE() {
+    return truthy("MIMOCODE_AUTO_APPROVE_DELETE")
+  },
   // Set by the TUI's --dangerously-skip-permissions flag. When truthy, an
   // allow-all base ruleset is injected UNDER the user's config permission so
   // every tool auto-approves unless the user explicitly denied it.
