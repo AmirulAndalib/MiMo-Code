@@ -951,14 +951,19 @@ export const BashTool = Tool.define(
               // paths it touches), so a separate bash/external_directory
               // prompt would just be a second confirmation of the same thing.
               // Two bypasses fall back to the regular ask (where a `bash: deny`
-              // rule still blocks): MIMOCODE_AUTO_APPROVE_DELETE trusts every
-              // delete, and `tmpOnlyDelete` trusts one whose every target is
-              // provably inside a temp root — scratch space holds no durable
-              // user work, and that check fails closed on anything it cannot
-              // resolve.
+              // rule still blocks): the instance's auto-approve-delete state
+              // trusts every delete (defaults to MIMOCODE_AUTO_APPROVE_DELETE,
+              // and an embedder may flip it per instance at runtime), and
+              // `tmpOnlyDelete` trusts one whose every target is provably inside
+              // a temp root — scratch space holds no durable user work, and that
+              // check fails closed on anything it cannot resolve.
+              // Instance-scoped, NOT a process-global: one server process serves
+              // many directories with independent permission state, so a global
+              // carrier would let a permissive directory silently auto-approve
+              // deletes in a strict one. Absent accessor ⇒ not exempt (ask).
               const skipDeleteAsk =
                 scan.deletes.size === 0 ||
-                Flag.MIMOCODE_AUTO_APPROVE_DELETE ||
+                (ctx.autoApproveDelete ? yield* ctx.autoApproveDelete() : false) ||
                 (yield* tmpOnlyDelete(root, cwd, ps, shell))
               if (!skipDeleteAsk) {
                 yield* askDelete(ctx, scan, params.command)
