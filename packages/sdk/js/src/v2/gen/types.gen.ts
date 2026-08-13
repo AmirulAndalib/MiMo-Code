@@ -5428,6 +5428,61 @@ export type PermissionSetSkipAllResponses = {
 
 export type PermissionSetSkipAllResponse = PermissionSetSkipAllResponses[keyof PermissionSetSkipAllResponses]
 
+export type PermissionAutoApproveDeleteData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/permission/auto-approve-delete"
+}
+
+export type PermissionAutoApproveDeleteResponses = {
+  /**
+   * Current auto-approve-delete state
+   */
+  200: boolean
+}
+
+export type PermissionAutoApproveDeleteResponse =
+  PermissionAutoApproveDeleteResponses[keyof PermissionAutoApproveDeleteResponses]
+
+export type PermissionSetAutoApproveDeleteData = {
+  body?: {
+    /**
+     * Whether auto-approve-delete is enabled
+     */
+    enabled: boolean
+  }
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/permission/auto-approve-delete"
+}
+
+export type PermissionSetAutoApproveDeleteErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type PermissionSetAutoApproveDeleteError =
+  PermissionSetAutoApproveDeleteErrors[keyof PermissionSetAutoApproveDeleteErrors]
+
+export type PermissionSetAutoApproveDeleteResponses = {
+  /**
+   * Updated auto-approve-delete state
+   */
+  200: boolean
+}
+
+export type PermissionSetAutoApproveDeleteResponse =
+  PermissionSetAutoApproveDeleteResponses[keyof PermissionSetAutoApproveDeleteResponses]
+
 export type WorkflowListData = {
   body?: never
   path?: never

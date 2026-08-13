@@ -86,12 +86,15 @@ import type {
   PartUpdateErrors,
   PartUpdateResponses,
   PathGetResponses,
+  PermissionAutoApproveDeleteResponses,
   PermissionListResponses,
   PermissionReplyErrors,
   PermissionReplyResponses,
   PermissionRespondErrors,
   PermissionRespondResponses,
   PermissionRuleset,
+  PermissionSetAutoApproveDeleteErrors,
+  PermissionSetAutoApproveDeleteResponses,
   PermissionSetSkipAllErrors,
   PermissionSetSkipAllResponses,
   PermissionSkipAllResponses,
@@ -3090,6 +3093,77 @@ export class Permission extends HeyApiClient {
       ThrowOnError
     >({
       url: "/permission/skip-all",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  /**
+   * Get auto-approve-delete state
+   *
+   * Whether irreversible deletes skip the extra bash_delete confirmation. Instance-scoped; defaults to the MIMOCODE_AUTO_APPROVE_DELETE env var.
+   */
+  public autoApproveDelete<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<PermissionAutoApproveDeleteResponses, unknown, ThrowOnError>({
+      url: "/permission/auto-approve-delete",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Set auto-approve-delete state
+   *
+   * Trust the model with irreversible deletes, skipping the extra bash_delete confirmation. Distinct from skip-all, which deliberately does NOT cover forced-ask permissions. Applies instance-wide (this directory only, so other directories served by the same process are unaffected) and subagents inherit it. Explicit `bash: deny` rules still block. Already-pending delete asks are left for a human — the command they guard is irreversible.
+   */
+  public setAutoApproveDelete<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+      enabled?: boolean
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "body", key: "enabled" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<
+      PermissionSetAutoApproveDeleteResponses,
+      PermissionSetAutoApproveDeleteErrors,
+      ThrowOnError
+    >({
+      url: "/permission/auto-approve-delete",
       ...options,
       ...params,
       headers: {

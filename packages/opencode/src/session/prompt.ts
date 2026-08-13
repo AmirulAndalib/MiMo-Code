@@ -1329,6 +1329,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               options.abortSignal,
             )
             .pipe(Effect.orDie),
+        // Instance-scoped delete exemption (see Tool.Context.autoApproveDelete):
+        // read through the Permission service the caller already holds, so it can
+        // never be confused across the directories one process serves.
+        autoApproveDelete: () => permission.autoApproveDelete(),
       })
 
       for (const item of yield* registry.tools({
