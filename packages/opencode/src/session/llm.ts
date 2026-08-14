@@ -35,6 +35,7 @@ import { isRetryableTransientError } from "./retry"
 import { MCP_TOOL_SEARCH_ID } from "@/tool/mcp-tool-search"
 import { deriveLiveness } from "@/actor/schema"
 import { SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
+import { Flag } from "@/flag/flag"
 
 const log = Log.create({ service: "llm" })
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
@@ -140,37 +141,58 @@ export const persistentRetrySchedule = Schedule.exponential("500 millis", 2).pip
  * files already present in the rebuild dump, and the Subagent return
  * format contract.
  *
+ * When `MIMOCODE_DISABLE_CHECKPOINT` is on, the checkpoint.md / writer /
+ * Active-recall sections are omitted so the prompt does not teach a
+ * lifecycle that is not running. MEMORY.md, notes.md, and global memory
+ * instructions stay.
+ *
  * `memoryRoot` is the same absolute root returned by Memory.root(), so these
  * paths match the files used by checkpoint restore and memory/task detection.
  */
 function buildMemoryInstructions(sessionID: SessionID, projectID: ProjectID, memoryRoot: string): string {
   const memoryFile = path.join(memoryRoot, "projects", projectID, "MEMORY.md")
-  const checkpointFile = path.join(memoryRoot, "sessions", sessionID, "checkpoint.md")
   const sessionMemoryDir = path.join(memoryRoot, "sessions", sessionID)
   const globalMemoryFile = path.join(memoryRoot, "global", "MEMORY.md")
-  return `# Memory system
+  const notesFile = path.join(sessionMemoryDir, "notes.md")
+  const checkpointEnabled = !Flag.MIMOCODE_DISABLE_CHECKPOINT
 
-You have a persistent file-based memory system. Four file types:
+  const files = [
+    `- Project memory at \`${memoryFile}\` — persistent across all sessions in this project. Contains: project context, rules, architecture decisions, durable cross-task knowledge.`,
+    ...(checkpointEnabled
+      ? [
+          `- Session checkpoint at \`${path.join(sessionMemoryDir, "checkpoint.md")}\` — current session's structured state, written ONLY by the checkpoint-writer subagent. 11 sections covering active intent, next action, directives, task tree, current work, files, learnings, errors, live resources, design decisions, and open notes. Task content lives inside §4 Task tree and §5 Current work.`,
+          `- Per-task progress at \`${path.join(sessionMemoryDir, "tasks", "<id>", "progress.md")}\` — writer-derived splitover from session-level progress.md (not LLM-written). When you spawn a subagent on a task, the subagent may be handed this path for reading; you do not maintain it.`,
+        ]
+      : []),
+    `- Global memory at \`${globalMemoryFile}\` — user-level preferences and cross-project feedback that persist across all projects.${checkpointEnabled ? ` Auto-injected into rebuild context under the "## Global memory" header when present.` : ""}`,
+  ]
 
-- Project memory at \`${memoryFile}\` — persistent across all sessions in this project. Contains: project context, rules, architecture decisions, durable cross-task knowledge.
-- Session checkpoint at \`${checkpointFile}\` — current session's structured state, written ONLY by the checkpoint-writer subagent. 11 sections covering active intent, next action, directives, task tree, current work, files, learnings, errors, live resources, design decisions, and open notes. Task content lives inside §4 Task tree and §5 Current work.
-- Per-task progress at \`${path.join(sessionMemoryDir, "tasks", "<id>", "progress.md")}\` — writer-derived splitover from session-level progress.md (not LLM-written). When you spawn a subagent on a task, the subagent may be handed this path for reading; you do not maintain it.
-- Global memory at \`${globalMemoryFile}\` — user-level preferences and cross-project feedback that persist across all projects. Auto-injected into rebuild context under the "## Global memory" header when present.
+  const sections = [
+    `# Memory system
 
-The checkpoint writer is the sole curator of the structured files. You don't maintain them mid-task — the writer extracts everything from the conversation at checkpoint events.
+You have a persistent file-based memory system. ${checkpointEnabled ? "Four" : "Two"} file types:
 
-## When to Edit MEMORY.md directly
+${files.join("\n")}`,
+    ...(checkpointEnabled
+      ? [
+          "The checkpoint writer is the sole curator of the structured files. You don't maintain them mid-task — the writer extracts everything from the conversation at checkpoint events.",
+        ]
+      : []),
+    `## When to Edit MEMORY.md directly
 
 You may Edit MEMORY.md when:
 - User states a project-level rule that should hold across sessions → ## Rules
 - User states a project-level architectural decision → ## Architecture decisions
-- A clearly durable cross-session fact emerges that you want available immediately, before the next checkpoint → ## Discovered durable knowledge
+- A clearly durable cross-session fact emerges that you want available immediately${checkpointEnabled ? ", before the next checkpoint" : ""} → ## Discovered durable knowledge${
+      checkpointEnabled
+        ? `
 
-These are exceptions, not the norm. The writer covers most extraction at checkpoint time.
+These are exceptions, not the norm. The writer covers most extraction at checkpoint time.`
+        : ""
+    }`,
+    `## Notes scratchpad
 
-## Notes scratchpad
-
-You have a single legal scratchpad at \`${path.join(sessionMemoryDir, "notes.md")}\`. Append entries to it when you want to record:
+You have a single legal scratchpad at \`${notesFile}\`. Append entries to it when you want to record:
 
 - A quote (from the user, an article, a known engineer) that has lasting value but isn't a task-specific decision
 - An unresolved question — something you noticed but won't answer this turn
@@ -179,11 +201,10 @@ You have a single legal scratchpad at \`${path.join(sessionMemoryDir, "notes.md"
 
 Format each entry as:
   ## [turn N · YYYY-MM-DDTHH:MM:SSZ]
-  Free-form body. The writer reorganizes structured content at checkpoint time.
+  Free-form body.${checkpointEnabled ? " The writer reorganizes structured content at checkpoint time." : ""}
 
-This is your ONLY legal scratchpad — don't create \`learning.md\`, \`scratch.md\`, or any other ad-hoc memory file.
-
-## Subagent return format
+This is your ONLY legal scratchpad — don't create \`learning.md\`, \`scratch.md\`, or any other ad-hoc memory file.`,
+    `## Subagent return format
 
 When you (as a subagent) finish your task, your final assistant message will be delivered to the spawning agent. If the spawn machinery added a "Return format (required)" section to your prompt, follow it exactly:
 
@@ -195,15 +216,17 @@ When you (as a subagent) finish your task, your final assistant message will be 
   **Files touched**: <comma-separated paths or "(none)">
   **Findings worth promoting**: <bullet list, or "(none)">
 
-If your spawn prompt didn't include this format (e.g., explore/title/summary agents have their own contracts), follow whatever your prompt specifies.
+If your spawn prompt didn't include this format (e.g., explore/title/summary agents have their own contracts), follow whatever your prompt specifies.`,
+    `## What NOT to do
 
-## What NOT to do
-
-- Don't Edit checkpoint.md — that's the writer's domain.
-- Don't create memory files other than notes.md (no learning.md, no scratch.md). Use notes.md for any free-form entry.
-- Don't ask the user about something memory may already record — search first via Grep / Read.
-
-## Active recall protocol
+${[
+  ...(checkpointEnabled ? ["- Don't Edit checkpoint.md — that's the writer's domain."] : []),
+  "- Don't create memory files other than notes.md (no learning.md, no scratch.md). Use notes.md for any free-form entry.",
+  "- Don't ask the user about something memory may already record — search first via Grep / Read.",
+].join("\n")}`,
+    ...(checkpointEnabled
+      ? [
+          `## Active recall protocol
 
 After a checkpoint rebuild, the following dumps may be already in your context (look for the "Summary of previous conversation from checkpoint files:" header followed by these dumps):
 
@@ -222,8 +245,12 @@ If a dump shows "⚠️ Truncated at ~N tokens. Read(<path>, offset=L) for the r
 
 Memory entries name functions, files, flags, paths — those are CLAIMS about a point in time when they were written. Verify before acting on a specific name.
 
-Don't ask the user about something memory may already record.
-`
+Don't ask the user about something memory may already record.`,
+        ]
+      : []),
+  ]
+
+  return sections.join("\n\n")
 }
 
 export type StreamInput = {
@@ -307,16 +334,18 @@ const live: Layer.Layer<
       )
 
       // v5: memory-instructions section. Teaches the agent how/where/when to
-      // maintain `MEMORY.md` and `checkpoint.md` directly via Edit. Project ID is
-      // resolved from the ALS-bound Instance with a safe fallback to
-      // `ProjectID.global` (mirrors the pattern in session/checkpoint.ts so the
+      // maintain `MEMORY.md` and (when checkpointing is on) `checkpoint.md`.
+      // Project ID is resolved from the ALS-bound Instance with a safe fallback
+      // to `ProjectID.global` (mirrors the pattern in session/checkpoint.ts so the
       // path the prompt advertises matches the path the writer actually writes).
       // Injected only for actors whose context the checkpoint flow serves —
       // main + peer. Subagents (explore/general/compose) use per-actor compaction
       // and have no checkpoint duty; system-spawned actors (checkpoint-writer et al.)
       // are the writers themselves. Shares the exact `servesCheckpoint` judgement
       // with SessionPrune.fireCheckpoints so the "who owns a checkpoint" and "who is
-      // taught about it" sets can never drift apart.
+      // taught about it" sets can never drift apart. MIMOCODE_DISABLE_CHECKPOINT
+      // still injects this block, but strips the checkpoint.md / writer / recall
+      // sections so the prompt does not describe a disabled lifecycle.
       const servesCheckpoint = yield* actorReg.servesCheckpoint(SessionID.make(input.sessionID), input.agentID)
       if (servesCheckpoint) {
         const projectID =
