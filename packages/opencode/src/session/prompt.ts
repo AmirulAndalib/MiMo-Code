@@ -440,8 +440,11 @@ export const layer = Layer.effect(
      *                   switched off, so a checkpoint cannot exist and cannot be
      *                   produced. Callers may compact, and MUST say the switch is
      *                   why — never that a writer failed.
+     * - "checkpoint-off" nothing was attempted because checkpointing is
+     *                   explicitly disabled. Callers may compact and must name
+     *                   the switch rather than reporting a writer failure.
      */
-    type RebuildAttempt = "rebuilt" | "writer-failed" | "insert-failed" | "memory-write-off"
+    type RebuildAttempt = "rebuilt" | "writer-failed" | "insert-failed" | "memory-write-off" | "checkpoint-off"
 
     // The single place that decides whether a rebuild may degrade to
     // compaction. Every caller — both auto context-overflow sites and the
@@ -467,6 +470,8 @@ export const layer = Layer.effect(
       /** Run once, immediately before the wait begins, to explain the stall. */
       onWaitingForWriter?: Effect.Effect<void>
     }) {
+      if (Flag.MIMOCODE_DISABLE_CHECKPOINT) return "checkpoint-off" as const
+
       // 0. Memory writing off → there is nothing to try. Bail out BEFORE any of
       //    the work below, because with the switch on every step of it is
       //    predetermined to be useless: no checkpoint can exist (the writer has
@@ -596,6 +601,12 @@ export const layer = Layer.effect(
       "and the session keeps working — to get checkpoint rebuilds back, set `memory.disable_write` to false in " +
       "config."
 
+    const CHECKPOINT_OFF_FALLBACK_NOTICE =
+      "Checkpointing is off, so the context was compacted instead of rebuilt from a checkpoint. Earlier turns " +
+      "leave the model's view without a checkpoint summary, which can weaken continuity on long-running work. " +
+      "Nothing is broken — to enable checkpoint writers and checkpoint rebuilds again, unset " +
+      "`MIMOCODE_DISABLE_CHECKPOINT` or set it to false."
+
     // Sessions that have already been told once, this process.
     //
     // The notice describes a CONFIG STATE, not an event: it says exactly the
@@ -607,6 +618,7 @@ export const layer = Layer.effect(
     // still shapes that run — so this is deliberately in-memory rather than a
     // durable "already warned" flag.
     const memoryWriteOffNoticed = new Set<SessionID>()
+    const checkpointOffNoticed = new Set<SessionID>()
 
     /**
      * Surface the memory-write-off degradation, and return the notice text so a
@@ -652,6 +664,31 @@ export const layer = Layer.effect(
         })
         .pipe(Effect.ignore)
       return MEMORY_WRITE_OFF_FALLBACK_NOTICE
+    })
+
+    const noticeCheckpointOffFallback = Effect.fn("SessionPrompt.noticeCheckpointOffFallback")(function* (
+      sessionID: SessionID,
+    ) {
+      if (checkpointOffNoticed.has(sessionID)) return CHECKPOINT_OFF_FALLBACK_NOTICE
+      checkpointOffNoticed.add(sessionID)
+      const msgs = yield* sessions.messages({ sessionID, agentID: "main" })
+      const anchor = msgs.findLast((m) => m.parts.some((p) => p.type === "compaction")) ?? msgs[msgs.length - 1]
+      if (!anchor) return CHECKPOINT_OFF_FALLBACK_NOTICE
+      const now = Date.now()
+      yield* sessions
+        .updatePart({
+          id: PartID.ascending(),
+          messageID: anchor.info.id,
+          sessionID,
+          type: "text",
+          text: CHECKPOINT_OFF_FALLBACK_NOTICE,
+          synthetic: true,
+          ignored: true,
+          metadata: { origin: { kind: "checkpoint-off" } },
+          time: { start: now, end: now },
+        })
+        .pipe(Effect.ignore)
+      return CHECKPOINT_OFF_FALLBACK_NOTICE
     })
 
     const resolvePromptParts = Effect.fn("SessionPrompt.resolvePromptParts")(function* (template: string) {
@@ -3617,7 +3654,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             // A writer was started and awaited above (AUTO_WRITER_WAIT_MS) and
             // still produced nothing — or memory writing is off, so nothing was
             // attempted at all. Either way this is the ONE state that may compact.
-            if (attempt === "writer-failed" || attempt === "memory-write-off") {
+            if (
+              attempt === "writer-failed" ||
+              attempt === "memory-write-off" ||
+              attempt === "checkpoint-off"
+            ) {
               // THE single compaction fallback: no checkpoint existed AND the
               // writer failed / never ran / the bound expired / was never
               // allowed to run at all. Note this is a bare boundary insert, not
@@ -3640,6 +3681,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               // existing behaviour untouched.
               if (attempt === "memory-write-off")
                 yield* noticeMemoryWriteOffFallback(sessionID).pipe(Effect.ignore)
+              if (attempt === "checkpoint-off")
+                yield* noticeCheckpointOffFallback(sessionID).pipe(Effect.ignore)
               skipOverflowCheck = true
               continue
             }
@@ -4205,7 +4248,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
               // Same as above: the writer ran and failed — not "no checkpoint" —
               // or memory writing is off and nothing was attempted.
-              if (attempt2 === "writer-failed" || attempt2 === "memory-write-off") {
+              if (
+                attempt2 === "writer-failed" ||
+                attempt2 === "memory-write-off" ||
+                attempt2 === "checkpoint-off"
+              ) {
                 // THE single compaction fallback (see the token-threshold site).
                 yield* compaction
                   .create({
@@ -4220,6 +4267,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 // Same reason-split as the token-threshold site.
                 if (attempt2 === "memory-write-off")
                   yield* noticeMemoryWriteOffFallback(sessionID).pipe(Effect.ignore)
+                if (attempt2 === "checkpoint-off")
+                  yield* noticeCheckpointOffFallback(sessionID).pipe(Effect.ignore)
                 skipOverflowCheck = true
               }
               // "insert-failed" → a checkpoint exists; must not compact.
@@ -4491,7 +4540,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         // still produced nothing — or memory writing is off, so no writer was
         // started at all. Only in those two states may /rebuild degrade to
         // compaction.
-        if (attempt === "writer-failed" || attempt === "memory-write-off") {
+        if (
+          attempt === "writer-failed" ||
+          attempt === "memory-write-off" ||
+          attempt === "checkpoint-off"
+        ) {
           // No checkpoint AND the writer genuinely failed / never ran / the bound
           // expired / was never allowed to run — the ONE fallback condition,
           // shared with the auto overflow paths. An earlier revision of this
@@ -4524,7 +4577,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               ? yield* noticeMemoryWriteOffFallback(input.sessionID).pipe(
                   Effect.catch(() => Effect.succeed(MEMORY_WRITE_OFF_FALLBACK_NOTICE)),
                 )
-              : compactedInsteadMsg
+              : attempt === "checkpoint-off"
+                ? yield* noticeCheckpointOffFallback(input.sessionID).pipe(
+                    Effect.catch(() => Effect.succeed(CHECKPOINT_OFF_FALLBACK_NOTICE)),
+                  )
+                : compactedInsteadMsg
           yield* settle(msg)
           return lastUser ?? msgs[msgs.length - 1]!
         }

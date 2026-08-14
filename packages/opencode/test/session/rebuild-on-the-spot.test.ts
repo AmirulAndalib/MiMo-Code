@@ -625,6 +625,100 @@ describe("Manual /rebuild: on-the-spot rebuild driven through SessionPrompt.comm
     { timeout: 30_000 },
   )
 
+  test(
+    "MIMOCODE_DISABLE_CHECKPOINT=true → compacts immediately without starting or waiting for a writer",
+    async () => {
+      const previous = process.env.MIMOCODE_DISABLE_CHECKPOINT
+      process.env.MIMOCODE_DISABLE_CHECKPOINT = "true"
+      const llm = startLLM("should-not-be-used-as-a-reply")
+      const writer = countingSpawn(writerThatWritesCheckpoint("SHOULD_NEVER_BE_WRITTEN"))
+      const seen: Array<string | undefined> = []
+      const onEvent = (e: {
+        payload?: { type?: string; properties?: { status?: { type?: string; message?: string } } }
+      }) => {
+        if (e?.payload?.type === "session.status" && e.payload.properties?.status?.type === "busy") {
+          seen.push(e.payload.properties.status.message)
+        }
+      }
+      GlobalBus.on("event", onEvent)
+      try {
+        await using tmp = await tmpdir({
+          git: true,
+          init: (dir) => Bun.write(path.join(dir, "mimocode.json"), mimocodeConfig(llm.origin)),
+        })
+
+        await withSpawnRef(writer.impl, () =>
+          Instance.provide({
+            directory: tmp.path,
+            fn: () =>
+              run(
+                Effect.gen(function* () {
+                  const prompt = yield* SessionPrompt.Service
+                  const sessions = yield* Session.Service
+                  const info = yield* sessions.create({ title: "rebuild-checkpoint-off" })
+                  const boundary = yield* Effect.promise(() =>
+                    seedUserMessage(info.id, "turn one with checkpointing off"),
+                  )
+                  yield* Effect.promise(() =>
+                    fs.mkdir(path.dirname(checkpointPath(info.id)), { recursive: true }),
+                  )
+                  yield* Effect.promise(() =>
+                    fs.writeFile(
+                      checkpointPath(info.id),
+                      "# Session checkpoint\n\n## §1 Active intent\nThis existing checkpoint must not be rebuilt.\n",
+                    ),
+                  )
+                  yield* Effect.sync(() =>
+                    Database.use((db) =>
+                      db
+                        .update(SessionTable)
+                        .set({ last_checkpoint_message_id: boundary.id })
+                        .where(eq(SessionTable.id, info.id))
+                        .run(),
+                    ),
+                  )
+
+                  yield* prompt.command({
+                    sessionID: info.id,
+                    command: Command.Default.REBUILD,
+                    arguments: "",
+                    agent: "build",
+                  })
+
+                  const after = yield* sessions.messages({ sessionID: info.id })
+                  expect(after.filter((m) => m.parts.some((p) => p.type === "compaction")).length).toBe(1)
+                  expect(after.filter((m) => m.parts.some((p) => p.type === "checkpoint")).length).toBe(0)
+                  expect(writer.calls).toBe(0)
+                  expect(seen).not.toContain("Writing checkpoint\u2026")
+                  expect(yield* Effect.promise(() => Bun.file(checkpointPath(info.id)).exists())).toBe(true)
+                  const notice = after
+                    .flatMap((m) => m.parts)
+                    .find(
+                      (p) =>
+                        p.type === "text" &&
+                        p.text.includes("Checkpointing is off") &&
+                        p.text.includes("MIMOCODE_DISABLE_CHECKPOINT"),
+                    )
+                  expect(notice?.type).toBe("text")
+                  if (notice?.type !== "text") throw new Error("expected checkpoint-off notice")
+                  expect(notice.synthetic).toBe(true)
+                  expect(notice.ignored).toBe(true)
+                  expect(notice.metadata).toEqual({ origin: { kind: "checkpoint-off" } })
+                  expect(llm.calls).toBe(0)
+                }),
+              ),
+          }),
+        )
+      } finally {
+        if (previous === undefined) delete process.env.MIMOCODE_DISABLE_CHECKPOINT
+        else process.env.MIMOCODE_DISABLE_CHECKPOINT = previous
+        GlobalBus.off("event", onEvent)
+        await llm.stop()
+      }
+    },
+    { timeout: 30_000 },
+  )
+
   // `memory.disable_write: true` means no checkpoint can ever be written for the
   // session, so every rebuild degrades to compaction for the whole life of that
   // session. That is the switch doing its job, but it used to leave the user with

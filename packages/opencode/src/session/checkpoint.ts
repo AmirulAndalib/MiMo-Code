@@ -3,6 +3,7 @@ import path from "path"
 import { Global } from "@/global"
 import { Bus } from "@/bus"
 import { Config } from "@/config"
+import { Flag } from "@/flag/flag"
 import { Memory } from "@/memory"
 import { isMemoryWriteEnabled } from "@/memory/write-gate"
 import { MemoryFtsTable } from "@/memory/fts.sql"
@@ -589,6 +590,11 @@ export const layer: Layer.Layer<
     ) => Effect.Effect<TryStartCheckpointWriterResult> = Effect.fn("SessionCheckpoint.tryStartCheckpointWriter")(function* (
       input: TryStartCheckpointWriterInput,
     ) {
+      if (Flag.MIMOCODE_DISABLE_CHECKPOINT) {
+        log.info("checkpointing disabled, skipping checkpoint", { sessionID: input.sessionID })
+        return "skipped" as const
+      }
+
       // Memory writing disabled — stop producing NEW memory. This is the single
       // gate for the whole write side of checkpointing: template bootstrap
       // (ensureCheckpointTemplate / ensureMemoryTemplate / ensureNotesTemplate),
