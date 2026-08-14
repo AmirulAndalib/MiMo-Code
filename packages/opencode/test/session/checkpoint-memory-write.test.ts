@@ -108,6 +108,38 @@ const seedSession = Effect.fn("seedSession")(function* () {
 
 describe("memory write gate (W1)", () => {
   it.live(
+    "MIMOCODE_DISABLE_CHECKPOINT=true → skipped without affecting the memory config",
+    provideTmpdirInstance(
+      () =>
+        Effect.gen(function* () {
+          yield* reset
+          const previous = process.env["MIMOCODE_DISABLE_CHECKPOINT"]
+          process.env["MIMOCODE_DISABLE_CHECKPOINT"] = "true"
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => {
+              if (previous === undefined) delete process.env["MIMOCODE_DISABLE_CHECKPOINT"]
+              else process.env["MIMOCODE_DISABLE_CHECKPOINT"] = previous
+            }),
+          )
+          const cp = yield* SessionCheckpoint.Service
+          const info = yield* seedSession()
+
+          const outcome = yield* cp.tryStartCheckpointWriter({
+            sessionID: info.id,
+            model: { providerID: "test", modelID: "test-model" },
+            promptOps: {} as never,
+          })
+
+          expect(outcome).toBe("skipped")
+          expect(spawnLog.count).toBe(0)
+          expect(yield* Effect.promise(() => Bun.file(checkpointPath(info.id)).exists())).toBe(false)
+          expect(yield* Effect.promise(() => Bun.file(notesPath(info.id)).exists())).toBe(false)
+        }),
+      { outsideGit: true },
+    ),
+  )
+
+  it.live(
     "absent config → writer starts and memory files are bootstrapped (today's behavior)",
     provideTmpdirInstance(
       () =>

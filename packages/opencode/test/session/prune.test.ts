@@ -305,6 +305,36 @@ describe("SessionPrune.fireCheckpoints writer failure is not retried in place", 
     cache: { read: 0, write: 0 },
   })
 
+  test("disabled thresholds remain eligible after checkpointing is re-enabled", async () => {
+    const previous = process.env.MIMOCODE_DISABLE_CHECKPOINT
+    const harness = makeRetryHarness()
+    const promptOps = {} as any
+
+    try {
+      await runWithHarness(
+        harness,
+        Effect.gen(function* () {
+          const svc = yield* SessionPrune.Service
+          const ssn = yield* SessionNs.Service
+          const info = yield* ssn.create({})
+          const model = createModel({ context: 100_000, output: 32_000 })
+
+          process.env.MIMOCODE_DISABLE_CHECKPOINT = "true"
+          yield* svc.fireCheckpoints({ sessionID: info.id, model, tokens: makeTokensAt(35_000), promptOps })
+          expect(harness.state.enqueueCount).toBe(0)
+
+          process.env.MIMOCODE_DISABLE_CHECKPOINT = "false"
+          yield* svc.fireCheckpoints({ sessionID: info.id, model, tokens: makeTokensAt(35_000), promptOps })
+          expect(harness.state.enqueueCount).toBe(1)
+        }),
+        { checkpoint: { thresholds: ["30K", "45K"] } },
+      )
+    } finally {
+      if (previous === undefined) delete process.env.MIMOCODE_DISABLE_CHECKPOINT
+      else process.env.MIMOCODE_DISABLE_CHECKPOINT = previous
+    }
+  })
+
   // These cases replace the six that pinned the deleted accounting
   // (writerFailures / MAX_WRITER_FAILURES / MAX_WRITER_WAIT_EXTENSIONS). What
   // they used to assert, and why it is no longer the requirement:
