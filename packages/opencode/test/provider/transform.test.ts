@@ -1736,6 +1736,53 @@ describe("ProviderTransform.message - anthropic empty content filtering", () => 
     expect(result[0].content[0]).toEqual({ type: "text", text: "Answer" })
   })
 
+  test("preserves empty Anthropic reasoning with a signature", () => {
+    const reasoning = {
+      type: "reasoning" as const,
+      text: "",
+      providerOptions: { anthropic: { signature: "signed-thinking" } },
+    }
+    const msgs = [
+      {
+        role: "assistant",
+        content: [reasoning, { type: "text", text: "Answer" }],
+      },
+      { role: "user", content: [{ type: "text", text: "next" }] },
+    ] as any[]
+
+    const result = ProviderTransform.message(msgs, anthropicModel, {})
+
+    expect(result).toHaveLength(2)
+    expect(result[0].content).toEqual([reasoning, { type: "text", text: "Answer" }])
+  })
+
+  test("preserves signed empty reasoning from a custom Anthropic route", () => {
+    const result = ProviderTransform.message(
+      [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "reasoning",
+              text: "",
+              providerOptions: { prod: { signature: "prod-signature" } },
+            },
+            { type: "text", text: "Answer" },
+          ],
+        },
+        { role: "user", content: [{ type: "text", text: "next" }] },
+      ] as any[],
+      { ...anthropicModel, providerID: "prod" },
+      {},
+    )
+
+    expect(result[0].content[0]).toEqual({
+      type: "reasoning",
+      text: "",
+      providerOptions: { anthropic: { signature: "prod-signature" } },
+    })
+  })
+
   test("removes entire message when all parts are empty", () => {
     const msgs = [
       { role: "user", content: "Hello" },
