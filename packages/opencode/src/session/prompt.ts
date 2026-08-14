@@ -682,9 +682,9 @@ export const layer = Layer.effect(
           sessionID,
           type: "text",
           text: CHECKPOINT_OFF_FALLBACK_NOTICE,
-          // Visible in the TUI transcript; ignored still keeps it out of model
-          // context and session classification.
+          synthetic: true,
           ignored: true,
+          metadata: { origin: { kind: "checkpoint-off" } },
           time: { start: now, end: now },
         })
         .pipe(Effect.ignore)

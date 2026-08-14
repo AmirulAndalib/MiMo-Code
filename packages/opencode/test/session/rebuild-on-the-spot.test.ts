@@ -701,8 +701,9 @@ describe("Manual /rebuild: on-the-spot rebuild driven through SessionPrompt.comm
                     )
                   expect(notice?.type).toBe("text")
                   if (notice?.type !== "text") throw new Error("expected checkpoint-off notice")
-                  expect(notice.synthetic).not.toBe(true)
+                  expect(notice.synthetic).toBe(true)
                   expect(notice.ignored).toBe(true)
+                  expect(notice.metadata).toEqual({ origin: { kind: "checkpoint-off" } })
                   expect(llm.calls).toBe(0)
                 }),
               ),
