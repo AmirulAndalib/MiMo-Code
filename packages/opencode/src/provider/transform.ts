@@ -69,13 +69,18 @@ function stripsEmptyParts(model: Provider.Model): boolean {
   ].includes(model.api.npm)
 }
 
+function record(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
+  return value as Record<string, unknown>
+}
+
 function normalizeMessages(
   msgs: ModelMessage[],
   model: Provider.Model,
   _options: Record<string, unknown>,
 ): ModelMessage[] {
-  // Anthropic rejects messages with empty content - filter out empty string messages
-  // and remove empty text/reasoning parts from array content
+  // Anthropic rejects messages with empty content. Signed thinking is the exception:
+  // its text may be empty, but its signature/redacted data must survive for replay.
   if (stripsEmptyParts(model)) {
     msgs = msgs
       .map((msg) => {
@@ -85,8 +90,14 @@ function normalizeMessages(
         }
         if (!Array.isArray(msg.content)) return msg
         const filtered = msg.content.filter((part) => {
-          if (part.type === "text" || part.type === "reasoning") {
-            return part.text !== ""
+          if (part.type === "text") return part.text !== ""
+          if (part.type === "reasoning") {
+            if (part.text !== "") return true
+            const metadata = record(part.providerOptions?.anthropic ?? part.providerOptions?.[model.providerID])
+            return (
+              (typeof metadata?.signature === "string" && metadata.signature !== "") ||
+              (typeof metadata?.redactedData === "string" && metadata.redactedData !== "")
+            )
           }
           return true
         })
@@ -622,11 +633,6 @@ function normalizeContentArray(msgs: ModelMessage[]): ModelMessage[] {
     if (msg.role === "user") return { ...msg, content: [{ type: "text", text: EMPTY_CONTENT_PLACEHOLDER }] } as ModelMessage
     return msg
   })
-}
-
-function record(value: unknown): Record<string, unknown> | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
-  return value as Record<string, unknown>
 }
 
 // Anthropic's SDK discards historical reasoning without a signature or redacted
