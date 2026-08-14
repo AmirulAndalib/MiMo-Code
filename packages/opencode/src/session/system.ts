@@ -46,7 +46,7 @@ export function agent(agent: Agent.Info, model: Provider.Model) {
 }
 
 export interface Interface {
-  readonly environment: (model: Provider.Model, now: number) => Effect.Effect<string[]>
+  readonly environment: (model: Provider.Model) => Effect.Effect<string[]>
   readonly skills: (agent: Agent.Info, model?: SkillSearchModel) => Effect.Effect<string | undefined>
   readonly available: (agent?: Agent.Info) => Effect.Effect<Skill.Info[]>
   readonly all: () => Effect.Effect<Skill.Info[]>
@@ -61,7 +61,7 @@ export const layer = Layer.effect(
     const provider = yield* Provider.Service
 
     return Service.of({
-      environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model, now: number) {
+      environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
         const project = Instance.project
         const base = [
           [
@@ -73,10 +73,6 @@ export const layer = Layer.effect(
             `  Workspace root folder: ${Instance.worktree}`,
             `  Is directory a git repo: ${project.vcs === "git" ? "yes" : "no"}`,
             `  Platform: ${process.platform}`,
-            // Anchored to the session's creation time (not request time) so this block
-            // stays byte-identical across every turn of a session — including ones that
-            // cross midnight — keeping it inside the Anthropic cached system prefix.
-            `  Today's date: ${new Date(now).toDateString()}`,
             `</env>`,
           ].join("\n"),
           `IMPORTANT: Your response must ALWAYS strictly follow the same major language as the user.`,

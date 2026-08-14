@@ -99,7 +99,6 @@ describe("session.system", () => {
             return yield* Effect.all([
               system.environment(
                 ProviderTest.model({ id: ModelID.make("gpt-5.4"), api: { id: "gpt-5.4" } as never }),
-                Date.now(),
               ),
               system.environment(
                 ProviderTest.model({
@@ -107,7 +106,6 @@ describe("session.system", () => {
                   providerID: ProviderID.make("anthropic"),
                   api: { id: "claude-sonnet-4-6" } as never,
                 }),
-                Date.now(),
               ),
               system.environment(
                 ProviderTest.model({
@@ -115,7 +113,6 @@ describe("session.system", () => {
                   providerID: ProviderID.make("google"),
                   api: { id: "gemini-2.5-pro" } as never,
                 }),
-                Date.now(),
               ),
             ])
           }).pipe(Effect.provide(SystemPrompt.defaultLayer)),
