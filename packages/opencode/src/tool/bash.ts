@@ -946,27 +946,24 @@ export const BashTool = Tool.define(
               }
               const scan = yield* collect(root, cwd, ps, shell)
               if (!Instance.containsPath(cwd)) scan.dirs.add(cwd)
-              // Delete-containing commands are authorized by askDelete alone —
-              // the delete UI shows the full command (including any external
-              // paths it touches), so a separate bash/external_directory
-              // prompt would just be a second confirmation of the same thing.
-              // Two bypasses fall back to the regular ask (where a `bash: deny`
-              // rule still blocks): the instance's auto-approve-delete state
-              // trusts every delete (defaults to MIMOCODE_AUTO_APPROVE_DELETE,
-              // and an embedder may flip it per instance at runtime), and
+              // Delete-containing commands normally use askDelete alone — the
+              // delete UI shows the full command, so another bash prompt would
+              // duplicate the confirmation. Auto-approved deletes still pass
+              // through askDelete so an explicit `bash_delete: deny` wins, then
+              // fall back to the regular ask so `bash: deny` wins too.
               // `tmpOnlyDelete` trusts one whose every target is provably inside
-              // a temp root — scratch space holds no durable user work, and that
+              // a temp root; scratch space holds no durable user work, and that
               // check fails closed on anything it cannot resolve.
               // Instance-scoped, NOT a process-global: one server process serves
               // many directories with independent permission state, so a global
               // carrier would let a permissive directory silently auto-approve
               // deletes in a strict one. Absent accessor ⇒ not exempt (ask).
-              const skipDeleteAsk =
-                scan.deletes.size === 0 ||
-                (ctx.autoApproveDelete ? yield* ctx.autoApproveDelete() : false) ||
-                (yield* tmpOnlyDelete(root, cwd, ps, shell))
+              const autoApproveDelete =
+                scan.deletes.size > 0 && ctx.autoApproveDelete ? yield* ctx.autoApproveDelete() : false
+              const skipDeleteAsk = scan.deletes.size === 0 || (yield* tmpOnlyDelete(root, cwd, ps, shell))
               if (!skipDeleteAsk) {
                 yield* askDelete(ctx, scan, params.command)
+                if (autoApproveDelete) yield* ask(ctx, scan)
               } else {
                 yield* ask(ctx, scan)
               }

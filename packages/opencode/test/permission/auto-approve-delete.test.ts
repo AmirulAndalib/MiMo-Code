@@ -1,7 +1,8 @@
-import { afterEach, describe, expect } from "bun:test"
+import { afterEach, beforeEach, describe, expect } from "bun:test"
 import { Effect, Fiber, Layer } from "effect"
 import { Bus } from "../../src/bus"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
+import { Flag } from "../../src/flag/flag"
 import { Permission } from "../../src/permission"
 import { Instance } from "../../src/project/instance"
 import { provideInstance, provideTmpdirInstance, tmpdirScoped } from "../fixture/fixture"
@@ -10,7 +11,14 @@ import { Log } from "../../src/util"
 
 void Log.init({ print: false })
 
+const originalDangerouslySkipPermissions = Flag.MIMOCODE_DANGEROUSLY_SKIP_PERMISSIONS
+
+beforeEach(() => {
+  Flag.MIMOCODE_DANGEROUSLY_SKIP_PERMISSIONS = false
+})
+
 afterEach(async () => {
+  Flag.MIMOCODE_DANGEROUSLY_SKIP_PERMISSIONS = originalDangerouslySkipPermissions
   await Instance.disposeAll()
 })
 
@@ -29,13 +37,24 @@ const waitForPending = (count: number) =>
     return yield* Effect.fail(new Error(`timed out waiting for ${count} pending permission request(s)`))
   })
 
-describe("Permission auto-approve-delete runtime toggle", () => {
+describe.serial("Permission auto-approve-delete runtime toggle", () => {
   it.live(
     "defaults to off so irreversible deletes keep asking",
     provideTmpdirInstance(() =>
       Effect.gen(function* () {
         const perm = yield* Permission.Service
         expect(yield* perm.autoApproveDelete()).toBe(false)
+      }),
+    ),
+  )
+
+  it.live(
+    "enables delete approval bypass in dangerous startup mode",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        Flag.MIMOCODE_DANGEROUSLY_SKIP_PERMISSIONS = true
+        const perm = yield* Permission.Service
+        expect(yield* perm.autoApproveDelete()).toBe(true)
       }),
     ),
   )
@@ -51,6 +70,35 @@ describe("Permission auto-approve-delete runtime toggle", () => {
         // approval mode would keep deletes silently approved.
         yield* perm.setAutoApproveDelete(false)
         expect(yield* perm.autoApproveDelete()).toBe(false)
+      }),
+    ),
+  )
+
+  it.live(
+    "auto-approves bash_delete only after explicit deny rules are checked",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const perm = yield* Permission.Service
+        yield* perm.setAutoApproveDelete(true)
+        const request = {
+          sessionID: "ses_test" as never,
+          permission: "bash_delete" as never,
+          patterns: ["rm important"],
+          metadata: {},
+          always: [],
+          interactive: false,
+        }
+
+        const allowed = yield* perm.ask({ ...request, ruleset: [] }).pipe(Effect.exit)
+        expect(allowed._tag).toBe("Success")
+
+        const denied = yield* perm
+          .ask({
+            ...request,
+            ruleset: [{ permission: "bash_delete", pattern: "*", action: "deny" }],
+          })
+          .pipe(Effect.exit)
+        expect(denied._tag).toBe("Failure")
       }),
     ),
   )

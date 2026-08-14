@@ -190,8 +190,9 @@ interface State {
   // server process serves many directories, each with independent permission
   // state, so a process-global carrier (e.g. an env var) would let a permissive
   // directory silently auto-approve deletes in a strict one.
-  // Defaults to the MIMOCODE_AUTO_APPROVE_DELETE env var so the CLI/TUI keeps
-  // its documented opt-out; an embedder can override it per instance at runtime.
+  // Defaults to the dedicated delete opt-out or dangerous startup mode so
+  // --yolo truly skips every non-denied approval; an embedder can override it
+  // per instance at runtime.
   autoApproveDelete: boolean
 }
 
@@ -204,8 +205,8 @@ export function evaluate(permission: string, pattern: string, ...rulesets: Rules
 // pattern:"*", action:"allow"}` approval) MUST NOT be able to pre-authorize
 // these — the whole point of a forced-ask permission is that the intent to
 // perform an irreversible action must be recorded in-band, not inherited from
-// a broad blanket rule. Explicit deny still wins; the tool-side env opt-out
-// (e.g. MIMOCODE_AUTO_APPROVE_DELETE for bash_delete) is the only bypass.
+// a broad blanket rule. Explicit deny still wins; the tool-side delete exemption
+// (dedicated or enabled by dangerous startup mode) is the only bypass.
 const FORCED_ASK = new Set(["bash_delete"])
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Permission") {}
@@ -223,7 +224,7 @@ export const layer = Layer.effect(
           pending: new Map<PermissionID, PendingEntry>(),
           approved: row?.data ?? [],
           skipAll: false,
-          autoApproveDelete: Flag.MIMOCODE_AUTO_APPROVE_DELETE,
+          autoApproveDelete: Flag.MIMOCODE_AUTO_APPROVE_DELETE || Flag.MIMOCODE_DANGEROUSLY_SKIP_PERMISSIONS,
         }
 
         yield* Effect.addFinalizer(() =>
@@ -275,6 +276,17 @@ export const layer = Layer.effect(
         if (ruleAction === "allow") continue
         if (evaluate(request.permission, pattern, approved).action === "allow") continue
         needsAsk = true
+      }
+
+      // Dangerous startup mode and the dedicated delete exemption may bypass
+      // the human confirmation, but only after every explicit bash_delete deny
+      // above has had a chance to reject the request.
+      if (needsAsk && forced && s.autoApproveDelete) {
+        log.info("auto-approve-delete active, auto-allowing", {
+          permission: request.permission,
+          patterns: request.patterns,
+        })
+        return
       }
 
       // Runtime skip-all: auto-allow anything that would block for approval.
