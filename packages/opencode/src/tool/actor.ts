@@ -1,7 +1,9 @@
 import * as Tool from "./tool"
 import { RecoverableError } from "./recoverable"
 import DESCRIPTION from "./actor.txt"
+import DESCRIPTION_CHECKPOINT from "./actor.checkpoint.txt"
 import SHELL_DESCRIPTION from "./actor.shell.txt"
+import { withCheckpointDescription, withCheckpointClause } from "./checkpoint-description"
 import { tokenize } from "./shell-tokenize"
 import z from "zod"
 import { Session } from "../session"
@@ -361,6 +363,16 @@ export const ActorTool = Tool.define(
         .optional()
         .describe("(optional) Milliseconds to wait before returning { status: 'timeout' }. Default 600000 (10 min).")
 
+      const contextField = z
+        .enum(["none", "state", "full"])
+        .optional()
+        .describe(
+          withCheckpointClause(
+            "(optional) Context inheritance. 'none' (default): child sees only prompt. 'full': child sees parent conversation (prefix cache sharing).",
+            "'state': child gets checkpoint summary.",
+          ),
+        )
+
       const runSchema = z.strictObject({
         action: z
           .literal("run")
@@ -384,12 +396,7 @@ export const ActorTool = Tool.define(
           ),
         timeout_ms: timeoutField,
         command: z.string().min(1).optional().describe("(optional) The command that triggered this task."),
-        context: z
-          .enum(["none", "state", "full"])
-          .optional()
-          .describe(
-            "(optional) Context inheritance. 'none' (default): child sees only prompt. 'full': child sees parent conversation (prefix cache sharing). 'state': child gets checkpoint summary.",
-          ),
+        context: contextField,
         task_id: z
           .string()
           .min(1)
@@ -427,10 +434,7 @@ export const ActorTool = Tool.define(
             "(optional) If set, resume the specified prior actor session instead of creating a new one.",
           ),
         command: z.string().min(1).optional().describe("(optional) The command that triggered this task."),
-        context: z
-          .enum(["none", "state", "full"])
-          .optional()
-          .describe("(optional) Context inheritance. Default 'none'."),
+        context: contextField,
         task_id: z
           .string()
           .min(1)
@@ -859,7 +863,7 @@ export const ActorTool = Tool.define(
       })
 
       return {
-        description: DESCRIPTION,
+        description: withCheckpointDescription(DESCRIPTION, DESCRIPTION_CHECKPOINT),
         parameters,
         execute: (input: z.infer<typeof parameters>, ctx: Tool.Context) => run(input, ctx).pipe(Effect.orDie),
         shell: {

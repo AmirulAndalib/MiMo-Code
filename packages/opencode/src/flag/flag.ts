@@ -90,8 +90,9 @@ export const Flag = {
   MIMOCODE_DISABLE_DEFAULT_PLUGINS: truthy("MIMOCODE_DISABLE_DEFAULT_PLUGINS"),
   MIMOCODE_DISABLE_LSP_DOWNLOAD: truthy("MIMOCODE_DISABLE_LSP_DOWNLOAD"),
   MIMOCODE_ENABLE_EXPERIMENTAL_MODELS: truthy("MIMOCODE_ENABLE_EXPERIMENTAL_MODELS"),
-  // Defaults to false. When enabled, checkpoint writers and checkpoint-based
-  // context rebuilds are disabled; context overflow falls back to compaction.
+  // Defaults to false. When enabled, checkpoint writers, checkpoint-based
+  // context rebuilds, and checkpoint copy in the system prompt and tool
+  // schemas are disabled; context overflow falls back to compaction.
   // Read lazily so tests and in-process embedders can toggle it at runtime.
   get MIMOCODE_DISABLE_CHECKPOINT() {
     return truthy("MIMOCODE_DISABLE_CHECKPOINT")
