@@ -184,6 +184,12 @@ export const Flag = {
   // enable try-best loop detection, automatic turn pausing, and handoff UI.
   MIMOCODE_ENABLE_TRY_BEST_HANDOFF: truthy("MIMOCODE_ENABLE_TRY_BEST_HANDOFF"),
 
+  // Defaults to false. Opt in to append runtime-derived environment and
+  // instruction-file content to the model's system prompt.
+  get MIMOCODE_ENABLE_DYNAMIC_SYSTEM_PROMPT() {
+    return truthy("MIMOCODE_ENABLE_DYNAMIC_SYSTEM_PROMPT")
+  },
+
   // Defaults to false. The edit tool does pure exact-string matching with
   // explicit error signals. Set MIMOCODE_ENABLE_FUZZY_EDIT=true to opt into the
   // legacy multi-stage fuzzy fallback chain (line-trimmed / block-anchor /
