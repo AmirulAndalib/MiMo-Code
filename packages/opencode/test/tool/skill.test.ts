@@ -181,10 +181,11 @@ description: Anyone may start this one.
           // call that can never succeed.
           expect(requests).toEqual([])
 
-          // The tool description must not advertise it either, and a mistyped
-          // name must not leak it back through the not-found hint.
+          // The tool schema is static and never embeds either the reachable or
+          // model-gated catalog. A mistyped name must not leak the gated skill.
           expect(tool.description).not.toContain("gated-skill")
-          expect(tool.description).toContain("open-skill")
+          expect(tool.description).not.toContain("open-skill")
+          expect(tool.description).toContain("listed in the system prompt")
           const miss = yield* Effect.exit(tool.execute({ name: "gated-skil" }, ctx))
           const missMsg = miss._tag === "Failure" ? Cause.pretty(miss.cause) : ""
           expect(missMsg).toContain("not found")

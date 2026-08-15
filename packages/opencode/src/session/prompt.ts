@@ -120,11 +120,10 @@ import {
   type McpToolSearchMetadata,
 } from "@/tool/mcp-tool-search"
 import { isMcpToolSearchEnabled } from "@/tool/gpt"
+import { isSkillCatalogReminder, SKILL_CATALOG_REMINDER_MARKER } from "./skill-catalog"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
-
-const SKILL_CATALOG_REMINDER_MARKER = "Skills available in this session:"
 
 // Recall-reminder hints, rendered in each tool's configured invocation style so
 // shell-mode sessions never see a JSON-shaped example (which primes models to
@@ -930,7 +929,7 @@ export const layer = Layer.effect(
         : undefined
       const existingCatalogs = input.messages.flatMap((message) =>
         message.parts.flatMap((part) =>
-          part.type === "text" && part.synthetic && !part.ignored && part.text.includes(SKILL_CATALOG_REMINDER_MARKER)
+          part.type === "text" && part.synthetic && !part.ignored && isSkillCatalogReminder(part.text)
             ? [{ message, part }]
             : [],
         ),

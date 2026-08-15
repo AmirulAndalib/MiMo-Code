@@ -131,6 +131,56 @@ function basePart(messageID: string, id: string) {
 }
 
 describe("session.message-v2.toModelMessage", () => {
+  test("keeps one skills catalog and orders it after the other user content", async () => {
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo("m-skills-first"),
+        parts: [
+          {
+            ...basePart("m-skills-first", "p-catalog-first"),
+            type: "text",
+            text: "<system-reminder>\nSkills available in this session:\nFIRST\n</system-reminder>",
+            synthetic: true,
+          },
+          { ...basePart("m-skills-first", "p-user"), type: "text", text: "hello" },
+          {
+            ...basePart("m-skills-first", "p-other-reminder"),
+            type: "text",
+            text: "<system-reminder>other</system-reminder>",
+            synthetic: true,
+          },
+        ],
+      },
+      {
+        info: userInfo("m-skills-duplicate"),
+        parts: [
+          {
+            ...basePart("m-skills-duplicate", "p-catalog-duplicate"),
+            type: "text",
+            text: "<system-reminder>\nSkills available in this session:\nSECOND\n</system-reminder>",
+            synthetic: true,
+          },
+          { ...basePart("m-skills-duplicate", "p-next-user"), type: "text", text: "continue" },
+        ],
+      },
+    ]
+
+    expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "hello" },
+          { type: "text", text: "<system-reminder>other</system-reminder>" },
+          {
+            type: "text",
+            text: "<system-reminder>\nSkills available in this session:\nFIRST\n</system-reminder>",
+          },
+        ],
+      },
+      { role: "user", content: [{ type: "text", text: "continue" }] },
+    ])
+  })
+
   test("preserves structured provider-executed outputs", async () => {
     const userID = "m-provider-user"
     const assistantID = "m-provider-assistant"
