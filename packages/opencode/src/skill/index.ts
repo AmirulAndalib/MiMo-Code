@@ -220,6 +220,7 @@ const discoverSkills = Effect.fnUntraced(function* (
   if (!Flag.MIMOCODE_DISABLE_EXTERNAL_SKILLS) {
     const externalDirs = EXTERNAL_DIRS.filter((dir) => {
       if (dir === ".claude" && Flag.MIMOCODE_DISABLE_CLAUDE_CODE_SKILLS) return false
+      if (dir === ".agents" && Flag.MIMOCODE_DISABLE_AGENTS_SKILLS) return false
       if (dir === ".codex" && Flag.MIMOCODE_DISABLE_CODEX_SKILLS) return false
       if (dir === ".opencode" && Flag.MIMOCODE_DISABLE_OPENCODE_SKILLS) return false
       return true
