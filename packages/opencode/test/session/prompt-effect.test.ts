@@ -324,17 +324,6 @@ const mcpSuccessResult: CallToolResult = {
 const mcpIt = testEffect(
   makeHttp(
     mcpLayer(() => ({
-      mcp_result: dynamicTool({
-        description: "Return a standard MCP tool execution error",
-        inputSchema: jsonSchema({
-          type: "object",
-          properties: {
-            private_error_code: { type: "string", description: "Secret nested MCP error selector" },
-          },
-          additionalProperties: false,
-        }),
-        execute: async () => mcpErrorResult,
-      }),
       mcp_success: dynamicTool({
         description: "Return a standard structured MCP success result",
         inputSchema: jsonSchema({
@@ -345,6 +334,17 @@ const mcpIt = testEffect(
           additionalProperties: false,
         }),
         execute: async () => mcpSuccessResult,
+      }),
+      mcp_result: dynamicTool({
+        description: "Return a standard MCP tool execution error",
+        inputSchema: jsonSchema({
+          type: "object",
+          properties: {
+            private_error_code: { type: "string", description: "Secret nested MCP error selector" },
+          },
+          additionalProperties: false,
+        }),
+        execute: async () => mcpErrorResult,
       }),
     })),
   ),
@@ -1211,39 +1211,46 @@ mcpIt.live("degrades the MCP catalog to names at high context pressure", () =>
   ),
 )
 
-mcpIt.live("exposes MCP tools directly for non-GPT models by default", () =>
-  provideTmpdirServer(
-    Effect.fnUntraced(function* ({ llm }) {
-      const prompt = yield* SessionPrompt.Service
-      const sessions = yield* Session.Service
-      const session = yield* sessions.create({ title: "Direct non-GPT MCP tools" })
+mcpIt.live(
+  "exposes MCP tools directly for non-GPT models by default",
+  () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const prompt = yield* SessionPrompt.Service
+        const sessions = yield* Session.Service
+        const session = yield* sessions.create({ title: "Direct non-GPT MCP tools" })
 
-      yield* prompt.prompt({
-        sessionID: session.id,
-        agent: "build",
-        model: ref,
-        noReply: true,
-        parts: [{ type: "text", text: "inspect available MCP tools" }],
-      })
-      yield* llm.tool("mcp_success", {})
-      yield* llm.text("done")
-      yield* prompt.loop({ sessionID: session.id })
+        yield* prompt.prompt({
+          sessionID: session.id,
+          agent: "build",
+          model: ref,
+          noReply: true,
+          parts: [{ type: "text", text: "inspect available MCP tools" }],
+        })
+        yield* llm.tool("mcp_success", {})
+        yield* llm.text("done")
+        yield* prompt.loop({ sessionID: session.id })
 
-      const tools = (yield* llm.inputs)[0].tools as Array<Record<string, unknown>>
-      expect(tools.map(wireToolName)).not.toContain("mcp_tool_search")
-      expect(tools.map(wireToolName)).toContain("mcp_result")
-      expect(tools.map(wireToolName)).toContain("mcp_success")
-      expect(
-        (yield* MessageV2.filterCompactedEffect(session.id))
-          .flatMap((message) => message.parts)
-          .some(
-            (part) =>
-              part.type === "tool" && part.tool === "mcp_success" && part.state.status === "completed",
-          ),
-      ).toBe(true)
-    }),
-    { git: true, config: providerCfg },
-  ),
+        const tools = (yield* llm.inputs)[0].tools as Array<Record<string, unknown>>
+        const names = tools.map(wireToolName).filter((name): name is string => name !== undefined)
+        const firstMcp = names.findIndex((name) => name.startsWith("mcp_"))
+        expect(firstMcp).toBeGreaterThan(0)
+        expect(names.slice(firstMcp)).toEqual(["mcp_result", "mcp_success"])
+        expect(tools.map(wireToolName)).not.toContain("mcp_tool_search")
+        expect(tools.map(wireToolName)).toContain("mcp_result")
+        expect(tools.map(wireToolName)).toContain("mcp_success")
+        expect(
+          (yield* MessageV2.filterCompactedEffect(session.id))
+            .flatMap((message) => message.parts)
+            .some(
+              (part) =>
+                part.type === "tool" && part.tool === "mcp_success" && part.state.status === "completed",
+            ),
+        ).toBe(true)
+      }),
+      { git: true, config: providerCfg },
+    ),
+  30_000,
 )
 
 mcpIt.live("rejects direct MCP calls disabled for the request", () =>
