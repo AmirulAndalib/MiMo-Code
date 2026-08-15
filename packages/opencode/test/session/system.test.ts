@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { $ } from "bun"
 import os from "os"
 import path from "path"
@@ -14,7 +14,36 @@ function load<A>(dir: string, fn: (svc: Agent.Interface) => Effect.Effect<A>) {
   return Effect.runPromise(provideInstance(dir)(Agent.Service.use(fn)).pipe(Effect.provide(Agent.defaultLayer)))
 }
 
+const dynamicSystemPrompt = process.env.MIMOCODE_ENABLE_DYNAMIC_SYSTEM_PROMPT
+
+beforeEach(() => {
+  process.env.MIMOCODE_ENABLE_DYNAMIC_SYSTEM_PROMPT = "true"
+})
+
+afterEach(() => {
+  if (dynamicSystemPrompt === undefined) delete process.env.MIMOCODE_ENABLE_DYNAMIC_SYSTEM_PROMPT
+  else process.env.MIMOCODE_ENABLE_DYNAMIC_SYSTEM_PROMPT = dynamicSystemPrompt
+})
+
 describe("session.system", () => {
+  test("does not render dynamic environment information by default", async () => {
+    delete process.env.MIMOCODE_ENABLE_DYNAMIC_SYSTEM_PROMPT
+    await using tmp = await tmpdir({ git: true })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const prompt = await Effect.runPromise(
+          Effect.gen(function* () {
+            return yield* (yield* SystemPrompt.Service).environment(ProviderTest.model(), Date.now())
+          }).pipe(Effect.provide(SystemPrompt.defaultLayer)),
+        )
+
+        expect(prompt).toEqual([])
+      },
+    })
+  })
+
   test("Anthropic template does not contain machine-specific snapshots", () => {
     const prompt = SystemPrompt.provider(
       ProviderTest.model({

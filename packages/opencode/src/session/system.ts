@@ -24,6 +24,7 @@ import type { Agent } from "@/agent/agent"
 import { Permission } from "@/permission"
 import { Skill } from "@/skill"
 import { isSkillSearchDisabled, type SkillSearchModel } from "@/skill/search"
+import { Flag } from "@/flag/flag"
 
 function renderGitResult(result: Git.Result, fallback = "(none)") {
   if (result.exitCode !== 0) return fallback
@@ -69,6 +70,7 @@ export const layer = Layer.effect(
 
     return Service.of({
       environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model, now: number) {
+        if (!Flag.MIMOCODE_ENABLE_DYNAMIC_SYSTEM_PROMPT) return []
         const project = Instance.project
         if (provider(model)[0] === PROMPT_ANTHROPIC) {
           const key = `${Instance.directory}\0${now}\0${model.providerID}\0${model.api.id}`

@@ -1,4 +1,5 @@
 import { Worktree } from "../../src/worktree"
+import { Instance } from "../../src/project/instance"
 import { NodeFileSystem } from "@effect/platform-node"
 import { FetchHttpClient } from "effect/unstable/http"
 import { afterEach, expect } from "bun:test"
@@ -101,6 +102,22 @@ function withSh<A, E, R>(fx: () => Effect.Effect<A, E, R>) {
         if (prev === undefined) delete process.env.SHELL
         else process.env.SHELL = prev
         Shell.preferred.reset()
+      }),
+  )
+}
+
+function withoutDynamicSystemPrompt<A, E, R>(fx: () => Effect.Effect<A, E, R>) {
+  return Effect.acquireUseRelease(
+    Effect.sync(() => {
+      const previous = process.env.MIMOCODE_ENABLE_DYNAMIC_SYSTEM_PROMPT
+      delete process.env.MIMOCODE_ENABLE_DYNAMIC_SYSTEM_PROMPT
+      return previous
+    }),
+    () => fx(),
+    (previous) =>
+      Effect.sync(() => {
+        if (previous === undefined) delete process.env.MIMOCODE_ENABLE_DYNAMIC_SYSTEM_PROMPT
+        else process.env.MIMOCODE_ENABLE_DYNAMIC_SYSTEM_PROMPT = previous
       }),
   )
 }
@@ -654,6 +671,38 @@ it.live("loop calls LLM and returns assistant message", () =>
       expect(yield* llm.hits).toHaveLength(1)
     }),
     { git: true, config: providerCfg },
+  ),
+)
+
+it.live("loop does not inject dynamic system prompt additions", () =>
+  withoutDynamicSystemPrompt(() =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const prompt = yield* SessionPrompt.Service
+        const sessions = yield* Session.Service
+        const marker = "dynamic-instruction-marker"
+        yield* Effect.promise(() => Bun.write(path.join(Instance.directory, "AGENTS.md"), marker))
+        const chat = yield* sessions.create({
+          title: "No cwd",
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        })
+        yield* prompt.prompt({
+          sessionID: chat.id,
+          agent: "build",
+          model: ref,
+          noReply: true,
+          parts: [{ type: "text", text: "hello" }],
+        })
+        yield* llm.text("world")
+
+        yield* prompt.loop({ sessionID: chat.id })
+
+        const inputs = JSON.stringify(yield* llm.inputs)
+        expect(inputs).not.toContain("Working directory:")
+        expect(inputs).not.toContain(marker)
+      }),
+      { git: true, config: providerCfg },
+    ),
   ),
 )
 
