@@ -479,7 +479,7 @@ describe("session.llm system prompt — memory-instructions guard", () => {
     })
   })
 
-  test("MIMOCODE_DISABLE_CHECKPOINT=true — checkpoint sections omitted, MEMORY.md kept", async () => {
+  test("MIMOCODE_DISABLE_CHECKPOINT=true — memory instructions are not appended", async () => {
     const previous = process.env.MIMOCODE_DISABLE_CHECKPOINT
     process.env.MIMOCODE_DISABLE_CHECKPOINT = "true"
     const server = queueState.server!
@@ -536,12 +536,12 @@ describe("session.llm system prompt — memory-instructions guard", () => {
             .map((m) => m.content)
             .join("\n")
 
-          expect(allSys).toContain("# Memory system")
-          expect(allSys).toContain("MEMORY.md")
-          expect(allSys).toContain("Notes scratchpad")
-          expect(allSys).toContain("Subagent return format")
-          expect(allSys).toContain(path.join(Global.Path.data, "memory", "projects", Instance.current.project.id, "MEMORY.md"))
-
+          expect(allSys).not.toContain("# Memory system")
+          expect(allSys).not.toContain("Notes scratchpad")
+          expect(allSys).not.toContain("Subagent return format")
+          expect(allSys).not.toContain(
+            path.join(Global.Path.data, "memory", "projects", Instance.current.project.id, "MEMORY.md"),
+          )
           expect(allSys).not.toContain("checkpoint.md")
           expect(allSys).not.toContain("Active recall protocol")
           expect(allSys).not.toContain("sole curator")

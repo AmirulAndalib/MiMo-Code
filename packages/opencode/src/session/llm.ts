@@ -141,10 +141,7 @@ export const persistentRetrySchedule = Schedule.exponential("500 millis", 2).pip
  * files already present in the rebuild dump, and the Subagent return
  * format contract.
  *
- * When `MIMOCODE_DISABLE_CHECKPOINT` is on, the checkpoint.md / writer /
- * Active-recall sections are omitted so the prompt does not teach a
- * lifecycle that is not running. MEMORY.md, notes.md, and global memory
- * instructions stay.
+ * This block is not appended when `MIMOCODE_DISABLE_CHECKPOINT` is on.
  *
  * `memoryRoot` is the same absolute root returned by Memory.root(), so these
  * paths match the files used by checkpoint restore and memory/task detection.
@@ -343,11 +340,10 @@ const live: Layer.Layer<
       // and have no checkpoint duty; system-spawned actors (checkpoint-writer et al.)
       // are the writers themselves. Shares the exact `servesCheckpoint` judgement
       // with SessionPrune.fireCheckpoints so the "who owns a checkpoint" and "who is
-      // taught about it" sets can never drift apart. MIMOCODE_DISABLE_CHECKPOINT
-      // still injects this block, but strips the checkpoint.md / writer / recall
-      // sections so the prompt does not describe a disabled lifecycle.
+      // taught about it" sets can never drift apart. Disabling checkpoints also
+      // disables this memory-system prompt block.
       const servesCheckpoint = yield* actorReg.servesCheckpoint(SessionID.make(input.sessionID), input.agentID)
-      if (servesCheckpoint) {
+      if (servesCheckpoint && !Flag.MIMOCODE_DISABLE_CHECKPOINT) {
         const projectID =
           (yield* Effect.try({
             try: () => Instance.current?.project?.id as ProjectID | undefined,
