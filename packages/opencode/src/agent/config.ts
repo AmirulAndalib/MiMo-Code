@@ -4,6 +4,15 @@
  */
 export const SYSTEM_SPAWNED_AGENT_TYPES: ReadonlySet<string> = new Set(["checkpoint-writer", "dream", "distill"])
 
+/** Whether an agent sees the `actor` tool: subagents don't, because they must not
+ *  spawn further subagents. Shared by ToolRegistry.available (which masks the tool
+ *  out) and any prompt surface that would otherwise name it — a hint pointing at a
+ *  masked tool costs a wasted call.
+ */
+export function hasActorTool(agent: { name: string; mode: string }) {
+  return agent.mode !== "subagent" || SYSTEM_SPAWNED_AGENT_TYPES.has(agent.name)
+}
+
 export type InvalidOutputPolicy = "primary" | "actor" | "checkpoint"
 
 /** System agents must opt into an invalid-output contract instead of inheriting
