@@ -57,6 +57,7 @@ import { Instruction } from "../session/instruction"
 import { AppFileSystem } from "@mimo-ai/shared/filesystem"
 import { Bus } from "../bus"
 import { Agent } from "../agent/agent"
+import { SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
 import { Skill } from "../skill"
 import { Permission } from "@/permission"
 import { ActorRegistry } from "@/actor/registry"
@@ -395,6 +396,23 @@ export const layer = Layer.effect(
       // rather than an allowlist: every other agent — primaries without an
       // allowlist (build/plan/compose) and subagents — must not see `session`.
       filtered = filtered.filter((tool) => tool.id !== "session" || input.agent.name === "orchestrator")
+
+      // No subagent may spawn further subagents. `actor` is the only tool that
+      // spawns/runs child agents, so mask it out for every `mode: "subagent"`
+      // agent — native (general/explore) AND user-config-defined, which default
+      // to `"*": "allow"` and would otherwise recurse. Gate on mode rather than
+      // agent name so a custom subagent cannot opt itself back in.
+      //
+      // SYSTEM_SPAWNED_AGENT_TYPES are exempt: they are spawned by the runtime,
+      // never by a model, so they pose no recursive-delegation risk. The
+      // exemption is also load-bearing for checkpoint-writer, a fork agent whose
+      // LLM-visible tool schema must stay byte-identical to its (primary) parent's
+      // captured ForkContext.tools or the prefix cache breaks — see ForkContext
+      // JSDoc in actor/spawn.ts. Its real tool authority is the actor.tools
+      // whitelist set in tryStartCheckpointWriter, which already omits `actor`.
+      if (input.agent.mode === "subagent" && !SYSTEM_SPAWNED_AGENT_TYPES.has(input.agent.name)) {
+        filtered = filtered.filter((tool) => tool.id !== ActorTool.id)
+      }
 
       return { filtered, useGPTTools }
     })
