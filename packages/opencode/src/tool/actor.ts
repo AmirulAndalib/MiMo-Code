@@ -18,6 +18,7 @@ import { ActorRegistry } from "@/actor/registry"
 import { ActorWaiter } from "@/actor/waiter"
 import { spawnRef } from "@/actor/spawn-ref"
 import { TaskRegistry } from "@/task/registry"
+import { SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
 import { TaskID } from "@/task/schema"
 import { SessionCheckpoint } from "@/session/checkpoint"
 import { inboxServiceRef } from "@/inbox/inbox-ref"
@@ -691,7 +692,24 @@ export const ActorTool = Tool.define(
 
         // op.action ==="run" or "spawn" — schema guarantees
         // description / prompt / subagent_type are present and non-empty.
+        //
+        // Final defence line for the no-nested-delegation invariant that
+        // ToolRegistry.available already enforces by masking `actor` out of every
+        // subagent's schema: refuse a spawn whose caller is itself a subagent, so
+        // a stale prompt-cached schema or a hand-rolled call site cannot recurse.
+        // bypassAgentCheck marks a dispatch that did NOT originate from a model
+        // deciding to delegate — handleSubtask (where ctx.agent is the CHILD being
+        // spawned, not the caller) and explicit user @agent mentions — so those
+        // legitimately pass through.
         if (!ctx.extra?.bypassAgentCheck) {
+          const caller = yield* agent.get(ctx.agent)
+          if (caller?.mode === "subagent" && !SYSTEM_SPAWNED_AGENT_TYPES.has(caller.name)) {
+            return yield* Effect.fail(
+              new RecoverableError(
+                `Subagents cannot spawn other subagents. You are running as "${caller.name}"; complete this task yourself with the tools available to you.`,
+              ),
+            )
+          }
           yield* ctx.ask({
             permission: "actor",
             patterns: [op.subagent_type],
