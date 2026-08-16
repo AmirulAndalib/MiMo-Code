@@ -25,9 +25,8 @@ describe("recallHintLines", () => {
     expect(lines).toContain(`- actor({ operation: "status", actor_id: "<id>" })`)
   })
 
-  // Guards the positional contract the reminder block relies on: hints[0]=memory,
-  // hints[1]=task, hints[2]=actor. A future edit that reorders the returned array
-  // would silently swap which hint lands in which reminder slot — this catches it.
+  // hints[0]=memory is the only position the reminder body depends on (it spreads
+  // the rest), so this guards that slot plus the default-argument shape.
   test("returned order is [memory, task, actor]", () => {
     const lines = recallHintLines({ invocation_style: "shell" })
     expect(lines).toHaveLength(3)
@@ -52,5 +51,18 @@ describe("hasActorTool", () => {
     expect(hasActorTool({ name: "checkpoint-writer", mode: "subagent" })).toBe(true)
     expect(hasActorTool({ name: "general", mode: "subagent" })).toBe(false)
     expect(hasActorTool({ name: "explore", mode: "subagent" })).toBe(false)
+  })
+
+  // dream/distill are system-spawned, so the mode gate exempts them, but their
+  // toolAllowlist omits `actor` — the schema is what the reminder must follow.
+  test("an allowlist without actor wins over the system-spawned exemption", () => {
+    expect(hasActorTool({ name: "distill", mode: "subagent", toolAllowlist: ["read", "memory"] })).toBe(false)
+    expect(hasActorTool({ name: "build", mode: "primary", toolAllowlist: ["read"] })).toBe(false)
+  })
+
+  // Agent.Service.get is typed `Info` but returns agents[name], absent for a name
+  // no longer in config. The reminder must degrade, not throw, in a runLoop turn.
+  test("an unresolvable agent keeps the hint instead of throwing", () => {
+    expect(hasActorTool(undefined)).toBe(true)
   })
 })
