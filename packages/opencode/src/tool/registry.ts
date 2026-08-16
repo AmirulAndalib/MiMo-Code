@@ -57,7 +57,7 @@ import { Instruction } from "../session/instruction"
 import { AppFileSystem } from "@mimo-ai/shared/filesystem"
 import { Bus } from "../bus"
 import { Agent } from "../agent/agent"
-import { SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
+import { hasActorTool } from "@/agent/config"
 import { Skill } from "../skill"
 import { Permission } from "@/permission"
 import { ActorRegistry } from "@/actor/registry"
@@ -410,7 +410,9 @@ export const layer = Layer.effect(
       // captured ForkContext.tools or the prefix cache breaks — see ForkContext
       // JSDoc in actor/spawn.ts. Its real tool authority is the actor.tools
       // whitelist set in tryStartCheckpointWriter, which already omits `actor`.
-      if (input.agent.mode === "subagent" && !SYSTEM_SPAWNED_AGENT_TYPES.has(input.agent.name)) {
+      // The condition lives in hasActorTool so prompt surfaces that name the tool
+      // read the same gate.
+      if (!hasActorTool(input.agent)) {
         filtered = filtered.filter((tool) => tool.id !== ActorTool.id)
       }
 

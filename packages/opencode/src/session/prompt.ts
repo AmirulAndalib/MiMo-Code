@@ -8,7 +8,7 @@ import { Log, Token } from "../util"
 import { SessionRevert } from "./revert"
 import * as Session from "./session"
 import { Agent } from "../agent/agent"
-import { decideAskRouting, resolveInvalidOutputPolicy, SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
+import { decideAskRouting, hasActorTool, resolveInvalidOutputPolicy, SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
 import { renderActorNotification } from "@/inbox/render"
 import { parseReturnHeader } from "@/actor/return-header"
 import { Provider } from "../provider"
@@ -128,8 +128,9 @@ globalThis.AI_SDK_LOG_WARNINGS = false
 // Recall-reminder hints, rendered in each tool's configured invocation style so
 // shell-mode sessions never see a JSON-shaped example (which primes models to
 // emit JSON and crash the shell parser). `memory` has no shell form, so it is
-// always JSON. Exported for unit testing.
-export function recallHintLines(toolCfg: ToolStyleConfig | undefined): string[] {
+// always JSON. `hasActor` false drops the actor line for an agent the tool is
+// masked out for. Exported for unit testing.
+export function recallHintLines(toolCfg: ToolStyleConfig | undefined, hasActor = true): string[] {
   const taskHint =
     resolveInvocationStyle(toolCfg, "task") === "shell" ? "- task list" : `- task({ operation: "list" })`
   const actorHint =
@@ -137,7 +138,7 @@ export function recallHintLines(toolCfg: ToolStyleConfig | undefined): string[] 
       ? "- actor status <actor_id>"
       : `- actor({ operation: "status", actor_id: "<id>" })`
   // memory has no shell form (no shell.parse) → always JSON.
-  return [`- memory({ operation: "search", query: "<keyword>" })`, taskHint, actorHint]
+  return [`- memory({ operation: "search", query: "<keyword>" })`, taskHint, ...(hasActor ? [actorHint] : [])]
 }
 
 // The orchestrator root session is PERSISTENT and coordinates many tasks over
@@ -3346,7 +3347,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               .pipe(Effect.catch(() => Effect.succeed(false)))
             if (hasRecallTarget) {
               const sessMemDir = path.join(Global.Path.data, "memory", "sessions", sessionID)
-              const hints = recallHintLines((yield* config.get()).tool)
+              const hints = recallHintLines(
+                (yield* config.get()).tool,
+                hasActorTool(yield* agents.get(lastUser.agent)),
+              )
               lastUserMsgForRecall.parts.push({
                 id: PartID.ascending(),
                 messageID: lastUserMsgForRecall.info.id,
@@ -3359,8 +3363,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   "not in your context with:",
                   hints[0],
                   `- Read(file_path="${sessMemDir}/...")`,
-                  hints[1],
-                  hints[2],
+                  ...hints.slice(1),
                   "",
                   "Don't ask the user about something memory may already record.",
                   "</system-reminder>",

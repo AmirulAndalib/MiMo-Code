@@ -1,8 +1,25 @@
+import type { Info } from "./agent"
+
 /** Agent types that are spawned by the runtime (prune, scheduler, system code),
  *  NOT by the model. They get tool whitelist defaults and are skipped by
  *  prune/bootstrap/memory/recall scans.
  */
 export const SYSTEM_SPAWNED_AGENT_TYPES: ReadonlySet<string> = new Set(["checkpoint-writer", "dream", "distill"])
+
+/** Whether the `actor` tool is in an agent's schema: subagents don't get it,
+ *  because they must not spawn further subagents, and neither does an agent whose
+ *  toolAllowlist omits it (dream/distill). Read by ToolRegistry.available (which
+ *  applies the mask) and by prompt surfaces that would otherwise name the tool, so
+ *  the schema and the prose can't drift apart. Accepts undefined because
+ *  `Agent.Service.get` is typed `Info` but returns `agents[name]`, which is absent
+ *  for a name no longer in config; an unresolvable agent keeps the tool, matching
+ *  prior behavior.
+ */
+export function hasActorTool(agent: Pick<Info, "name" | "mode" | "toolAllowlist"> | undefined) {
+  if (!agent) return true
+  if (agent.toolAllowlist && !agent.toolAllowlist.includes("actor")) return false
+  return agent.mode !== "subagent" || SYSTEM_SPAWNED_AGENT_TYPES.has(agent.name)
+}
 
 export type InvalidOutputPolicy = "primary" | "actor" | "checkpoint"
 
