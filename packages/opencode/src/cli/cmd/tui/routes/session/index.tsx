@@ -1,5 +1,4 @@
 import {
-  batch,
   createContext,
   createEffect,
   createMemo,
@@ -16,7 +15,7 @@ import { Dynamic } from "solid-js/web"
 import path from "path"
 import { useCurrentAgentID, useRoute, useRouteData } from "@tui/context/route"
 import { useProject } from "@tui/context/project"
-import { useSync } from "@tui/context/sync"
+import { selectMessages, useSync } from "@tui/context/sync"
 import { useEvent } from "@tui/context/event"
 import { SplitBorder } from "@tui/component/border"
 import { Spinner } from "@tui/component/spinner"
@@ -34,6 +33,7 @@ import type {
 } from "@mimo-ai/sdk/v2"
 import { useLocal } from "@tui/context/local"
 import { Locale } from "@/util"
+import { verifySessionRenderable, type SessionActorInput } from "@/session/visibility"
 import type { Tool } from "@/tool"
 import type { ReadTool } from "@/tool/read"
 import type { WriteTool } from "@/tool/write"
@@ -67,10 +67,13 @@ import { DialogPrompt } from "@tui/ui/dialog-prompt"
 import { DialogTimeline } from "./dialog-timeline"
 import { DialogForkFromTimeline } from "./dialog-fork-from-timeline"
 import { DialogSessionRename } from "../../component/dialog-session-rename"
-import { Sidebar } from "./sidebar"
+import { Sidebar, SIDEBAR_WIDTH } from "./sidebar"
+import { sidebarToggle, sidebarVisibleFor, type SidebarPreference } from "./sidebar-state"
+import { createPress } from "../../ui/press"
 import { WorkflowTree } from "@tui/component/workflow-tree"
 import { SubagentFooter } from "./subagent-footer.tsx"
 import { DialogSubagent } from "./dialog-subagent.tsx"
+import { isActorToolRunning } from "./actor-tool-state"
 import { Flag } from "@/flag/flag"
 import { parseActorNotification } from "@/inbox/render"
 import { LANGUAGE_EXTENSIONS } from "@/lsp/language"
@@ -98,6 +101,8 @@ import { DialogGoUpsell } from "../../component/dialog-go-upsell"
 import { DialogTokenPlan } from "../../component/dialog-token-plan"
 import { SessionRetry } from "@/session/retry"
 import { getRevertDiffFiles } from "../../util/revert-diff"
+import * as Collapse from "../../util/collapse"
+import { planSwitchTarget } from "./plan-switch"
 import {
   createFreeApiSunsetSignal,
   freeApiModelNameKey,
@@ -138,19 +143,19 @@ function use() {
 
 function SidebarToggleButton(props: { visible: boolean; onToggle: () => void }) {
   const { theme } = useTheme()
-  const [hover, setHover] = createSignal(false)
+  const press = createPress(() => props.onToggle())
   return (
     <box
       width={3}
       height="100%"
       justifyContent="flex-start"
       alignItems="center"
-      backgroundColor={hover() ? theme.backgroundElement : undefined}
-      onMouseOver={() => setHover(true)}
-      onMouseOut={() => setHover(false)}
-      onMouseUp={() => props.onToggle()}
+      backgroundColor={press.hover() ? theme.backgroundElement : undefined}
+      {...press.props}
     >
-      <text fg={hover() ? theme.text : theme.textMuted}>{props.visible ? "▶" : "◀"}</text>
+      <text selectable={false} fg={press.hover() ? theme.text : theme.textMuted}>
+        {props.visible ? "▶" : "◀"}
+      </text>
     </box>
   )
 }
@@ -170,16 +175,9 @@ export function Session() {
   const session = createMemo(() => sync.session.get(route.sessionID))
   const currentAgentID = useCurrentAgentID()
   const actors = createMemo(() => sync.data.actor[route.sessionID] ?? [])
-  const messages = createMemo(() => {
-    const buckets = sync.data.message[route.sessionID]
-    const agentID = currentAgentID()
-    // A peer child runs its own turns under agentID == its own sessionID
-    // (spawn.ts), so its messages bucket under [sessionID] not ["main"]. When
-    // attaching to such a child at "main", fall back to its own-id bucket so the
-    // full session renders instead of an empty "main" view.
-    if (agentID === "main" && !buckets?.["main"]?.length) return buckets?.[route.sessionID] ?? []
-    return buckets?.[agentID] ?? []
-  })
+  const messages = createMemo(() =>
+    selectMessages(sync.data.message[route.sessionID], currentAgentID(), route.sessionID),
+  )
   const permissions = createMemo(() => sync.data.permission[route.sessionID] ?? [])
   const questions = createMemo(() => sync.data.question[route.sessionID] ?? [])
   const visible = createMemo(
@@ -199,8 +197,7 @@ export function Session() {
   })
 
   const dimensions = useTerminalDimensions()
-  const [sidebar, setSidebar] = kv.signal<"auto" | "hide">("sidebar", "auto")
-  const [sidebarOpen, setSidebarOpen] = createSignal(false)
+  const [sidebar, setSidebar] = kv.signal<SidebarPreference>("sidebar", "auto")
   const [conceal, setConceal] = createSignal(true)
   const thinking = useThinkingMode()
   const thinkingMode = thinking.mode
@@ -232,14 +229,14 @@ export function Session() {
   const fromWorkflowRunID = createMemo(() => route.fromWorkflowRunID)
 
   const wide = createMemo(() => dimensions().width > 120)
-  const sidebarVisible = createMemo(() => {
-    if (currentAgentID() !== "main") return false
-    if (sidebarOpen()) return true
-    if (sidebar() === "auto" && wide()) return true
-    return false
-  })
+  // Subagent views have no sidebar at all, so neither the panel nor its control belongs there.
+  const sidebarAllowed = createMemo(() => currentAgentID() === "main")
+  const sidebarVisible = createMemo(() => sidebarAllowed() && sidebarVisibleFor(sidebar(), wide()))
+  // Only a docked sidebar consumes layout width; the narrow overlay floats above the transcript.
+  const sidebarDocked = createMemo(() => sidebarVisible() && wide())
+  const toggleSidebar = () => setSidebar(() => sidebarToggle(sidebar(), wide()))
   const showTimestamps = createMemo(() => timestamps() === "show")
-  const contentWidth = createMemo(() => dimensions().width - (sidebarVisible() ? 42 : 0) - 4)
+  const contentWidth = createMemo(() => dimensions().width - (sidebarDocked() ? SIDEBAR_WIDTH : 0) - 4)
   const providers = createMemo(() => Model.index(sync.data.provider))
 
   const scrollAcceleration = createMemo(() => getScrollAcceleration(tuiConfig))
@@ -252,6 +249,37 @@ export function Session() {
     if (!result.data) {
       toast.show({
         message: `Session not found: ${route.sessionID}`,
+        variant: "error",
+      })
+      navigate({ type: "home" })
+      return
+    }
+
+    // The prohibition. Every way of reaching this route hands a raw session id
+    // straight to the renderer and bypasses both hiding layers: -s/--session
+    // (thread.ts → app.tsx), `attach --session`, POST /tui/select-session, POST
+    // /tui/event, the session tool's `switch`, MIMOCODE_ROUTE, plugin
+    // navigate("session", …) and the session-list dialog's child injection. This
+    // effect is the one point all of them must pass, so the refusal lives here
+    // rather than on any single entry point. What counts as forbidden lives in
+    // session/visibility.ts: a host for a RUNTIME-spawned agent, which today
+    // means the checkpoint writer. It reads the session's own actor rows, so no
+    // parent round-trip is needed.
+    const verdict = await verifySessionRenderable(result.data, (sessionID) =>
+      // `throwOnError` is load-bearing, not tidiness: without it this client
+      // RESOLVES `{ data: undefined }` on an HTTP error, which the classifier
+      // reads as "this session has no actor rows" and renders. The failure has to
+      // arrive as a rejection for the gate to see it as unverified rather than as
+      // verified-absent.
+      // SessionActorsResponses[200] is generated as `unknown`, so the shape is
+      // asserted here exactly as sync.tsx does for the same endpoint.
+      sdk.client.session
+        .actors({ sessionID }, { throwOnError: true })
+        .then((res) => res.data as SessionActorInput[] | undefined),
+    )
+    if (!verdict.renderable) {
+      toast.show({
+        message: `Cannot open session: ${verdict.reason}`,
         variant: "error",
       })
       navigate({ type: "home" })
@@ -278,16 +306,12 @@ export function Session() {
     const part = evt.properties.part
     if (part.type !== "tool") return
     if (part.sessionID !== route.sessionID) return
-    if (part.state.status !== "completed") return
     if (part.id === lastSwitch) return
 
-    if (part.tool === "plan_exit" && part.state.metadata?.switched) {
-      local.agent.set("build")
-      lastSwitch = part.id
-    } else if (part.tool === "plan_enter") {
-      local.agent.set("plan")
-      lastSwitch = part.id
-    }
+    const agent = planSwitchTarget(part)
+    if (!agent) return
+    local.agent.set(agent)
+    lastSwitch = part.id
   })
 
   let seeded = false
@@ -767,12 +791,9 @@ export function Session() {
       value: "session.sidebar.toggle",
       keybind: "sidebar_toggle",
       category: "session",
+      enabled: sidebarAllowed(),
       onSelect: (dialog) => {
-        batch(() => {
-          const isVisible = sidebarVisible()
-          setSidebar(() => (isVisible ? "hide" : "auto"))
-          setSidebarOpen(!isVisible)
-        })
+        toggleSidebar()
         dialog.clear()
       },
     },
@@ -1453,17 +1474,8 @@ export function Session() {
           </Show>
           <Toast />
         </box>
-        <Show when={wide() || sidebarVisible()}>
-          <SidebarToggleButton
-            visible={sidebarVisible()}
-            onToggle={() => {
-              batch(() => {
-                const isVisible = sidebarVisible()
-                setSidebar(() => (isVisible ? "hide" : "auto"))
-                setSidebarOpen(!isVisible)
-              })
-            }}
-          />
+        <Show when={sidebarAllowed() && wide()}>
+          <SidebarToggleButton visible={sidebarVisible()} onToggle={toggleSidebar} />
         </Show>
         <Show when={sidebarVisible()}>
           <Switch>
@@ -1471,15 +1483,19 @@ export function Session() {
               <Sidebar sessionID={route.sessionID} />
             </Match>
             <Match when={!wide()}>
+              {/* The control rides inside the overlay so it keeps the same position
+                  relative to the sidebar as when docked: immediately to its left. */}
               <box
                 position="absolute"
                 top={0}
                 left={0}
                 right={0}
                 bottom={0}
-                alignItems="flex-end"
+                flexDirection="row"
+                justifyContent="flex-end"
                 backgroundColor={RGBA.fromInts(0, 0, 0, 70)}
               >
+                <SidebarToggleButton visible={sidebarVisible()} onToggle={toggleSidebar} />
                 <Sidebar sessionID={route.sessionID} />
               </box>
             </Match>
@@ -1535,7 +1551,26 @@ function UserMessage(props: {
       return parsed ? [parsed] : []
     })[0]
   })
+  // Checkpoint-off notices stay synthetic + ignored so undo, title prediction,
+  // and model context never treat them as user input. Render the engine's
+  // stable notice text explicitly instead of exposing it through text().
+  const checkpointOffNotice = createMemo(() => {
+    return props.parts.flatMap((x) => {
+      if (x.type !== "text" || !x.synthetic || !x.ignored) return []
+      const origin = (x.metadata as { origin?: { kind?: string } } | undefined)?.origin
+      return origin?.kind === "checkpoint-off" ? [x.text] : []
+    })[0]
+  })
+  // A context rebuild (`/rebuild`) inserts a single user message carrying a
+  // `checkpoint` part plus `synthetic: true` text parts (the rendered context
+  // and index). Neither renders — `checkpoint` has no PART_MAPPING entry and
+  // synthetic text is excluded from `text()` above — so the boundary used to be
+  // completely invisible in the transcript, unlike compaction which at least
+  // leaves a visible summary message behind. Surface it as a one-line marker
+  // row so the user can see that a rebuild happened and where.
+  const rebuildBoundary = createMemo(() => props.parts.some((x) => x.type === "checkpoint"))
   const { theme } = useTheme()
+  const t = useLanguage().t
   const [hover, setHover] = createSignal(false)
   const queued = createMemo(() => props.pending && props.message.id > props.pending)
   const color = createMemo(() => local.agent.color(props.message.agent))
@@ -1601,6 +1636,27 @@ function UserMessage(props: {
             </box>
           )
         }}
+      </Show>
+      <Show when={checkpointOffNotice()}>
+        {(notice) => (
+          <box id={props.message.id} marginTop={props.index === 0 ? 0 : 1} paddingLeft={2} flexDirection="row" gap={1}>
+            <text fg={theme.textMuted}>
+              <span style={{ bg: theme.backgroundElement, fg: theme.warning, bold: true }}> checkpoint off </span>
+              <span style={{ fg: theme.text }}> {notice()}</span>
+            </text>
+          </box>
+        )}
+      </Show>
+      <Show when={rebuildBoundary()}>
+        <box id={props.message.id} marginTop={props.index === 0 ? 0 : 1} paddingLeft={2} flexDirection="row" gap={1}>
+          <text fg={theme.textMuted}>
+            <span style={{ bg: theme.backgroundElement, fg: theme.primary, bold: true }}>
+              {" "}
+              ⟲ {t("tui.session.rebuild_boundary.label")}{" "}
+            </span>
+            <span style={{ fg: theme.textMuted }}> {t("tui.session.rebuild_boundary.detail")}</span>
+          </text>
+        </box>
       </Show>
       <Show when={text() && !actorNotification()}>
         <box
@@ -2284,10 +2340,12 @@ function WorkItemTask(props: ToolProps<typeof TaskTool>) {
   )
 }
 
-// Renderer for the `exec` batch-orchestration tool. Default view is a
-// single InlineTool line — spinner + live aggregated call counts while running
-// (published through ctx.metadata), one muted summary line when done. Clicking
-// swaps to the full BlockTool with code, result, logs and per-call trace.
+// Renderer for the `exec` batch-orchestration tool. Collapsed view is a compact
+// BlockTool: summary title (spinner + live aggregated call counts published
+// through ctx.metadata) plus the last few sub-calls — one bordered clickable
+// unit, visible while running and kept after completion. Clicking swaps to the
+// full BlockTool with code, result, logs and trace. Before any sub-call lands
+// it stays a one-line InlineTool.
 function ToolScript(props: ToolProps<typeof ToolScriptTool>) {
   const { theme } = useTheme()
   const [expanded, setExpanded] = createSignal(false)
@@ -2312,29 +2370,70 @@ function ToolScript(props: ToolProps<typeof ToolScriptTool>) {
     if (isRunning()) return base
     return failed() ? `${status()} · ${base}` : base
   })
+  // Per-call trace tail published live via ctx.metadata (see publishProgress
+  // in tool-script.ts). Shown under the summary line while running AND after
+  // completion — the terminal returns re-publish it (completeToolCall replaces
+  // part metadata) so the trace doesn't vanish the moment a run finishes.
+  type RecentCall = { name: string; status: string; durationMs: number; error?: string }
+  const recent = createMemo(() => {
+    const r = meta().recent as RecentCall[] | undefined
+    return Array.isArray(r) ? r : []
+  })
+  const recentLines = createMemo(() =>
+    recent()
+      .slice(-5)
+      .map(
+        (t) =>
+          `  ${t.status === "error" ? "✗" : "✓"} ${t.name} [${t.durationMs}ms]${t.error ? ` ${t.error.slice(0, 80)}` : ""}`,
+      ),
+  )
+  // exec embeds nested tool output (a `bash` call's stdout) into <return_value>
+  // and <logs>, so escape sequences reach this renderer raw.
+  const output = createMemo(() => stripAnsi(props.output?.trim() ?? ""))
 
   return (
     <Show
       when={expanded()}
       fallback={
-        <InlineTool
-          icon="»"
-          iconColor={failed() ? theme.error : undefined}
-          pending="Writing script..."
-          complete={!isRunning()}
-          spinner={isRunning()}
-          part={props.part}
-          onClick={() => setExpanded(true)}
+        // Collapsed: ONE compact BlockTool holding the summary title and the
+        // sub-call trace — a single bordered, hover-highlighted, clickable
+        // unit. An InlineTool with a loose text underneath read as two
+        // elements and the click target was easy to miss.
+        <Show
+          when={recentLines().length > 0}
+          fallback={
+            <InlineTool
+              icon="»"
+              pending="Writing script..."
+              complete={!isRunning()}
+              spinner={isRunning()}
+              part={props.part}
+              onClick={() => setExpanded(true)}
+            >
+              exec {summary()}
+            </InlineTool>
+          }
         >
-          exec {summary()}
-        </InlineTool>
+          <BlockTool
+            title={`# exec · ${summary()}`}
+            part={props.part}
+            spinner={isRunning()}
+            onClick={() => setExpanded(true)}
+          >
+            <text fg={theme.textMuted}>{recentLines().join("\n")}</text>
+            <text fg={theme.textMuted}>Click to expand</text>
+          </BlockTool>
+        </Show>
       }
     >
       <BlockTool title={`# exec · ${summary()}`} part={props.part} onClick={() => setExpanded(false)}>
         <box gap={1}>
           <text fg={theme.textMuted}>{((props.input.code as string | undefined) ?? "").trim()}</text>
-          <Show when={props.output}>
-            <text fg={failed() ? theme.error : theme.text}>{props.output}</text>
+          <Show when={recentLines().length > 0}>
+            <text fg={theme.textMuted}>{recentLines().join("\n")}</text>
+          </Show>
+          <Show when={output()}>
+            <text fg={failed() ? theme.error : theme.text}>{output()}</text>
           </Show>
           <text fg={theme.textMuted}>Click to collapse</text>
         </box>
@@ -2490,7 +2589,7 @@ function WorkflowPanel(props: {
     >
       <box flexDirection="row" gap={1} paddingLeft={3}>
         <Show when={props.running} fallback={<text fg={theme.accent} attributes={TextAttributes.BOLD}>⚡</text>}>
-          <spinner frames={["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]} interval={80} color={theme.accent} />
+          <Spinner color={theme.accent} />
         </Show>
         <text attributes={TextAttributes.BOLD} fg={theme.accent}>
           {props.name}
@@ -2760,7 +2859,6 @@ function CollapsibleError(props: { error: string; paddingLeft?: number }) {
 
 function InlineTool(props: {
   icon: string
-  iconColor?: RGBA
   complete: any
   pending: string
   spinner?: boolean
@@ -2847,7 +2945,7 @@ function InlineTool(props: {
         <Match when={true}>
           <text paddingLeft={3} fg={fg()} attributes={denied() || recoverable() || props.dismissed ? TextAttributes.STRIKETHROUGH : undefined}>
             <Show fallback={<>~ {props.pending}</>} when={props.complete}>
-              <span style={{ fg: props.iconColor }}>{props.icon}</span> {props.children}
+              {props.icon} {props.children}
             </Show>
           </text>
         </Match>
@@ -2908,27 +3006,27 @@ function BlockTool(props: {
 
 const TOOL_COLLAPSE_MAX_LINES = 3
 const TOOL_COLLAPSE_MAX_LINE_LENGTH = 120
-
-function displayLines(content: string) {
-  if (!content) return []
-  return content.replace(/\n$/, "").split("\n")
-}
+// Height budget for block-shaped tools (bash, exec) whose collapsed state still
+// shows content — collapsing caps the flood, it doesn't hide the output. Counted
+// in rendered rows, see @tui/util/collapse.
+const TOOL_BLOCK_COLLAPSE_MAX_ROWS = 10
 
 function hasLongDisplayLine(content: string) {
-  return displayLines(content).some((line) => line.length > TOOL_COLLAPSE_MAX_LINE_LENGTH)
+  return Collapse.lines(content).some((line) => line.length > TOOL_COLLAPSE_MAX_LINE_LENGTH)
 }
 
 function Bash(props: ToolProps<typeof BashTool>) {
   const { theme } = useTheme()
+  const ctx = use()
   const sync = useSync()
   const isRunning = createMemo(() => props.part.state.status === "running")
   const output = createMemo(() => stripAnsi(props.metadata.output?.trim() ?? ""))
   const [expanded, setExpanded] = createSignal(false)
-  const lines = createMemo(() => output().split("\n"))
-  const overflow = createMemo(() => lines().length > 10)
+  const columns = createMemo(() => Collapse.columns(ctx.width))
+  const overflow = createMemo(() => Collapse.rows(output(), columns()) > TOOL_BLOCK_COLLAPSE_MAX_ROWS)
   const limited = createMemo(() => {
-    if (expanded() || !overflow()) return output()
-    return [...lines().slice(0, 10), "…"].join("\n")
+    if (expanded()) return output()
+    return Collapse.clip(output(), columns(), TOOL_BLOCK_COLLAPSE_MAX_ROWS)
   })
 
   const workdirDisplay = createMemo(() => {
@@ -2992,7 +3090,7 @@ function Write(props: ToolProps<typeof WriteTool>) {
     if (!props.input.content) return ""
     return props.input.content
   })
-  const lineCount = createMemo(() => displayLines(code()).length)
+  const lineCount = createMemo(() => Collapse.lines(code()).length)
   const collapsed = createMemo(() => lineCount() > TOOL_COLLAPSE_MAX_LINES || hasLongDisplayLine(code()))
 
   return (
@@ -3206,12 +3304,11 @@ function Task(props: ToolProps<typeof ActorTool>) {
   )
 
   const isRunning = createMemo(() => {
-    if (props.part.state.status === "running") return true
-    if (props.part.state.status === "completed") {
-      const status = actorStatus()
-      return status === "running" || status === "pending"
-    }
-    return false
+    return isActorToolRunning({
+      partStatus: props.part.state.status,
+      action: inputAction(),
+      actorStatus: actorStatus(),
+    })
   })
 
   const duration = createMemo(() => {

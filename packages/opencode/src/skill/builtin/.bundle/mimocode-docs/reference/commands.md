@@ -29,7 +29,9 @@ Invoked from the shell. `mimo` with no command opens the TUI.
 
 Run `mimo <command> --help` for flags on any command.
 
-Notable TUI flags: `--continue`/`-c` (resume last session), `--session`/`-s`, `--model`/`-m`, `--agent`, `--never-ask`, `--trust`, and `--dangerously-skip-permissions` (auto-approve everything not explicitly denied; prompts once for confirmation — see permissions.md).
+Notable TUI flags: `--continue`/`-c` (resume last session), `--session`/`-s`, `--model`/`-m`, `--agent`, `--never-ask`, `--trust`, and `--dangerously-skip-permissions`/`--yolo` (auto-approve everything not explicitly denied; prompts once for confirmation — see permissions.md).
+
+For terminal compatibility, TUI rendering or lag, and local rendering over SSH with `mimo serve` + `mimo attach`, see @guide.md.
 
 ## Slash commands (inside the TUI)
 
@@ -60,6 +62,7 @@ Most client commands run only when the whole input is the command. `/btw <questi
 | `/themes` | — | Choose a color theme |
 | `/background` | — | Choose the home-screen background |
 | `/logo` | — | Choose the home-screen logo style |
+| `/vivid` | — | Toggle Vivid and Minimal visuals |
 | `/dark` | — | Switch to dark mode |
 | `/light` | — | Switch to light mode |
 | `/help` | — | Open command help |
@@ -110,6 +113,7 @@ These commands submit a predefined prompt to the agent and may accept trailing a
 | `/dream [focus]` | Consolidate durable knowledge from recent work into project memory |
 | `/distill [focus]` | Package repeated workflows into skills, subagents, or commands |
 | `/rebuild` | Rebuild conversation context from the latest checkpoint while keeping recent messages verbatim |
+| `/context-limit` | Pick where the current model compacts (`200K`/`300K`/`500K`/`1M`/custom, or the model default); persists per model as `compaction.max_context`. Refuses while a session is running, because the config write reloads the instance |
 | `/deep-research <question>` | Run deep multi-source research; the prompt-command implementation requires the workflow experiment |
 | `/loops [cancel <id>]` | List or cancel scheduled jobs; requires the cron experiment |
 
@@ -126,6 +130,7 @@ The slash menu also includes commands discovered at runtime:
 ## Keybindings
 
 - `Tab` — cycle primary agents (build → plan → compose). After the first message the mode locks: Build and Plan can still switch between each other, but Compose is isolated — it can't be entered mid-session, and a session started in Compose stays there. (Many models ignore tools injected mid-conversation; a fixed skill/tool set from session start improves tool-call reliability.)
+- Entering plan mode is a user gesture: `Tab` (or the agent dialog) — there is no `plan_enter` tool, so the agent cannot put you in plan mode and will not offer to unless you raise it. Leaving works either way: `Tab` back, or the agent calls `plan_exit` to ask you to approve the finished plan and return to build.
 - Other keybinds are configurable; the keybinds config module governs them.
 
 ## Notes

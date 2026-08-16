@@ -18,7 +18,7 @@
 
 MiMoCode 是一个终端原生的 AI 编程助手。它能读写代码、执行命令、管理 Git，通过持久化记忆系统，在多次会话间保持对你项目的深度理解，并自我进化。
 
-内置 MiMo Auto 限时免费通道——零配置即可开始使用。也支持接入各家主流 LLM 厂商 API。
+支持接入各家主流 LLM 厂商 API。
 
 ---
 
@@ -39,7 +39,6 @@ mimo
 ```
 
 首次启动自动引导配置。支持：
-- **MiMo Auto（限时免费）** — 匿名通道，零配置
 - **小米 MiMo 平台** — OAuth 登录
 - **Codex（ChatGPT Pro/Plus）** — OpenAI OAuth 登录
 - **从 Claude Code 导入** — 一键迁移已有认证
@@ -53,6 +52,36 @@ mimo
 ```bash
 sudo apt install xsel
 ```
+</details>
+
+<details>
+<summary><strong>macOS：默认终端渲染异常</strong></summary>
+
+MiMoCode 不支持 macOS 自带的“终端”（Terminal.app）。如果界面出现错位、闪烁或其他渲染异常，请改用 [iTerm2](https://iterm2.com/) 或 VS Code 集成终端：
+
+```bash
+brew install --cask iterm2
+```
+</details>
+
+<details>
+<summary><strong>TUI 卡顿与视觉动画问题</strong></summary>
+
+如果通过 SSH 直接运行 TUI 时卡顿，可以让 TUI 在本地渲染，远端只运行 MiMoCode 服务。先在远端项目目录中启动服务：
+
+```bash
+# 远端主机
+mimo serve --port 4096
+
+# 本地主机：建立 SSH 端口转发
+ssh -N -L 4096:127.0.0.1:4096 user@remote-host
+
+# 本地主机：在另一个终端连接远端 MiMoCode
+mimo attach http://127.0.0.1:4096
+```
+
+如果卡顿来自装饰性动画，可以运行 `/vivid`，或在 `ctrl+p` 命令面板中设置“丰富显示”，根据实际情况在丰富视觉模式和简洁模式间切换。
+
 </details>
 
 <details>
@@ -109,6 +138,38 @@ sudo apt install xsel
 - **自动检查点** — 根据模型上下文窗口自动决定什么时候保存会话状态
 - **上下文重建** — 当上下文接近上限时，从最新 checkpoint、项目记忆、任务进展和保留的近期消息重建上下文，让 agent 继续当前任务
 - **预算化注入** — 用 token budget 控制 checkpoint / memory / notes 注入上下文的大小，按重要性排序
+- **压缩点可调** — `/context-limit`（或 `compaction.max_context`）让模型比自身窗口更早压缩，按模型生效
+
+<details>
+<summary><strong>比模型窗口更早压缩（<code>/context-limit</code>）</strong></summary>
+
+压缩默认在略低于模型上下文窗口处触发。执行 `/context-limit` 可为当前模型选一个更小的工作预算
+—— `200K` / `300K` / `500K` / `1M` 或自定义值 —— 按模型存为 `compaction.max_context`：
+
+```jsonc
+{
+  "compaction": {
+    "max_context": {
+      "openai/gpt-5.6": "272K", // token 数、"300K"、"1M"，或窗口的 "50%"
+      "anthropic/*": "300K" // 支持通配符，最长模式优先
+    }
+  }
+}
+```
+
+该值始终会被 clamp 到厂商实际接受的上限，因此只能把压缩点调低，不能调高。填 `0` 恢复模型自身窗口。
+
+什么时候需要它：
+
+- **计费档位。** OpenAI 对 GPT-5.6 超过 272K input 的请求按 2x input、1.5x output 计费，且作用于整个请求。
+- **标称窗口不等于你能用到的窗口。** 同一个模型经由 ChatGPT/Codex 订阅、直连 API key，还是 OpenRouter
+  这类转售渠道，实际可用窗口可能不同 —— 目录里写 1M 不代表你这条链路给你 1M。
+- **质量与延迟。** 上下文越长越慢，超过某个点也并不更好。
+
+`mimo models <provider>` 会逐个模型打印 MiMoCode 解析出的窗口以及实际压缩的 token 数。输入框底部
+用的就是同一个数字作分母（`33.0K/260K↓ (13%)`，`↓` 表示有预算生效），`/status` 里有完整拆解。
+
+</details>
 
 ### 任务追踪
 
@@ -158,7 +219,7 @@ MiMoCode 打包了以下内置技能：
 | `arxiv` | 搜索、阅读、引用和分析 arXiv 论文 |
 | `claude-code` | 将编码、测试、审查和 Git 任务委派给 Claude Code CLI |
 | `codex` | 在无头自动化、CI、容器和远程环境中运行及排查 Codex CLI |
-| `compose-next` | 推荐的 spec→ship 功能交付工作流（grill → spec → implement → verify → review → finish）；通过 `/compose-next` 显式调用 |
+| `compose-next` | 推荐的 spec→ship 功能交付工作流；仅在用户明确授意时调用 |
 | `data-analytics` | 通过数据质量、KPI、仪表盘、报告、Notebook 和市场规模测算等工作流分析产品与业务数据 |
 | `deep-research` | 使用并行子智能体和内置 Web 工具生成带引用的多源深度调研报告 |
 | `design-blueprint` | 动手做视觉前先出设计蓝图（DESIGN.md + 决策轨迹）|

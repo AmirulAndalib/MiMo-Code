@@ -67,6 +67,8 @@ export const dict = {
     "Vous cherchez un raccourci ? Demandez {highlight}Quelles commandes slash puis-je utiliser ?{/highlight} directement dans le chat",
   "tui.tips.background":
     "Exécutez {highlight}/background{/highlight} pour définir une image personnalisée comme fond d'écran d'accueil",
+  "tui.tips.vivid":
+    "Exécutez {highlight}/vivid{/highlight} pour basculer entre les affichages enrichi et minimal selon vos besoins",
   "tui.tips.compose_next":
     "Essayez {highlight}/compose-next{/highlight} au lieu de l'agent Compose pour les modèles avancés",
   "tui.tips.undo": "Utilisez {highlight}/undo{/highlight} pour annuler le dernier message et ses modifications",
@@ -279,8 +281,10 @@ export const dict = {
   "tui.skill.skill-creator.description": "Créer, réviser et améliorer des skills d'agent",
   "tui.skill.drive-mimo.description": "Piloter un autre processus MiMoCode — événements JSON headless ou TUI interactive via tmux",
   "tui.skill.research-paper-writing.description": "Rédiger, polir et critiquer des articles académiques avec l'œil d'un relecteur",
+  "tui.skill.playwright.description": "Automatiser de vrais parcours navigateur depuis le terminal",
   "tui.skill.codex.description": "Exécuter Codex CLI de façon autonome dans les scripts, la CI, Docker et Kubernetes",
   "tui.skill.claude-code.description": "Déléguer des tâches de programmation à Claude Code CLI",
+  "tui.skill.grok-build.description": "Utiliser Grok Build depuis la ligne de commande",
   "tui.skill.design-blueprint.description":
     "Produire un plan de design (DESIGN.md + Decision Trace) avant tout mockup",
   "tui.skill.super-research.description":
@@ -358,6 +362,10 @@ export const dict = {
   "tui.command.opencode.status.title": "Voir l'état",
   "tui.command.theme.switch.title": "Changer de thème",
   "tui.command.logo.switch.title": "Changer le design du logo",
+  "tui.command.visual_mode.title_on": "Affichage enrichi - passer en mode minimal",
+  "tui.command.visual_mode.title_off": "Affichage minimal - passer en mode enrichi",
+  "tui.visual_mode.enabled": "Affichage enrichi activé : ciel étoilé et effets du logo restaurés ; météores et indicateurs animés suivent le réglage des animations",
+  "tui.visual_mode.disabled": "Affichage enrichi désactivé : étoiles, météores et effets du logo masqués ; indicateurs stabilisés",
   "tui.dialog.logo.title": "Design du logo",
   "tui.dialog.logo.option.classic": "Classique (gras)",
   "tui.dialog.logo.option.thin": "Fin (demi-bloc)",
@@ -569,14 +577,6 @@ export const dict = {
     "Aucune connexion requise — exécutez simplement mimo. Pour les modèles payants/premium, choisissez plutôt la connexion navigateur MiMo.",
   "cli.providers.mimo_login.decrypt_retry": "Échec du déchiffrement, veuillez réessayer ({remaining} tentatives restantes)",
   "cli.providers.mimo_login.decrypt_exhausted": "Échec du déchiffrement, nombre maximal de tentatives atteint",
-
-  // Question i18n — plan_enter
-  "tui.question.plan_enter.question": "Voulez-vous basculer en mode plan pour une planification structurée ?",
-  "tui.question.plan_enter.header": "Entrer dans le plan",
-  "tui.question.plan_enter.option.0.label": "Oui",
-  "tui.question.plan_enter.option.0.description": "Basculer vers l'agent plan pour une planification en lecture seule",
-  "tui.question.plan_enter.option.1.label": "Non",
-  "tui.question.plan_enter.option.1.description": "Rester dans le mode actuel",
 
   // Question i18n — plan_exit
   "tui.question.plan_exit.question": "Le plan {{plan}} est terminé. Voulez-vous basculer vers l'agent build pour commencer l'implémentation ?",

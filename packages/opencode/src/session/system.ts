@@ -1,6 +1,10 @@
 import { Context, Effect, Layer } from "effect"
+import os from "os"
 
 import { Instance } from "../project/instance"
+import { Git } from "@/git"
+import { Shell } from "@/shell/shell"
+import { which } from "@/util/which"
 
 import PROMPT_ANTHROPIC from "./prompt/anthropic.txt"
 import PROMPT_DEFAULT from "./prompt/default.txt"
@@ -8,7 +12,6 @@ import PROMPT_BEAST from "./prompt/beast.txt"
 import PROMPT_GEMINI from "./prompt/gemini.txt"
 import PROMPT_GPT from "./prompt/gpt.txt"
 import PROMPT_KIMI from "./prompt/kimi.txt"
-import PROMPT_GPT_SUBAGENT_TOOLS from "../agent/prompt/gpt-tools.txt"
 
 import PROMPT_CODEX from "./prompt/codex.txt"
 import PROMPT_DEEPSEEK from "./prompt/deepseek.txt"
@@ -21,7 +24,14 @@ import type { Agent } from "@/agent/agent"
 import { Permission } from "@/permission"
 import { Skill } from "@/skill"
 import { isSkillSearchDisabled, type SkillSearchModel } from "@/skill/search"
-import { usesGPTToolset } from "@/tool/gpt"
+import { Flag } from "@/flag/flag"
+
+function renderGitResult(result: Git.Result, fallback = "(none)") {
+  if (result.exitCode !== 0) return fallback
+  return result.text().trim() || fallback
+}
+
+const anthropicEnvironment = new Map<string, string>()
 
 export function provider(model: Provider.Model) {
   const prompt = (id: string) => {
@@ -39,14 +49,11 @@ export function provider(model: Provider.Model) {
 }
 
 export function agent(agent: Agent.Info, model: Provider.Model) {
-  const base = agent.prompt ? [agent.prompt] : provider(model)
-  if (agent.mode !== "subagent" || agent.toolAllowlist?.length === 0 || !usesGPTToolset(model.id)) return base
-  if (!agent.prompt && base.includes(PROMPT_GPT)) return base
-  return [...base, PROMPT_GPT_SUBAGENT_TOOLS]
+  return agent.prompt ? [agent.prompt] : provider(model)
 }
 
 export interface Interface {
-  readonly environment: (model: Provider.Model) => Effect.Effect<string[]>
+  readonly environment: (model: Provider.Model, now: number) => Effect.Effect<string[]>
   readonly skills: (agent: Agent.Info, model?: SkillSearchModel) => Effect.Effect<string | undefined>
   readonly available: (agent?: Agent.Info) => Effect.Effect<Skill.Info[]>
   readonly all: () => Effect.Effect<Skill.Info[]>
@@ -58,11 +65,57 @@ export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const skill = yield* Skill.Service
-    const provider = yield* Provider.Service
+    const providerService = yield* Provider.Service
+    const git = yield* Git.Service
 
     return Service.of({
-      environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
+      environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model, now: number) {
+        if (!Flag.MIMOCODE_ENABLE_DYNAMIC_SYSTEM_PROMPT) return []
         const project = Instance.project
+        if (provider(model)[0] === PROMPT_ANTHROPIC) {
+          const key = `${Instance.directory}\0${now}\0${model.providerID}\0${model.api.id}`
+          const cached = anthropicEnvironment.get(key)
+          if (cached)
+            return [cached, `IMPORTANT: Your response must ALWAYS strictly follow the same major language as the user.`]
+
+          const [branch, base, user, status, commits] = yield* Effect.all(
+            [
+              git.branch(Instance.directory),
+              git.defaultBranch(Instance.directory),
+              git.run(["config", "user.name"], { cwd: Instance.directory }),
+              git.run(["status", "--short", "--untracked-files=all"], { cwd: Instance.directory }),
+              git.run(["log", "-2", "--oneline", "--decorate=no"], { cwd: Instance.directory }),
+            ],
+            { concurrency: 5 },
+          )
+          const prompt = [
+            `# Environment`,
+            `You have been invoked in the following environment:`,
+            ` - Primary working directory: ${Instance.directory}`,
+            ` - Is a git repository: ${project.vcs === "git" ? "true" : "false"}`,
+            ` - Platform: ${process.platform}`,
+            ` - Shell: ${Shell.name(Shell.preferred())}`,
+            ` - OS Version: ${os.type()} ${os.release()}`,
+            ` - You are powered by the model named ${model.name}. The exact model ID is ${model.providerID}/${model.api.id}.`,
+            ...(which("claude") ? [` - Claude Code is available as a CLI in the terminal.`] : []),
+            ``,
+            `gitStatus: This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.`,
+            ``,
+            `Current branch: ${branch ?? "(detached or unavailable)"}`,
+            ``,
+            `Main branch (you will usually use this for PRs): ${base?.name ?? "(unknown)"}`,
+            ``,
+            `Git user: ${renderGitResult(user, "(unknown)")}`,
+            ``,
+            `Status:`,
+            renderGitResult(status, project.vcs === "git" ? "(clean)" : "(unavailable)"),
+            ``,
+            `Recent commits:`,
+            renderGitResult(commits),
+          ].join("\n")
+          anthropicEnvironment.set(key, prompt)
+          return [prompt, `IMPORTANT: Your response must ALWAYS strictly follow the same major language as the user.`]
+        }
         const base = [
           [
             `You are MiMo Code Agent, built by Xiaomi MiMo Team. You are an interactive agent that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.`,
@@ -84,8 +137,8 @@ export const layer = Layer.effect(
           // NOTE: vision models are resolved per-call (lazy). If provider list changes
           // mid-session, this block may differ between turns and break cached system prefix.
           // In practice provider config is stable within a session.
-          const preferred = yield* provider.getVisionModel().pipe(Effect.orElseSucceed(() => undefined))
-          const visionModels = yield* provider
+          const preferred = yield* providerService.getVisionModel().pipe(Effect.orElseSucceed(() => undefined))
+          const visionModels = yield* providerService
             .list()
             .pipe(
               Effect.map((providers) =>
@@ -118,7 +171,7 @@ export const layer = Layer.effect(
       skills: Effect.fn("SystemPrompt.skills")(function* (agent: Agent.Info, model?: SkillSearchModel) {
         if (Permission.disabled(["skill"], agent.permission).has("skill")) return
 
-        const list = yield* skill.available(agent)
+        const list = yield* skill.modelInvocable(agent)
 
         if (model && isSkillSearchDisabled(model)) {
           return [
@@ -130,11 +183,10 @@ export const layer = Layer.effect(
 
         return [
           "Skills provide specialized instructions and workflows for specific tasks.",
-          "On the first user query in a session, when the task might benefit from a specialized workflow, call skill_search to find the best matching non-Compose skill.",
+          "On the first user query in a session, when the task might benefit from a specialized workflow, call skill_search to find the best matching skill.",
           "Rewrite the user's request into a concise Skill Query with these dimensions when available: action, input, output, audience.",
           "Preserve an explicitly mentioned skill ID, name, or alias verbatim in the Skill Query so exact matching can take priority over BM25.",
           "If skill_search returns a loaded_skill_id, follow the loaded instructions. If it returns uncertain candidates, choose the best fit or continue without a skill. If it returns no_match, continue normally.",
-          "Compose skills are not searchable; load an explicitly requested Compose skill directly with the skill tool.",
           "Use the skill tool to load a skill when a task matches its description.",
           // the agents seem to ingest the information about skills a bit better if we present a more verbose
           // version of them here and a less verbose version in tool description, rather than vice versa.
@@ -142,6 +194,9 @@ export const layer = Layer.effect(
         ].join("\n")
       }),
 
+      // The user surface: authorization-filtered but NOT model-reachability
+      // filtered, because it backs the mention scan that loads a skill the user
+      // invoked explicitly. Do not switch this to modelInvocable.
       available: Effect.fn("SystemPrompt.available")(function* (agent?: Agent.Info) {
         return yield* skill.available(agent)
       }),
@@ -153,6 +208,10 @@ export const layer = Layer.effect(
   }),
 )
 
-export const defaultLayer = layer.pipe(Layer.provide(Skill.defaultLayer), Layer.provide(Provider.defaultLayer))
+export const defaultLayer = layer.pipe(
+  Layer.provide(Skill.defaultLayer),
+  Layer.provide(Provider.defaultLayer),
+  Layer.provide(Git.defaultLayer),
+)
 
 export * as SystemPrompt from "./system"

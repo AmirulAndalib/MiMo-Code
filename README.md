@@ -18,7 +18,7 @@
 
 MiMoCode is a terminal-native AI coding assistant. It can read and write code, run commands, manage Git, and use a persistent memory system to keep a deep understanding of your project across sessions while continuously improving itself.
 
-MiMo Auto is built in as a free-for-limited-time channel, so you can start with zero configuration. MiMoCode also supports connecting to any mainstream LLM provider API.
+MiMoCode supports connecting to any mainstream LLM provider API.
 
 ---
 
@@ -39,7 +39,6 @@ mimo
 ```
 
 The first launch guides you through configuration automatically. Supported options:
-- **MiMo Auto (free for a limited time)** — anonymous channel, zero configuration
 - **Xiaomi MiMo Platform** — OAuth login
 - **Codex (ChatGPT Pro/Plus)** — OpenAI OAuth login
 - **Import from Claude Code** — migrate existing authentication in one step
@@ -53,6 +52,36 @@ If you encounter garbled text when copying on WSL, install `xsel`:
 ```bash
 sudo apt install xsel
 ```
+</details>
+
+<details>
+<summary><strong>macOS: rendering issues in the default terminal</strong></summary>
+
+MiMoCode does not support the built-in macOS Terminal (Terminal.app). If the interface is misaligned, flickers, or has other rendering issues, use [iTerm2](https://iterm2.com/) or the VS Code integrated terminal instead:
+
+```bash
+brew install --cask iterm2
+```
+</details>
+
+<details>
+<summary><strong>TUI lag and visual animation issues</strong></summary>
+
+If the TUI lags when run directly over SSH, render it locally and run only the MiMoCode server on the remote host. Start the server from the remote project directory:
+
+```bash
+# Remote host
+mimo serve --port 4096
+
+# Local host: create the SSH port forward
+ssh -N -L 4096:127.0.0.1:4096 user@remote-host
+
+# Local host: connect from another terminal
+mimo attach http://127.0.0.1:4096
+```
+
+If decorative animation is causing the lag, run `/vivid`, or configure **Vivid visuals** in the `ctrl+p` command palette, to switch between Vivid and Minimal visuals as needed.
+
 </details>
 
 <details>
@@ -112,6 +141,44 @@ Memory is injected automatically when a session resumes, so the agent does not n
 - **Automatic checkpoints** — decides when to save session state based on the model context window
 - **Context reconstruction** — when context approaches the limit, rebuilds it from the latest checkpoint, project memory, task progress, and retained recent messages so the agent can continue the current task
 - **Budgeted injection** — uses a token budget to control how much checkpoint, memory, and notes content enters context, with importance ranking
+- **Adjustable compaction point** — `/context-limit` (or `compaction.max_context`) makes a model compact earlier than its own window, per model
+
+<details>
+<summary><strong>Compacting earlier than the model window (<code>/context-limit</code>)</strong></summary>
+
+Compaction normally fires just below the model's context window. Run `/context-limit` to
+pick a smaller working budget for the current model — `200K` / `300K` / `500K` / `1M` or a
+custom value — stored per model as `compaction.max_context`:
+
+```jsonc
+{
+  "compaction": {
+    "max_context": {
+      "openai/gpt-5.6": "272K", // token count, "300K", "1M", or "50%" of the window
+      "anthropic/*": "300K" // wildcards allowed, longest pattern wins
+    }
+  }
+}
+```
+
+The value is always clamped to what the provider actually accepts, so it can only lower the
+compaction point, never raise it. `0` restores the model's own window.
+
+Why you might want it:
+
+- **Cost tiers.** OpenAI prices GPT-5.6 prompts above 272K input at 2x input and 1.5x output
+  for the whole request.
+- **The advertised window is not always what you get.** The same model can have a different
+  usable window depending on how you reach it — a ChatGPT/Codex subscription, a direct API
+  key, or a reseller such as OpenRouter — so a catalog figure of 1M does not mean your route
+  serves 1M.
+- **Quality and latency.** Very long contexts are slower and, past a point, not better.
+
+`mimo models <provider>` prints, per model, the window MiMoCode resolved and the token count
+where it will compact. The prompt footer uses that same number as its denominator
+(`33.0K/260K↓ (13%)` — the `↓` means a budget is in force), and `/status` breaks it down.
+
+</details>
 
 ### Task Tracking
 
@@ -161,7 +228,7 @@ MiMoCode bundles the following builtin skills:
 | `arxiv` | Search, read, cite, and analyze arXiv papers |
 | `claude-code` | Delegate coding, testing, review, and Git tasks to the Claude Code CLI |
 | `codex` | Run and troubleshoot the Codex CLI in headless automation, CI, containers, and remote environments |
-| `compose-next` | Recommended spec→ship feature delivery workflow (grill → spec → implement → verify → review → finish); invoke explicitly with `/compose-next` |
+| `compose-next` | Recommended spec→ship feature delivery workflow; invoke only when explicitly requested by the user |
 | `data-analytics` | Analyze product and business data through reusable workflows for data quality, KPIs, dashboards, reports, notebooks, and market sizing |
 | `deep-research` | Produce cited, multi-source research reports with parallel subagents and built-in web tools |
 | `design-blueprint` | Produce a design blueprint (DESIGN.md + Decision Trace) before mocking up visuals |

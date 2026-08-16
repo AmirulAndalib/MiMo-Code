@@ -1,6 +1,7 @@
 import z from "zod"
+import { withoutCredentials } from "@/util/credential-env"
 import os from "os"
-import { createWriteStream, readFileSync } from "node:fs"
+import { createWriteStream, existsSync, readFileSync, realpathSync } from "node:fs"
 import * as Tool from "./tool"
 import path from "path"
 import DESCRIPTION from "./bash.txt"
@@ -16,9 +17,12 @@ import { Flag } from "@/flag/flag"
 import { Shell } from "@/shell/shell"
 
 import { SessionCwd } from "./session-cwd"
+import * as IsolatedGit from "./isolated-git-guard"
+import * as MergeConflict from "./merge-conflict-notice"
 import { BashArity } from "@/permission/arity"
 import * as Truncate from "./truncate"
 import { Plugin } from "@/plugin"
+import { Git } from "@/git"
 import { Effect, Stream } from "effect"
 import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
@@ -29,6 +33,43 @@ import * as BashTokenEfficientHeuristic from "./bash_token_efficient_heuristic"
 const MAX_METADATA_LENGTH = 30_000
 const DEFAULT_TIMEOUT = Flag.MIMOCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS || 2 * 60 * 1000
 const PS = new Set(["powershell", "pwsh"])
+// Delete targets under the OS temp dir are exempt from the forced-ask
+// confirmation: scratch space is where an agent legitimately churns files, and
+// nothing there is the user's durable work. The exemption is deliberately
+// narrow — see `tmpOnlyDelete`, which grants it ONLY when every path argument
+// of every delete command resolves, unambiguously, inside a temp root.
+//
+// macOS reports /tmp and /var as symlinks into /private, so containment must be
+// checked on REALPATHS: a lexical check would reject the literal "/tmp/x" even
+// though it lives inside the canonical os.tmpdir() jail. "/tmp" is listed
+// alongside os.tmpdir() because on macOS they are DIFFERENT directories
+// (/private/tmp vs /private/var/folders/...). Mirrors tool-script.ts's jail.
+function tmpRoots() {
+  return [os.tmpdir(), ...(process.platform === "win32" ? [] : ["/tmp"])]
+}
+
+function realpathBestEffort(p: string) {
+  let cur = p
+  let suffix = ""
+  while (true) {
+    try {
+      return path.join(realpathSync.native(cur), suffix)
+    } catch {
+      suffix = suffix ? path.join(path.basename(cur), suffix) : path.basename(cur)
+      const parent = path.dirname(cur)
+      if (parent === cur) return p
+      cur = parent
+    }
+  }
+}
+
+function insideTmp(resolved: string) {
+  const abs = realpathBestEffort(resolved)
+  return tmpRoots()
+    .map(realpathBestEffort)
+    .some((root) => abs !== root && abs.startsWith(root + path.sep))
+}
+
 const CWD = new Set(["cd", "push-location", "set-location"])
 const FILES = new Set([
   ...CWD,
@@ -449,6 +490,60 @@ export const BashTool = Tool.define(
     const fs = yield* AppFileSystem.Service
     const trunc = yield* Truncate.Service
     const plugin = yield* Plugin.Service
+    const gitSvc = yield* Git.Service
+
+    // Layer-2 floor for git authorship: an agent may create a worktree/clone or
+    // commit in an ad-hoc dir via this bash tool, bypassing Worktree.setup()'s
+    // per-worktree local-config fix. Propagate the project repo's own identity so
+    // those commits are attributed the same way a commit in the project repo is.
+    //
+    // Behavioral contract of this floor and its cache:
+    //   - It only ever PROPAGATES an identity the repo itself already resolves.
+    //     It never invents one: when the repo has no identity — or there is no
+    //     repo at all — nothing is injected and git resolves authorship itself
+    //     (config, then `EMAIL`, then its own `user@hostname` autodetect, then
+    //     its own error). A hardcoded substitute would misattribute the commit
+    //     AND pre-empt resolution paths `git config` cannot see.
+    //   - It is delivered as GIT_AUTHOR_*/GIT_COMMITTER_* ENV, and git gives env
+    //     vars precedence OVER `user.name`/`user.email` config — including the
+    //     config of some OTHER repo the command happens to run in. That is
+    //     exactly why an unresolved field must inject nothing rather than a
+    //     placeholder: a placeholder would outrank that repo's correct config.
+    //   - Because the resolved value is memoized per worktree path for the
+    //     lifetime of the process, a `git config user.name ...` performed
+    //     mid-session is NOT picked up until the process restarts.
+    //   - Operator-set GIT_AUTHOR_*/GIT_COMMITTER_* still win: shellEnv only
+    //     fills the vars that are absent from process.env (see below).
+    //
+    // resolveGitIdentity and gitIdentityCache live in this outer setup block,
+    // not inside shellEnv, precisely so the cache persists across every bash
+    // invocation instead of being rebuilt (and re-spawning two `git config`
+    // subprocesses) on each call.
+    const gitIdentityCache = new Map<string, { name?: string; email?: string }>()
+    const resolveGitIdentity = Effect.fn("BashTool.resolveGitIdentity")(function* () {
+      const worktree = Instance.worktree
+      const cached = gitIdentityCache.get(worktree)
+      if (cached) return cached
+      // Non-git projects set worktree to "/". There is no project repo whose
+      // identity we could propagate, and whatever repo a git command does run in
+      // has its own config — which injected env would override. Inject nothing.
+      if (worktree === "/") {
+        const none: { name?: string; email?: string } = {}
+        gitIdentityCache.set(worktree, none)
+        return none
+      }
+      const name = (yield* gitSvc.run(["config", "user.name"], { cwd: worktree })).text().trim()
+      const email = (yield* gitSvc.run(["config", "user.email"], { cwd: worktree })).text().trim()
+      if (!name || !email)
+        log.warn("git identity not fully resolved from repo config; leaving authorship to git", {
+          worktree,
+          name: name ? "resolved" : "unset",
+          email: email ? "resolved" : "unset",
+        })
+      const identity = { ...(name ? { name } : {}), ...(email ? { email } : {}) }
+      gitIdentityCache.set(worktree, identity)
+      return identity
+    })
 
     const cygpath = Effect.fn("BashTool.cygpath")(function* (shell: string, text: string) {
       const lines = yield* spawner
@@ -477,6 +572,45 @@ export const BashTool = Tool.define(
       const next = ps ? provider(file) : file
       if (!next) return
       return yield* resolvePath(next, cwd, shell)
+    })
+
+    // Whether EVERY delete in this command line is a plain removal confined to a
+    // temp root — the one case where the forced-ask confirmation is skipped.
+    //
+    // Fails closed on purpose, in four ways. Any single miss means "ask":
+    //   1. Only DELETE_COMMANDS qualify. Destructive git subcommands
+    //      (reset --hard, push --force, stash drop, …) act on repository state,
+    //      not on a path in tmp, so they can never earn the exemption.
+    //   2. A delete with no path arguments cannot be shown to be tmp-scoped.
+    //   3. An argument `argPath` declines to resolve — a glob, a `$VAR`, a `$(…)`
+    //      substitution (see `dynamic`) — is UNKNOWN, and unknown is not tmp.
+    //      This is the load-bearing case: `rm -rf $BUILD_DIR/*` must still ask.
+    //   4. A resolved path outside a temp root, including a root itself
+    //      (`insideTmp` requires a strict descendant, so `rm -rf /tmp` asks).
+    //   5. A path inside the PROJECT, even when the project itself lives under a
+    //      temp root (a real configuration — the test fixtures do exactly this).
+    //      Scratch space earns the exemption because it holds no durable work;
+    //      a checkout's own files are durable wherever they happen to sit.
+    const tmpOnlyDelete = Effect.fn("BashTool.tmpOnlyDelete")(function* (
+      root: Node,
+      cwd: string,
+      ps: boolean,
+      shell: string,
+    ) {
+      for (const node of commands(root)) {
+        const command = parts(node)
+        const tokens = command.map((item) => item.text)
+        if (!isDelete(tokens, ps)) continue
+        const head = ps ? tokens[0]?.toLowerCase() : tokens[0]
+        if (!head || !DELETE_COMMANDS.has(head)) return false
+        const args = pathArgs(command, ps)
+        if (args.length === 0) return false
+        for (const arg of args) {
+          const resolved = yield* argPath(arg, cwd, ps, shell)
+          if (!resolved || !insideTmp(resolved) || Instance.containsPath(resolved)) return false
+        }
+      }
+      return true
     })
 
     const collect = Effect.fn("BashTool.collect")(function* (root: Node, cwd: string, ps: boolean, shell: string) {
@@ -519,12 +653,27 @@ export const BashTool = Tool.define(
         { cwd, sessionID: ctx.sessionID, callID: ctx.callID },
         { env: {} },
       )
+      const identity = yield* resolveGitIdentity()
+      // Only fill vars the operator hasn't already set, so an explicit
+      // GIT_AUTHOR_* in the environment still wins over our floor — and only
+      // fields the repo itself resolved, so an unresolved field is left for git.
+      const gitFloor: Record<string, string> = {}
+      if (identity.name && !process.env["GIT_AUTHOR_NAME"]) gitFloor["GIT_AUTHOR_NAME"] = identity.name
+      if (identity.email && !process.env["GIT_AUTHOR_EMAIL"]) gitFloor["GIT_AUTHOR_EMAIL"] = identity.email
+      if (identity.name && !process.env["GIT_COMMITTER_NAME"]) gitFloor["GIT_COMMITTER_NAME"] = identity.name
+      if (identity.email && !process.env["GIT_COMMITTER_EMAIL"]) gitFloor["GIT_COMMITTER_EMAIL"] = identity.email
+      // withoutCredentials: this env goes to agent-authored commands.
       return {
-        ...process.env,
+        ...withoutCredentials(process.env),
         // Python ignores the console code page when stdout is a pipe and falls
         // back to the ANSI code page (GBK on zh-CN), producing mojibake. Force
         // UTF-8 for child Python processes on Windows.
         ...(process.platform === "win32" ? { PYTHONIOENCODING: "utf-8" } : {}),
+        // Git authorship floor. Placed after process.env so the spread order
+        // reads naturally, but it can never clobber an operator value: gitFloor
+        // only ever holds keys that were absent from process.env. A plugin's
+        // extra.env comes last and so can still override the floor.
+        ...gitFloor,
         ...extra.env,
       }
     })
@@ -719,6 +868,19 @@ export const BashTool = Tool.define(
       if (meta.length > 0) {
         output += "\n\n<bash_metadata>\n" + meta.join("\n") + "\n</bash_metadata>"
       }
+
+      // Conflict-ownership affordance. When this command left git mid-merge with
+      // unmerged paths, the result itself carries the rule (the conflict belongs
+      // to the branch's owner) and the two literal commands that follow it —
+      // because the model reads a tool result before its next tool call, and does
+      // not re-read a system prompt assembled requests ago. Appended LAST so it is
+      // the final thing in the result, and never blocking: see the module header.
+      output += yield* MergeConflict.annotate({
+        git: gitSvc,
+        cwd: input.cwd,
+        command: input.command,
+        output,
+      })
       if (sink) {
         const stream = sink
         yield* Effect.promise(
@@ -764,16 +926,44 @@ export const BashTool = Tool.define(
               const timeout = params.timeout ?? DEFAULT_TIMEOUT
               const ps = PS.has(name)
               const root = yield* parse(params.command, ps)
+              // Cross-branch git guard for isolated children. Sits on the SAME
+              // parsed AST the permission scan uses, so every command node in a
+              // pipeline / `&&` chain / subshell is checked, and it runs BEFORE
+              // ask() so a rejected command never prompts and never spawns.
+              // Keyed on Instance.directory (the session's own worktree), not on
+              // `cwd` — a child that `cd`s into the main checkout and rebases
+              // there is exactly the accident this exists to stop.
+              const own = Instance.directory
+              if (IsolatedGit.isIsolatedWorktree(own)) {
+                IsolatedGit.assertIsolatedGitAllowed({
+                  commands: commands(root).map((node) => parts(node).map((item) => item.text)),
+                  sources: commands(root).map((node) => source(node)),
+                  directory: own,
+                  isolated: true,
+                  branch: IsolatedGit.ownBranch(own),
+                  isPath: (arg) => existsSync(path.resolve(cwd, arg)),
+                })
+              }
               const scan = yield* collect(root, cwd, ps, shell)
               if (!Instance.containsPath(cwd)) scan.dirs.add(cwd)
-              // Delete-containing commands are authorized by askDelete alone —
-              // the delete UI shows the full command (including any external
-              // paths it touches), so a separate bash/external_directory
-              // prompt would just be a second confirmation of the same thing.
-              // MIMOCODE_AUTO_APPROVE_DELETE trusts deletes and falls back to
-              // the regular ask (where a `bash: deny` rule still blocks).
-              if (scan.deletes.size > 0 && !Flag.MIMOCODE_AUTO_APPROVE_DELETE) {
+              // Delete-containing commands normally use askDelete alone — the
+              // delete UI shows the full command, so another bash prompt would
+              // duplicate the confirmation. Auto-approved deletes still pass
+              // through askDelete so an explicit `bash_delete: deny` wins, then
+              // fall back to the regular ask so `bash: deny` wins too.
+              // `tmpOnlyDelete` trusts one whose every target is provably inside
+              // a temp root; scratch space holds no durable user work, and that
+              // check fails closed on anything it cannot resolve.
+              // Instance-scoped, NOT a process-global: one server process serves
+              // many directories with independent permission state, so a global
+              // carrier would let a permissive directory silently auto-approve
+              // deletes in a strict one. Absent accessor ⇒ not exempt (ask).
+              const autoApproveDelete =
+                scan.deletes.size > 0 && ctx.autoApproveDelete ? yield* ctx.autoApproveDelete() : false
+              const skipDeleteAsk = scan.deletes.size === 0 || (yield* tmpOnlyDelete(root, cwd, ps, shell))
+              if (!skipDeleteAsk) {
                 yield* askDelete(ctx, scan, params.command)
+                if (autoApproveDelete) yield* ask(ctx, scan)
               } else {
                 yield* ask(ctx, scan)
               }

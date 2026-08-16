@@ -66,6 +66,8 @@ export const dict = {
     "Ищете команду? Спросите {highlight}Какие slash-команды я могу использовать?{/highlight} прямо в чате",
   "tui.tips.background":
     "Выполните {highlight}/background{/highlight}, чтобы установить произвольное изображение в качестве фона главной страницы",
+  "tui.tips.vivid":
+    "Выполните {highlight}/vivid{/highlight}, чтобы при необходимости переключаться между расширенным и минимальным оформлением",
   "tui.tips.compose_next":
     "Попробуйте {highlight}/compose-next{/highlight} вместо агента Compose для передовых моделей",
   "tui.tips.undo":
@@ -293,8 +295,10 @@ export const dict = {
   "tui.skill.skill-creator.description": "Создание, проверка и улучшение skills агента",
   "tui.skill.drive-mimo.description": "Программное управление другим процессом MiMoCode — headless JSON-события или интерактивный TUI через tmux",
   "tui.skill.research-paper-writing.description": "Написание, полировка и рецензирование научных статей",
+  "tui.skill.playwright.description": "Автоматизация реальных сценариев браузера из терминала",
   "tui.skill.codex.description": "Автономный запуск Codex CLI в скриптах, CI, Docker и Kubernetes",
   "tui.skill.claude-code.description": "Делегирование задач программирования Claude Code CLI",
+  "tui.skill.grok-build.description": "Работа с Grok Build из командной строки",
   "tui.skill.design-blueprint.description":
     "Создать проектную спецификацию (DESIGN.md + Decision Trace) до макетов",
   "tui.skill.super-research.description":
@@ -373,6 +377,10 @@ export const dict = {
   "tui.command.opencode.status.title": "Посмотреть статус",
   "tui.command.theme.switch.title": "Сменить тему",
   "tui.command.logo.switch.title": "Сменить дизайн логотипа",
+  "tui.command.visual_mode.title_on": "Расширенное оформление - перейти к минимальному",
+  "tui.command.visual_mode.title_off": "Минимальное оформление - перейти к расширенному",
+  "tui.visual_mode.enabled": "Расширенное оформление включено: звёздный фон и эффекты логотипа восстановлены; метеоры и анимация индикаторов зависят от настройки анимации",
+  "tui.visual_mode.disabled": "Расширенное оформление выключено: звёзды, метеоры и эффекты логотипа скрыты; индикаторы остаются неподвижными",
   "tui.dialog.logo.title": "Дизайн логотипа",
   "tui.dialog.logo.option.classic": "Классический (жирный)",
   "tui.dialog.logo.option.thin": "Тонкий (полублок)",
@@ -580,14 +588,6 @@ export const dict = {
     "Вход не требуется — просто запустите mimo. Для платных/премиум-моделей выберите вход через браузер MiMo.",
   "cli.providers.mimo_login.decrypt_retry": "Ошибка расшифровки, повторите попытку (осталось попыток: {remaining})",
   "cli.providers.mimo_login.decrypt_exhausted": "Ошибка расшифровки, превышено максимальное число попыток",
-
-  // Question i18n — plan_enter
-  "tui.question.plan_enter.question": "Переключиться в режим plan для структурированного планирования?",
-  "tui.question.plan_enter.header": "Вход в план",
-  "tui.question.plan_enter.option.0.label": "Да",
-  "tui.question.plan_enter.option.0.description": "Переключиться на агента plan для планирования в режиме чтения",
-  "tui.question.plan_enter.option.1.label": "Нет",
-  "tui.question.plan_enter.option.1.description": "Остаться в текущем режиме",
 
   // Question i18n — plan_exit
   "tui.question.plan_exit.question": "План {{plan}} завершён. Переключиться на агента build и начать реализацию?",

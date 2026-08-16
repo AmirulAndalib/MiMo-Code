@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { Skill } from "../../src/skill"
-import { searchSkills } from "../../src/skill/search"
+import { isSkillSearchDisabled, searchSkills } from "../../src/skill/search"
 
 const skill = (name: string, description: string, aliases?: string[]): Skill.Info => ({
   name,
@@ -11,6 +11,14 @@ const skill = (name: string, description: string, aliases?: string[]): Skill.Inf
 })
 
 describe("skill.search", () => {
+  test("disables skill search prompts for blacklisted model families", () => {
+    expect(isSkillSearchDisabled({ id: "gpt-5.4" })).toBe(true)
+    expect(isSkillSearchDisabled({ api: { id: "claude-sonnet-4-6" } })).toBe(true)
+    expect(isSkillSearchDisabled({ id: "k2p5", family: "kimi-thinking" })).toBe(true)
+    expect(isSkillSearchDisabled({ id: "mimo-v2" })).toBe(true)
+    expect(isSkillSearchDisabled({ id: "deepseek-v3.2" })).toBe(false)
+  })
+
   test("ranks an exact alias match above BM25 matches", () => {
     const results = searchSkills("quarterly-review", [
       skill("spreadsheet-analysis", "Analyze quarterly sales spreadsheets and business metrics."),
@@ -98,20 +106,23 @@ describe("skill.search", () => {
     expect(searchSkills("compose:tdd", [skill("compose:tdd", "Use test-driven development.")])).toEqual([])
   })
 
-  test("excludes compose-next from the searchable manifest", () => {
-    expect(searchSkills("compose-next", [skill("compose-next", "End-to-end feature orchestration for frontier models.")])).toEqual([])
+  test("does not special-case compose-next: its name is not a compose: namespace", () => {
+    // Compose Next is a normal model-invocable skill. Legacy compose:* skills
+    // remain excluded by the namespace filter.
+    const results = searchSkills("compose-next", [
+      skill("compose-next", "End-to-end feature orchestration for frontier models."),
+    ])
+    expect(results.map((r) => r.skill_id)).toEqual(["compose-next"])
   })
 
-  test("caller-side filtering: when compose-next is absent from the input list, it does not appear in results", () => {
-    // Mirrors the production path: skill-search.ts feeds searchSkills the
-    // result of Skill.available(currentAgent). Default agent's available()
-    // omits compose-next, so the search over the resulting list returns
-    // no compose-next entry.
-    const availableForDefaultAgent = [
+  test("caller-side filtering: a skill absent from the input list cannot appear in results", () => {
+    // A skill absent from the model-invocable input cannot be returned. This
+    // remains the contract for skills that opt out of model invocation.
+    const modelInvocableForDefaultAgent = [
       skill("deep-research", "Multi-source research report."),
       skill("data-analytics", "Analyze datasets and produce findings."),
     ]
-    const results = searchSkills("compose-next end to end feature orchestration", availableForDefaultAgent)
+    const results = searchSkills("compose-next end to end feature orchestration", modelInvocableForDefaultAgent)
     expect(results.every((r) => r.skill_id !== "compose-next")).toBe(true)
   })
 })

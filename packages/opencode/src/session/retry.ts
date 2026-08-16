@@ -30,6 +30,7 @@ export const RETRY_INITIAL_DELAY = 2000
 export const RETRY_BACKOFF_FACTOR = 2
 export const RETRY_MAX_DELAY_NO_HEADERS = 30_000 // 30 seconds
 export const RETRY_MAX_DELAY = 2_147_483_647 // max 32-bit signed integer for setTimeout
+export const GPT_OVERLOAD_RETRIES = 3
 
 const NETWORK_ERROR_CODES = new Set(["ECONNRESET", "EPIPE", "ETIMEDOUT"])
 const SSE_TIMEOUT_MESSAGE = "SSE read timed out"
@@ -202,15 +203,43 @@ export function retryable(error: Err) {
   return undefined
 }
 
+export function isGptServerOverloadedError(error: Err): boolean {
+  if (!MessageV2.APIError.isInstance(error) || !error.data.responseBody) return false
+  const responseBody = error.data.responseBody
+
+  const body = iife(() => {
+    try {
+      return JSON.parse(responseBody)
+    } catch {
+      return undefined
+    }
+  })
+
+  return (
+    body?.type === "error" &&
+    body?.error?.type === "service_unavailable_error" &&
+    body?.error?.code === "server_is_overloaded"
+  )
+}
+
+export function isGptModel(model: { id: string; api: { id: string } }): boolean {
+  return [model.id, model.api.id].some((id) => id.toLowerCase().startsWith("gpt-"))
+}
+
 export function policy(opts: {
   parse: (error: unknown) => Err
   set: (input: { attempt: number; message: string; next: number }) => Effect.Effect<void>
+  silentRetry?: (error: Err) => boolean
 }) {
   return Schedule.fromStepWithMetadata(
     Effect.succeed((meta: Schedule.InputMetadata<unknown>) => {
       const error = opts.parse(meta.input)
       const message = retryable(error)
       if (!message) return Cause.done(meta.attempt)
+      if (opts.silentRetry?.(error)) {
+        if (meta.attempt > GPT_OVERLOAD_RETRIES) return Cause.done(meta.attempt)
+        return Effect.succeed([meta.attempt, Duration.zero] as [number, Duration.Duration])
+      }
       return Effect.gen(function* () {
         const wait = delay(meta.attempt, MessageV2.APIError.isInstance(error) ? error : undefined)
         const now = yield* Clock.currentTimeMillis

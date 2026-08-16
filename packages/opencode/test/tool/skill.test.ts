@@ -120,4 +120,79 @@ Use this skill.
       { git: true },
     ),
   )
+
+  it.live("refuses a disable-model-invocation skill and points at the user's slash command", () =>
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(() =>
+            Promise.all([
+              Bun.write(
+                path.join(dir, ".mimocode", "skill", "gated-skill", "SKILL.md"),
+                `---
+name: gated-skill
+description: Only the user may start this one.
+disable-model-invocation: true
+---
+
+# Gated Skill
+
+GATED_BODY_MARKER
+`,
+              ),
+              Bun.write(
+                path.join(dir, ".mimocode", "skill", "open-skill", "SKILL.md"),
+                `---
+name: open-skill
+description: Anyone may start this one.
+---
+
+# Open Skill
+`,
+              ),
+            ]),
+          )
+
+          const registry = yield* ToolRegistry.Service
+          const agent = { name: "build", mode: "primary" as const, permission: [], options: {} }
+          const tool = (yield* registry.tools({
+            providerID: "opencode" as any,
+            modelID: "gpt-5" as any,
+            agent,
+          })).find((tool) => tool.id === SkillTool.id)
+          if (!tool) throw new Error("Skill tool not found")
+
+          const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+          const ctx: Tool.Context = {
+            ...baseCtx,
+            ask: (req) =>
+              Effect.sync(() => {
+                requests.push(req)
+              }),
+          }
+
+          const exit = yield* Effect.exit(tool.execute({ name: "gated-skill" }, ctx))
+          expect(exit._tag).toBe("Failure")
+          const msg = exit._tag === "Failure" ? Cause.pretty(exit.cause) : ""
+          expect(msg).toContain("disable-model-invocation")
+          expect(msg).toContain("/gated-skill")
+          expect(msg).not.toContain("GATED_BODY_MARKER")
+          // Refused before the permission ask, so no approval is requested for a
+          // call that can never succeed.
+          expect(requests).toEqual([])
+
+          // The tool schema is static and never embeds either the reachable or
+          // model-gated catalog. A mistyped name must not leak the gated skill.
+          expect(tool.description).not.toContain("gated-skill")
+          expect(tool.description).not.toContain("open-skill")
+          expect(tool.description).toContain("listed in the system prompt")
+          const miss = yield* Effect.exit(tool.execute({ name: "gated-skil" }, ctx))
+          const missMsg = miss._tag === "Failure" ? Cause.pretty(miss.cause) : ""
+          expect(missMsg).toContain("not found")
+          expect(missMsg).toContain("open-skill")
+          expect(missMsg).not.toContain("gated-skill")
+        }),
+      { git: true },
+    ),
+  )
 })

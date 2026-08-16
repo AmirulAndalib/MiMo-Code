@@ -17,14 +17,20 @@ export type SkillSearchModel = {
   api?: { id?: string }
 }
 
+const SKILL_SEARCH_MODEL_BLACKLIST = ["claude", "gpt", "kimi", "mimo"]
+
 function isComposeSkill(skill: Pick<Skill.Info, "name">) {
-  return skill.name === "compose-next" || skill.name.startsWith("compose:")
+  return skill.name.startsWith("compose:")
 }
 
 export function isSkillSearchDisabled(model: SkillSearchModel) {
   return [model.id, model.modelID, model.api?.id, model.name, model.family]
     .filter((value) => value !== undefined)
-    .some((value) => /(^|[^a-z0-9])(claude|gpt)($|[^a-z0-9])/i.test(value))
+    .some((value) =>
+      SKILL_SEARCH_MODEL_BLACKLIST.some((blocked) =>
+        new RegExp(`(^|[^a-z0-9])${blocked}($|[^a-z0-9])`, "i").test(value),
+      ),
+    )
 }
 
 function normalize(value: string) {

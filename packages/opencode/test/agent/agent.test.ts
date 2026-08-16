@@ -9,10 +9,11 @@ import { ToolRegistry } from "../../src/tool"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
 import { testEffect } from "../lib/effect"
+import PROMPT_GENERATE from "../../src/agent/generate.txt"
+import PROMPT_GENERATE_GPT from "../../src/agent/prompt/generate-gpt.txt"
+import PROMPT_EXPLORE from "../../src/agent/prompt/explore.txt"
 
-const itTool = testEffect(
-  Layer.mergeAll(ToolRegistry.defaultLayer, Agent.defaultLayer, CrossSpawnSpawner.defaultLayer),
-)
+const itTool = testEffect(Layer.mergeAll(ToolRegistry.defaultLayer, Agent.defaultLayer, CrossSpawnSpawner.defaultLayer))
 
 // Helper to evaluate permission for a tool with wildcard pattern
 function evalPerm(agent: Agent.Info | undefined, permission: string): Permission.Action | undefined {
@@ -26,6 +27,19 @@ function load<A>(dir: string, fn: (svc: Agent.Interface) => Effect.Effect<A>) {
 
 afterEach(async () => {
   await Instance.disposeAll()
+})
+
+test("agent prompts use runtime tool names and GPT generation guidance", () => {
+  expect(PROMPT_EXPLORE).toContain("Tool names and availability are model-specific")
+  expect(PROMPT_EXPLORE).not.toContain("Use Glob")
+  expect(PROMPT_EXPLORE).not.toContain("Use Grep")
+  expect(PROMPT_EXPLORE).not.toContain("Use Read")
+  expect(PROMPT_GENERATE).toContain("use the actor tool")
+  expect(PROMPT_GENERATE).not.toContain("use the Agent tool")
+  expect(PROMPT_GENERATE_GPT).toContain("`exec`")
+  expect(PROMPT_GENERATE_GPT).toContain("`apply_patch`")
+  expect(PROMPT_GENERATE_GPT).toContain("`view_image`")
+  expect(PROMPT_GENERATE_GPT).toContain("`actor`")
 })
 
 test("returns default native agents when no config", async () => {
@@ -151,13 +165,15 @@ test("compose:* skills are denied for build/plan, allowed for compose", async ()
       expect(Permission.evaluate("skill", "compose:tdd", compose!.permission).action).toBe("allow")
       expect(Permission.evaluate("skill", "compose:review", compose!.permission).action).toBe("allow")
       // Non-compose skills remain allowed for all agents
-      expect(Permission.evaluate("skill", "effect", agents.find((a) => a.name === "build")!.permission).action).toBe("allow")
+      expect(Permission.evaluate("skill", "effect", agents.find((a) => a.name === "build")!.permission).action).toBe(
+        "allow",
+      )
       expect(Permission.evaluate("skill", "effect", compose!.permission).action).toBe("allow")
     },
   })
 })
 
-test("plan_enter and plan_exit are allowed for build and plan agents", async () => {
+test("plan_exit is allowed for build and plan agents", async () => {
   await using tmp = await tmpdir()
   await Instance.provide({
     directory: tmp.path,
@@ -166,23 +182,21 @@ test("plan_enter and plan_exit are allowed for build and plan agents", async () 
       for (const name of ["build", "plan"]) {
         const agent = agents.find((a) => a.name === name)
         expect(agent).toBeDefined()
-        const disabled = Permission.disabled(["plan_enter", "plan_exit"], agent!.permission)
-        expect(disabled.has("plan_enter")).toBe(false)
+        const disabled = Permission.disabled(["plan_exit"], agent!.permission)
         expect(disabled.has("plan_exit")).toBe(false)
       }
     },
   })
 })
 
-test("plan_enter and plan_exit are denied for compose agent", async () => {
+test("plan_exit is denied for compose agent", async () => {
   await using tmp = await tmpdir()
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
       const compose = await load(tmp.path, (svc) => svc.get("compose"))
       expect(compose).toBeDefined()
-      const disabled = Permission.disabled(["plan_enter", "plan_exit"], compose!.permission)
-      expect(disabled.has("plan_enter")).toBe(true)
+      const disabled = Permission.disabled(["plan_exit"], compose!.permission)
       expect(disabled.has("plan_exit")).toBe(true)
     },
   })
@@ -217,6 +231,31 @@ test("explore agent asks for external directories and allows Truncate.GLOB", asy
   })
 })
 
+test("general and explore agents use dedicated prompts", async () => {
+  await using tmp = await tmpdir()
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const general = await load(tmp.path, (svc) => svc.get("general"))
+      const explore = await load(tmp.path, (svc) => svc.get("explore"))
+      expect(general?.description).toContain("Full-capability general-purpose subagent")
+      expect(general?.description).toContain("inherits the parent's available tool surface")
+      expect(general?.prompt).toContain("full-capability general-purpose subagent")
+      expect(general?.prompt).toContain("including reading and searching, editing or creating files")
+      expect(general?.prompt).toContain("complete it end to end")
+      expect(general?.prompt).toContain("The parent agent, not you, communicates with the end user")
+      expect(general?.completionGate).toBe(true)
+      expect(general?.toolAllowlist).toBeUndefined()
+      expect(Permission.evaluate("read", "src/index.ts", general!.permission).action).toBe("allow")
+      expect(Permission.evaluate("edit", "src/index.ts", general!.permission).action).toBe("allow")
+      expect(Permission.evaluate("write", "src/index.ts", general!.permission).action).toBe("allow")
+      expect(Permission.evaluate("bash", "bun test", general!.permission).action).toBe("allow")
+      expect(Permission.evaluate("change_directory", "/tmp/project", general!.permission).action).toBe("allow")
+      expect(explore?.prompt).toContain("file search specialist working for a parent agent")
+      expect(explore?.prompt).not.toBe(general?.prompt)
+    },
+  })
+})
 
 test("custom agent from config creates new agent", async () => {
   await using tmp = await tmpdir({

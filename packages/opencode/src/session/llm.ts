@@ -32,9 +32,57 @@ import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { ActorRegistry } from "@/actor/registry"
 import { Memory } from "@/memory"
 import { isRetryableTransientError } from "./retry"
+import { MCP_TOOL_SEARCH_ID } from "@/tool/mcp-tool-search"
+import { deriveLiveness } from "@/actor/schema"
+import { SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
+import { Flag } from "@/flag/flag"
 
 const log = Log.create({ service: "llm" })
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
+
+/**
+ * Lead-in for the orchestrator's fleet roster, and the reason the roster carries
+ * NO XML envelope.
+ *
+ * It used to be pushed as `<active-sessions>\n…\n</active-sessions>`, and users
+ * saw that literal tag — rows and all — in the TUI. The TUI is not at fault: the
+ * roster goes into the SYSTEM array and the TUI never renders system content.
+ * The model was quoting it. It had every reason to: `orchestrator.txt` named the
+ * tag five times and told it to "Look at `<active-sessions>`", so the tag was
+ * vocabulary the prompt had taught it, and the literal string was sitting in its
+ * context to copy.
+ *
+ * Asking it not to echo the tag would be another prompt instruction, and this PR
+ * measured what those are worth — the maintainer/author paragraph lost 3/3 live
+ * turns. So remove the artifact instead of requesting restraint: with no
+ * `<active-sessions>` string anywhere in the assembled request, echoing it is not
+ * a behaviour the model can exhibit. The prompt now refers to the roster
+ * functionally ("your fleet roster") and keeps the field layout, which is the
+ * part that was actually load-bearing for routing.
+ *
+ * Dropping the delimiter costs nothing structurally: this was the ONLY tagged
+ * block in the system array (the agent prompt and the memory instructions are
+ * both plain prose), and `dispatchLedgerNotice` already ships the same roster to
+ * the model in a tool result with a prose header and no envelope.
+ *
+ * The "internal working context" sentence is a genuinely weaker lever than the
+ * removal — it can only ask. It is here because it costs one line and it sits
+ * ADJACENT to the data it governs rather than in a paragraph assembled far away.
+ * It does not stop the model paraphrasing a child's title, and it is not claimed
+ * to; what is mechanically closed is the literal tag.
+ */
+export const ROSTER_HEADER =
+  "Your fleet — your routable child sessions right now. This list is internal working context, " +
+  "not output: never repeat it, or these session ids and titles, back to the user — report the " +
+  "routing DECISION instead (\"routing this to the docs child\"). Format is id | title | agent | status:"
+
+// How many FINISHED-but-resumable child sessions the fleet roster carries,
+// most-recently-active first. The roster is re-injected on EVERY request,
+// so the idle tail (which grows monotonically as children complete) must be
+// bounded; running children are self-limiting and are never dropped. A count cap
+// rather than a time window, because N children can finish inside one minute and
+// a window would not actually bound the block.
+export const ROSTER_IDLE_LIMIT = 5
 type Result = Awaited<ReturnType<typeof streamText>>
 
 /**
@@ -93,37 +141,55 @@ export const persistentRetrySchedule = Schedule.exponential("500 millis", 2).pip
  * files already present in the rebuild dump, and the Subagent return
  * format contract.
  *
+ * This block is not appended when `MIMOCODE_DISABLE_CHECKPOINT` is on.
+ *
  * `memoryRoot` is the same absolute root returned by Memory.root(), so these
  * paths match the files used by checkpoint restore and memory/task detection.
  */
 function buildMemoryInstructions(sessionID: SessionID, projectID: ProjectID, memoryRoot: string): string {
   const memoryFile = path.join(memoryRoot, "projects", projectID, "MEMORY.md")
-  const checkpointFile = path.join(memoryRoot, "sessions", sessionID, "checkpoint.md")
   const sessionMemoryDir = path.join(memoryRoot, "sessions", sessionID)
   const globalMemoryFile = path.join(memoryRoot, "global", "MEMORY.md")
-  return `# Memory system
+  const notesFile = path.join(sessionMemoryDir, "notes.md")
+  const checkpointEnabled = !Flag.MIMOCODE_DISABLE_CHECKPOINT
 
-You have a persistent file-based memory system. Four file types:
+  const files = [
+    `- Project memory at \`${memoryFile}\` — persistent across all sessions in this project. Contains: project context, rules, architecture decisions, durable cross-task knowledge.`,
+    ...(checkpointEnabled
+      ? [
+          `- Session checkpoint at \`${path.join(sessionMemoryDir, "checkpoint.md")}\` — current session's structured state, written ONLY by the checkpoint-writer subagent. 11 sections covering active intent, next action, directives, task tree, current work, files, learnings, errors, live resources, design decisions, and open notes. Task content lives inside §4 Task tree and §5 Current work.`,
+          `- Per-task progress at \`${path.join(sessionMemoryDir, "tasks", "<id>", "progress.md")}\` — writer-derived splitover from session-level progress.md (not LLM-written). When you spawn a subagent on a task, the subagent may be handed this path for reading; you do not maintain it.`,
+        ]
+      : []),
+    `- Global memory at \`${globalMemoryFile}\` — user-level preferences and cross-project feedback that persist across all projects.${checkpointEnabled ? ` Auto-injected into rebuild context under the "## Global memory" header when present.` : ""}`,
+  ]
 
-- Project memory at \`${memoryFile}\` — persistent across all sessions in this project. Contains: project context, rules, architecture decisions, durable cross-task knowledge.
-- Session checkpoint at \`${checkpointFile}\` — current session's structured state, written ONLY by the checkpoint-writer subagent. 11 sections covering active intent, next action, directives, task tree, current work, files, learnings, errors, live resources, design decisions, and open notes. Task content lives inside §4 Task tree and §5 Current work.
-- Per-task progress at \`${path.join(sessionMemoryDir, "tasks", "<id>", "progress.md")}\` — writer-derived splitover from session-level progress.md (not LLM-written). When you spawn a subagent on a task, the subagent may be handed this path for reading; you do not maintain it.
-- Global memory at \`${globalMemoryFile}\` — user-level preferences and cross-project feedback that persist across all projects. Auto-injected into rebuild context under the "## Global memory" header when present.
+  const sections = [
+    `# Memory system
 
-The checkpoint writer is the sole curator of the structured files. You don't maintain them mid-task — the writer extracts everything from the conversation at checkpoint events.
+You have a persistent file-based memory system. ${checkpointEnabled ? "Four" : "Two"} file types:
 
-## When to Edit MEMORY.md directly
+${files.join("\n")}`,
+    ...(checkpointEnabled
+      ? [
+          "The checkpoint writer is the sole curator of the structured files. You don't maintain them mid-task — the writer extracts everything from the conversation at checkpoint events.",
+        ]
+      : []),
+    `## When to Edit MEMORY.md directly
 
 You may Edit MEMORY.md when:
 - User states a project-level rule that should hold across sessions → ## Rules
 - User states a project-level architectural decision → ## Architecture decisions
-- A clearly durable cross-session fact emerges that you want available immediately, before the next checkpoint → ## Discovered durable knowledge
+- A clearly durable cross-session fact emerges that you want available immediately${checkpointEnabled ? ", before the next checkpoint" : ""} → ## Discovered durable knowledge${
+      checkpointEnabled
+        ? `
 
-These are exceptions, not the norm. The writer covers most extraction at checkpoint time.
+These are exceptions, not the norm. The writer covers most extraction at checkpoint time.`
+        : ""
+    }`,
+    `## Notes scratchpad
 
-## Notes scratchpad
-
-You have a single legal scratchpad at \`${path.join(sessionMemoryDir, "notes.md")}\`. Append entries to it when you want to record:
+You have a single legal scratchpad at \`${notesFile}\`. Append entries to it when you want to record:
 
 - A quote (from the user, an article, a known engineer) that has lasting value but isn't a task-specific decision
 - An unresolved question — something you noticed but won't answer this turn
@@ -132,11 +198,10 @@ You have a single legal scratchpad at \`${path.join(sessionMemoryDir, "notes.md"
 
 Format each entry as:
   ## [turn N · YYYY-MM-DDTHH:MM:SSZ]
-  Free-form body. The writer reorganizes structured content at checkpoint time.
+  Free-form body.${checkpointEnabled ? " The writer reorganizes structured content at checkpoint time." : ""}
 
-This is your ONLY legal scratchpad — don't create \`learning.md\`, \`scratch.md\`, or any other ad-hoc memory file.
-
-## Subagent return format
+This is your ONLY legal scratchpad — don't create \`learning.md\`, \`scratch.md\`, or any other ad-hoc memory file.`,
+    `## Subagent return format
 
 When you (as a subagent) finish your task, your final assistant message will be delivered to the spawning agent. If the spawn machinery added a "Return format (required)" section to your prompt, follow it exactly:
 
@@ -148,15 +213,17 @@ When you (as a subagent) finish your task, your final assistant message will be 
   **Files touched**: <comma-separated paths or "(none)">
   **Findings worth promoting**: <bullet list, or "(none)">
 
-If your spawn prompt didn't include this format (e.g., explore/title/summary agents have their own contracts), follow whatever your prompt specifies.
+If your spawn prompt didn't include this format (e.g., explore/title/summary agents have their own contracts), follow whatever your prompt specifies.`,
+    `## What NOT to do
 
-## What NOT to do
-
-- Don't Edit checkpoint.md — that's the writer's domain.
-- Don't create memory files other than notes.md (no learning.md, no scratch.md). Use notes.md for any free-form entry.
-- Don't ask the user about something memory may already record — search first via Grep / Read.
-
-## Active recall protocol
+${[
+  ...(checkpointEnabled ? ["- Don't Edit checkpoint.md — that's the writer's domain."] : []),
+  "- Don't create memory files other than notes.md (no learning.md, no scratch.md). Use notes.md for any free-form entry.",
+  "- Don't ask the user about something memory may already record — search first via Grep / Read.",
+].join("\n")}`,
+    ...(checkpointEnabled
+      ? [
+          `## Active recall protocol
 
 After a checkpoint rebuild, the following dumps may be already in your context (look for the "Summary of previous conversation from checkpoint files:" header followed by these dumps):
 
@@ -175,8 +242,12 @@ If a dump shows "⚠️ Truncated at ~N tokens. Read(<path>, offset=L) for the r
 
 Memory entries name functions, files, flags, paths — those are CLAIMS about a point in time when they were written. Verify before acting on a specific name.
 
-Don't ask the user about something memory may already record.
-`
+Don't ask the user about something memory may already record.`,
+        ]
+      : []),
+  ]
+
+  return sections.join("\n\n")
 }
 
 export type StreamInput = {
@@ -191,6 +262,7 @@ export type StreamInput = {
   messages: ModelMessage[]
   small?: boolean
   tools: Record<string, Tool>
+  activeTools?: string[]
   retries?: number
   toolChoice?: "auto" | "required" | "none"
   agentID?: string
@@ -259,18 +331,19 @@ const live: Layer.Layer<
       )
 
       // v5: memory-instructions section. Teaches the agent how/where/when to
-      // maintain `MEMORY.md` and `checkpoint.md` directly via Edit. Project ID is
-      // resolved from the ALS-bound Instance with a safe fallback to
-      // `ProjectID.global` (mirrors the pattern in session/checkpoint.ts so the
+      // maintain `MEMORY.md` and (when checkpointing is on) `checkpoint.md`.
+      // Project ID is resolved from the ALS-bound Instance with a safe fallback
+      // to `ProjectID.global` (mirrors the pattern in session/checkpoint.ts so the
       // path the prompt advertises matches the path the writer actually writes).
       // Injected only for actors whose context the checkpoint flow serves —
       // main + peer. Subagents (explore/general/compose) use per-actor compaction
       // and have no checkpoint duty; system-spawned actors (checkpoint-writer et al.)
       // are the writers themselves. Shares the exact `servesCheckpoint` judgement
       // with SessionPrune.fireCheckpoints so the "who owns a checkpoint" and "who is
-      // taught about it" sets can never drift apart.
+      // taught about it" sets can never drift apart. Disabling checkpoints also
+      // disables this memory-system prompt block.
       const servesCheckpoint = yield* actorReg.servesCheckpoint(SessionID.make(input.sessionID), input.agentID)
-      if (servesCheckpoint) {
+      if (servesCheckpoint && !Flag.MIMOCODE_DISABLE_CHECKPOINT) {
         const projectID =
           (yield* Effect.try({
             try: () => Instance.current?.project?.id as ProjectID | undefined,
@@ -284,6 +357,51 @@ const live: Layer.Layer<
         // the "agent edits MEMORY.md before any checkpoint" path. Idempotent.
         yield* Effect.promise(() => migrateProjectMemory(projectID)).pipe(Effect.ignore)
         system.push(buildMemoryInstructions(SessionID.make(input.sessionID), projectID, yield* memory.root()))
+      }
+
+      // Orchestrator fleet roster: inject a compact one-line-per-session
+      // list of the orchestrator's ROUTABLE child sessions. Only for the orchestrator
+      // agent — other agents don't manage children. Format is intentionally compact
+      // (~30 tokens/session): id | title | agent | status. Field 3 is the child's
+      // AGENT (build/plan/compose) — the routing signal the model needs — not its
+      // actor mode, which is always "peer" here and therefore carries no signal.
+      // AI needs details on demand → session status/ask.
+      if (input.agent.name === "orchestrator") {
+        // listPeerChildren joins through the Session row's parent_id, because a
+        // peer child registers its actor row under its OWN session id — a
+        // session_id-keyed lookup (listByParent) never matches a peer.
+        const children = yield* actorReg.listPeerChildren(
+          SessionID.make(input.sessionID),
+          input.agentID ?? "main",
+        )
+        const now = Date.now()
+        const routable = children
+          .filter(({ actor }) => !SYSTEM_SPAWNED_AGENT_TYPES.has(actor.agent))
+          .map(({ actor, title }) => ({ actor, title, live: deriveLiveness(actor, now) }))
+          // Genuinely dead children stay out: `failure` and `cancelled` mean the
+          // child errored out or was torn down, so routing work into it is wrong.
+          .filter(({ live }) => live !== "failure" && live !== "cancelled")
+        // `success` means "its LAST TURN finished cleanly", NOT "the session is
+        // gone" — a persistent peer child is still resumable by `session send`
+        // (same id, history intact). Dropping those made a child PERMANENTLY
+        // invisible the moment it did its job, degrading "route to this topic's
+        // standing owner" into "route to whatever id I still remember". Report
+        // them honestly as `idle` (the same success→idle mapping `session list`
+        // already uses) rather than as `progressing`.
+        const working = routable.filter(({ live }) => live === "progressing" || live === "stalled")
+        // The idle tail is the only side that grows without bound (children keep
+        // finishing; running ones are capped by the machine), so bound IT: keep
+        // the most recently active few. Older idle children stay reachable via
+        // `session list`, they just don't pay rent in every request.
+        const idle = routable
+          .filter(({ live }) => live === "success" || live === "idle")
+          .sort((a, b) => b.actor.lastTurnTime - a.actor.lastTurnTime)
+          .slice(0, ROSTER_IDLE_LIMIT)
+        const lines = [...working, ...idle].map(
+          ({ actor, title, live }) =>
+            `  ${actor.sessionID} | ${title} | ${actor.agent} | ${live === "success" ? "idle" : live}`,
+        )
+        if (lines.length > 0) system.push(`${ROSTER_HEADER}\n${lines.join("\n")}`)
       }
 
       // Plugins still see the multi-part array (base prompt as [0], memory as a
@@ -427,6 +545,8 @@ const live: Layer.Layer<
       )
 
       const tools = resolveTools(input)
+      const requestedActiveTools = new Set(input.activeTools ?? Object.keys(tools))
+      const activeTools = Object.keys(tools).filter((name) => name !== "invalid" && requestedActiveTools.has(name))
 
       // LiteLLM and some Anthropic proxies require the tools parameter to be present
       // when message history contains tool calls, even if no tools are being used.
@@ -445,7 +565,7 @@ const live: Layer.Layer<
       // The stub description explicitly tells the model not to call it.
       if (
         (isLiteLLMProxy || input.model.providerID.includes("github-copilot")) &&
-        Object.keys(tools).length === 0 &&
+        activeTools.length === 0 &&
         hasToolCalls(input.messages)
       ) {
         tools["_noop"] = tool({
@@ -458,6 +578,7 @@ const live: Layer.Layer<
           }),
           execute: async () => ({ output: "", title: "", metadata: {} }),
         })
+        activeTools.push("_noop")
       }
 
       // Wire up toolExecutor for DWS workflow models so that tool calls
@@ -571,7 +692,8 @@ const live: Layer.Layer<
       l.debug("streamText starting", {
         messageID: input.user.id,
         msgCount: messages.length,
-        toolCount: Object.keys(tools).length,
+        registeredToolCount: Object.keys(tools).length,
+        activeToolCount: activeTools.length,
       })
       yield* plugin
         .trigger(
@@ -602,11 +724,10 @@ const live: Layer.Layer<
           })
         },
         async experimental_repairToolCall(failed) {
-          const registered = Object.keys(tools).filter((x) => x !== "invalid")
           const repaired = await ToolCompat.repairToolCall({
             toolName: failed.toolCall.toolName,
             input: failed.toolCall.input,
-            toolNames: registered,
+            toolNames: activeTools,
             getSchema: (toolName) => failed.inputSchema({ toolName }),
           })
           if (repaired) {
@@ -633,7 +754,7 @@ const live: Layer.Layer<
         topP: params.topP,
         topK: params.topK,
         providerOptions: ProviderTransform.providerOptions(input.model, params.options),
-        activeTools: Object.keys(tools).filter((x) => x !== "invalid"),
+        activeTools,
         tools: ProviderTransform.tools(tools, input.model),
         toolChoice: input.toolChoice,
         maxOutputTokens: params.maxOutputTokens,
@@ -662,7 +783,12 @@ const live: Layer.Layer<
             {
               specificationVersion: "v3" as const,
               async transformParams(args) {
-                if (args.type === "stream") {
+                // `generate || stream`, matching session/prompt.ts:597. This file's
+                // only SDK entrypoint is `streamText` (:599), so narrowing to
+                // "stream" is not an active hole today — but it would silently drop
+                // the whole transform, including the empty-content invariant, the
+                // moment a non-streaming call is added here.
+                if (args.type === "generate" || args.type === "stream") {
                   // @ts-expect-error
                   args.params.prompt = ProviderTransform.message(args.params.prompt, input.model, options)
                 }
@@ -808,12 +934,17 @@ export const defaultLayer = Layer.suspend(() =>
   ),
 )
 
-function resolveTools(input: Pick<StreamInput, "tools" | "agent" | "permission" | "user">) {
+function resolveTools(input: Pick<StreamInput, "tools" | "activeTools" | "agent" | "permission" | "user">) {
   const disabled = Permission.disabled(
     Object.keys(input.tools),
     Agent.runtimePermission(input.agent, input.permission),
   )
-  return Record.filter(input.tools, (_, k) => input.user.tools?.[k] !== false && !disabled.has(k))
+  return Record.filter(
+    input.tools,
+    (_, key) =>
+      input.user.tools?.[key] !== false &&
+      (!disabled.has(key) || (key === MCP_TOOL_SEARCH_ID && input.activeTools?.includes(key) === true)),
+  )
 }
 
 // Check if messages contain any tool-call content

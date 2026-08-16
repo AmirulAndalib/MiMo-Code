@@ -94,23 +94,138 @@ function wrapSSE(res: Response, ms: number, ctl: AbortController) {
     },
   })
 
-  return new Response(body, {
+  return wrapResponse(res, body)
+}
+
+function wrapResponse(res: Response, body: ReadableStream<Uint8Array>) {
+  const wrapped = new Response(body, {
     headers: new Headers(res.headers),
     status: res.status,
     statusText: res.statusText,
   })
+  Object.defineProperties(wrapped, {
+    redirected: { get: () => res.redirected },
+    type: { get: () => res.type },
+    url: { get: () => res.url },
+  })
+  return wrapped
 }
 
-function timeoutController(ms: number) {
+function timeoutController(ms: number, message = `Response header timed out after ${ms}ms`) {
   const ctl = new AbortController()
-  const id = setTimeout(
-    () => ctl.abort(Object.assign(new Error(`Response header timed out after ${ms}ms`), { code: "ETIMEDOUT" })),
-    ms,
-  )
+  const id = setTimeout(() => ctl.abort(Object.assign(new Error(message), { code: "ETIMEDOUT" })), ms)
   return {
     signal: ctl.signal,
     clear: () => clearTimeout(id),
   }
+}
+
+type AbortSource = "request" | "timeout"
+
+export function trackAbortSource(requestSignal: AbortSignal | null | undefined, timeoutSignals: AbortSignal[]) {
+  const signals = [requestSignal, ...timeoutSignals].filter((signal) => signal !== null && signal !== undefined)
+  let source: AbortSource | undefined = requestSignal?.aborted
+    ? "request"
+    : timeoutSignals.some((signal) => signal.aborted)
+      ? "timeout"
+      : undefined
+  let winner = requestSignal?.aborted ? requestSignal : timeoutSignals.find((signal) => signal.aborted)
+  const listeners = signals.map((signal, index) => {
+    const listener = () => {
+      if (source) return
+      source = index === 0 && requestSignal ? "request" : "timeout"
+      winner = signal
+    }
+    signal.addEventListener("abort", listener, { once: true })
+    if (signal.aborted) listener()
+    return { signal, listener }
+  })
+  return {
+    signal: signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals),
+    source: () => source,
+    winner: () => winner,
+    dispose: () => listeners.forEach((item) => item.signal.removeEventListener("abort", item.listener)),
+  }
+}
+
+export function normalizeTimeoutError(error: unknown, source: AbortSource | undefined, signal?: AbortSignal) {
+  if (source !== "timeout") return error
+  const reason = signal?.reason
+  return Object.assign(new Error(reason instanceof Error ? reason.message : "Request timed out"), {
+    code: "ETIMEDOUT",
+    cause: error,
+  })
+}
+
+export function requestSignal(input: RequestInfo | URL, init?: RequestInit) {
+  return init?.signal ?? (input instanceof Request ? input.signal : undefined)
+}
+
+export function wrapRequestTimeout(
+  res: Response,
+  requestSignal: AbortSignal | null | undefined,
+  timeoutSignal: AbortSignal,
+  clear: () => void,
+) {
+  const tracked = trackAbortSource(requestSignal, [timeoutSignal])
+  let finalized = false
+  const finalize = () => {
+    if (finalized) return
+    finalized = true
+    clear()
+    tracked.dispose()
+  }
+  if (!res.body) {
+    finalize()
+    return res
+  }
+
+  const reader = res.body.getReader()
+  return wrapResponse(
+    res,
+    new ReadableStream<Uint8Array>({
+      async pull(ctrl) {
+        const part = await new Promise<Awaited<ReturnType<typeof reader.read>>>((resolve, reject) => {
+          const onAbort = () => {
+            const error = normalizeTimeoutError(
+              tracked.signal?.reason ?? new DOMException("The operation was aborted", "AbortError"),
+              tracked.source(),
+              tracked.winner(),
+            )
+            cleanup()
+            void reader.cancel(error).catch(() => {})
+            reject(error)
+          }
+          const cleanup = () => tracked.signal?.removeEventListener("abort", onAbort)
+          if (tracked.signal?.aborted) return onAbort()
+          tracked.signal?.addEventListener("abort", onAbort, { once: true })
+          reader.read().then(
+            (part) => {
+              cleanup()
+              resolve(part)
+            },
+            (error) => {
+              cleanup()
+              reject(normalizeTimeoutError(error, tracked.source(), tracked.winner()))
+            },
+          )
+        }).catch((error) => {
+          finalize()
+          throw error
+        })
+        if (part.done) {
+          finalize()
+          ctrl.close()
+          return
+        }
+        ctrl.enqueue(part.value)
+      },
+      async cancel(reason) {
+        finalize()
+        await reader.cancel(reason)
+      },
+    }),
+  )
 }
 
 type BundledSDK = {
@@ -1386,7 +1501,7 @@ const layer: Layer.Layer<
           const pluginAuth = yield* auth.get(providerID).pipe(Effect.orDie)
 
           provider.models = yield* Effect.promise(async () => {
-            const next = await models(provider as any, { auth: pluginAuth })
+            const next = await models(provider, { auth: pluginAuth })
             return Object.fromEntries(
               Object.entries(next).map(([id, model]) => [
                 id,
@@ -1532,28 +1647,44 @@ const layer: Layer.Layer<
         options["fetch"] = async (input: any, init?: BunFetchRequestInit) => {
           const fetchFn = customFetch ?? fetch
           const opts = init ?? {}
+          const callerSignal = requestSignal(input, opts)
           const chunkAbortCtl = typeof chunkTimeout === "number" && chunkTimeout > 0 ? new AbortController() : undefined
           const headerTimeoutMs = headerTimeout === false ? undefined : headerTimeout
           const headerTimeoutCtl = typeof headerTimeoutMs === "number" ? timeoutController(headerTimeoutMs) : undefined
-          const signals: AbortSignal[] = []
+          const requestTimeoutCtl =
+            typeof options["timeout"] === "number" && options["timeout"] > 0
+              ? timeoutController(options["timeout"], `Request timed out after ${options["timeout"]}ms`)
+              : undefined
+          const tracked = trackAbortSource(
+            callerSignal,
+            [headerTimeoutCtl?.signal, requestTimeoutCtl?.signal].filter((signal) => signal !== undefined),
+          )
+          const signals = [tracked.signal, chunkAbortCtl?.signal].filter((signal) => signal !== undefined)
+          if (signals.length > 0) opts.signal = signals.length === 1 ? signals[0] : AbortSignal.any(signals)
 
-          if (opts.signal) signals.push(opts.signal)
-          if (chunkAbortCtl) signals.push(chunkAbortCtl.signal)
-          if (headerTimeoutCtl) signals.push(headerTimeoutCtl.signal)
-          if (options["timeout"] !== undefined && options["timeout"] !== null && options["timeout"] !== false)
-            signals.push(AbortSignal.timeout(options["timeout"]))
+          const res = await Promise.resolve()
+            .then(() =>
+              fetchFn(input, {
+                ...opts,
+                // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
+                timeout: false,
+              }),
+            )
+            .catch((error: unknown) => {
+              requestTimeoutCtl?.clear()
+              tracked.dispose()
+              throw normalizeTimeoutError(error, tracked.source(), tracked.winner())
+            })
+            .finally(() => {
+              headerTimeoutCtl?.clear()
+            })
 
-          const combined = signals.length === 0 ? null : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
-          if (combined) opts.signal = combined
-
-          const res = await fetchFn(input, {
-            ...opts,
-            // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
-            timeout: false,
-          }).finally(() => headerTimeoutCtl?.clear())
-
-          if (!chunkAbortCtl) return res
-          return wrapSSE(res, chunkTimeout, chunkAbortCtl)
+          tracked.dispose()
+          const bounded = requestTimeoutCtl
+            ? wrapRequestTimeout(res, callerSignal, requestTimeoutCtl.signal, requestTimeoutCtl.clear)
+            : res
+          if (!chunkAbortCtl) return bounded
+          return wrapSSE(bounded, chunkTimeout, chunkAbortCtl)
         }
 
         const bundledLoader = BUNDLED_PROVIDERS[model.api.npm]

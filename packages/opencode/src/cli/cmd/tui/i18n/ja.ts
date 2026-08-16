@@ -64,6 +64,7 @@ export const dict = {
   "tui.tips.ask_slash_commands":
     "ショートカットを探すには、チャットで {highlight}使えるスラッシュコマンドは？{/highlight} と直接質問できます",
   "tui.tips.background": "{highlight}/background{/highlight} を実行してホーム背景にお好みの画像を設定できます",
+  "tui.tips.vivid": "{highlight}/vivid{/highlight} で必要に応じてリッチ表示とミニマル表示を切り替えます",
   "tui.tips.compose_next":
     "{highlight}/compose-next{/highlight} を推奨（強力なモデル向け・Compose 代替）",
   "tui.tips.undo": "{highlight}/undo{/highlight} で直前のメッセージとファイル変更を取り消します",
@@ -229,8 +230,10 @@ export const dict = {
   "tui.skill.skill-creator.description": "エージェントスキルの作成・レビュー・改善",
   "tui.skill.drive-mimo.description": "別の MiMoCode プロセスをプログラムで操作——ヘッドレス JSON イベントまたは tmux 経由のインタラクティブ TUI",
   "tui.skill.research-paper-writing.description": "学術論文の執筆・推敲・査読者視点の批評",
+  "tui.skill.playwright.description": "ターミナルから実ブラウザの操作を自動化",
   "tui.skill.codex.description": "スクリプト、CI、Docker、Kubernetes で Codex CLI を自律実行",
   "tui.skill.claude-code.description": "コーディングタスクを Claude Code CLI に委任",
+  "tui.skill.grok-build.description": "コマンドラインから Grok Build を操作",
   "tui.skill.design-blueprint.description": "モックアップ着手前に設計仕様（DESIGN.md + Decision Trace）を作成",
   "tui.skill.super-research.description": "自律型研究——実験ループ、調査、量的分析、ベンチマーク、根本原因調査、アブレーション、論文再現、論文執筆",
   "tui.skill.deep-research.description": "深層マルチソース調査、クロスチェック付き引用レポート",
@@ -302,6 +305,10 @@ export const dict = {
   "tui.command.opencode.status.title": "ステータスを表示",
   "tui.command.theme.switch.title": "テーマを切り替え",
   "tui.command.logo.switch.title": "ロゴデザインを切り替え",
+  "tui.command.visual_mode.title_on": "リッチ表示中 - ミニマル表示に切り替え",
+  "tui.command.visual_mode.title_off": "ミニマル表示中 - リッチ表示に切り替え",
+  "tui.visual_mode.enabled": "リッチ表示を有効化：星空とロゴ効果を復元しました。流星と進行状況のアニメーションはアニメーション設定に従います",
+  "tui.visual_mode.disabled": "リッチ表示を無効化：星空、流星、ロゴ効果を非表示にし、進行状況表示を固定しました",
   "tui.dialog.logo.title": "ロゴデザイン",
   "tui.dialog.logo.option.classic": "クラシック（太字）",
   "tui.dialog.logo.option.thin": "細字（ハーフブロック）",
@@ -509,14 +516,6 @@ export const dict = {
     "ログイン不要 — そのまま mimo を実行できます。有料/上位モデルを利用する場合は MiMo ブラウザログインを選択してください。",
   "cli.providers.mimo_login.decrypt_retry": "復号に失敗しました、再試行してください（残り {remaining} 回）",
   "cli.providers.mimo_login.decrypt_exhausted": "復号に失敗しました、最大再試行回数に達しました",
-
-  // Question i18n — plan_enter
-  "tui.question.plan_enter.question": "構造化された計画のために plan モードに切り替えますか？",
-  "tui.question.plan_enter.header": "計画開始",
-  "tui.question.plan_enter.option.0.label": "はい",
-  "tui.question.plan_enter.option.0.description": "読み取り専用の計画のために plan エージェントに切り替え",
-  "tui.question.plan_enter.option.1.label": "いいえ",
-  "tui.question.plan_enter.option.1.description": "現在のモードにとどまる",
 
   // Question i18n — plan_exit
   "tui.question.plan_exit.question": "{{plan}} の計画が完了しました。build エージェントに切り替えて実装を開始しますか？",

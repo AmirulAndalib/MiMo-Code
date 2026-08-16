@@ -124,6 +124,94 @@ describe("session.retry.delay", () => {
 })
 
 describe("session.retry.retryable", () => {
+  test("recognizes GPT models by configured or API model ID", () => {
+    expect(SessionRetry.isGptModel({ id: "gpt-5.2", api: { id: "gpt-5.2" } })).toBe(true)
+    expect(SessionRetry.isGptModel({ id: "coding-model", api: { id: "gpt-5.2" } })).toBe(true)
+    expect(SessionRetry.isGptModel({ id: "claude-sonnet-4", api: { id: "claude-sonnet-4" } })).toBe(false)
+  })
+
+  test("identifies the GPT server overloaded stream error exactly", () => {
+    const body = {
+      type: "error",
+      sequence_number: 2,
+      error: {
+        type: "service_unavailable_error",
+        code: "server_is_overloaded",
+        message: "Our servers are currently overloaded. Please try again later.",
+        param: null,
+      },
+    }
+    const error = new MessageV2.APIError({
+      message: body.error.message,
+      isRetryable: true,
+      responseBody: JSON.stringify(body),
+    }).toObject() as MessageV2.APIError
+
+    expect(SessionRetry.isGptServerOverloadedError(error)).toBe(true)
+    expect(
+      SessionRetry.isGptServerOverloadedError({
+        ...error,
+        data: { ...error.data, responseBody: JSON.stringify({ ...body, error: { ...body.error, code: "server_error" } }) },
+      }),
+    ).toBe(false)
+  })
+
+  test("silently retries GPT overload three times before stopping", async () => {
+    const error = new MessageV2.APIError({
+      message: "Our servers are currently overloaded. Please try again later.",
+      isRetryable: true,
+      responseBody: JSON.stringify({
+        type: "error",
+        error: { type: "service_unavailable_error", code: "server_is_overloaded" },
+      }),
+    }).toObject() as MessageV2.APIError
+    const visible: number[] = []
+    let attempts = 0
+
+    await expect(
+      Effect.runPromise(
+        Effect.suspend(() => {
+          attempts++
+          return Effect.fail(error)
+        }).pipe(
+          Effect.retry(
+            SessionRetry.policy({
+              parse: (input) => input as MessageV2.APIError,
+              silentRetry: SessionRetry.isGptServerOverloadedError,
+              set: (info) => Effect.sync(() => visible.push(info.attempt)),
+            }),
+          ),
+        ),
+      ),
+    ).rejects.toBe(error)
+    expect(attempts).toBe(4)
+    expect(visible).toEqual([])
+  })
+
+  test("retries OpenAI server_error stream events", () => {
+    const input = {
+      type: "error",
+      sequence_number: 3,
+      error: {
+        type: "server_error",
+        code: "server_error",
+        message: "An error occurred while processing your request. You can retry your request.",
+        param: null,
+      },
+    }
+    const error = MessageV2.fromError(input, { providerID })
+
+    expect(error).toStrictEqual({
+      name: "APIError",
+      data: {
+        message: input.error.message,
+        isRetryable: true,
+        responseBody: JSON.stringify(input),
+      },
+    })
+    expect(SessionRetry.retryable(error)).toBe(input.error.message)
+  })
+
   test("maps too_many_requests json messages", () => {
     const error = wrap(JSON.stringify({ type: "error", error: { type: "too_many_requests" } }))
     expect(SessionRetry.retryable(error)).toBe("Too Many Requests")
@@ -309,6 +397,26 @@ describe("session.retry.retryable", () => {
 })
 
 describe("session.message-v2.fromError", () => {
+  test("treats a normalized provider timeout as retryable", () => {
+    const result = MessageV2.fromError(Object.assign(new Error("Request timed out"), { code: "ETIMEDOUT" }), {
+      providerID,
+    })
+
+    expect(MessageV2.APIError.isInstance(result)).toBe(true)
+    expect((result as MessageV2.APIError).data.isRetryable).toBe(true)
+    expect((result as MessageV2.APIError).data.metadata?.code).toBe("ETIMEDOUT")
+    expect(SessionRetry.retryable(result as ReturnType<NamedError["toObject"]>)).toBeTruthy()
+  })
+
+  test("keeps AbortError terminal", () => {
+    const result = MessageV2.fromError(new DOMException("The user aborted the request", "AbortError"), {
+      providerID,
+    })
+
+    expect(MessageV2.AbortedError.isInstance(result)).toBe(true)
+    expect(SessionRetry.retryable(result as ReturnType<NamedError["toObject"]>)).toBeUndefined()
+  })
+
   test.concurrent(
     "converts ECONNRESET socket errors to retryable APIError",
     async () => {
