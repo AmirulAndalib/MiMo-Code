@@ -126,10 +126,6 @@ export const layer = Layer.effect(
             `  Workspace root folder: ${Instance.worktree}`,
             `  Is directory a git repo: ${project.vcs === "git" ? "yes" : "no"}`,
             `  Platform: ${process.platform}`,
-            // Anchored to the session's creation time (not request time) so this block
-            // stays byte-identical across every turn of a session — including ones that
-            // cross midnight — keeping it inside the Anthropic cached system prefix.
-            `  Today's date: ${new Date(now).toDateString()}`,
             `</env>`,
           ].join("\n"),
           `IMPORTANT: Your response must ALWAYS strictly follow the same major language as the user.`,
