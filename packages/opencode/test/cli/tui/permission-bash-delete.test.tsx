@@ -92,6 +92,38 @@ test("many deletions never overpaint the footer", async () => {
   expectFooterIntact(frame)
 })
 
+test("narrow terminals with a tall footer keep the footer intact", async () => {
+  const deletes = Array.from({ length: 14 }, (_, i) => `rm -rf dir-${i}`)
+  const app = await testRender(
+    () => (
+      <box maxHeight={15}>
+        <box gap={1} paddingLeft={1} paddingRight={3} paddingTop={1} paddingBottom={1} flexGrow={1}>
+          <box flexShrink={0}>
+            <text fg={text}>Permission required</text>
+            <text fg={text}>Confirm irreversible deletion</text>
+          </box>
+          <BashDeleteBody command={command} deletes={deletes} theme={theme} />
+        </box>
+        {/* below 80 cols the real footer becomes a column layout ~5 rows tall */}
+        <box flexShrink={0} paddingTop={1} paddingBottom={1} paddingLeft={2}>
+          <text fg={text}>Allow once  Reject</text>
+          <text fg={text}>tab select</text>
+          <text fg={text}>enter confirm</text>
+        </box>
+      </box>
+    ),
+    { width: 60, height: 20 },
+  )
+  await app.renderOnce()
+  await app.renderOnce()
+
+  const frame = app.captureCharFrame()
+  expect(deletionRows(frame).length).toBeGreaterThanOrEqual(2)
+  const confirmRow = frame.split("\n").filter((l) => l.includes("enter confirm"))
+  expect(confirmRow.length).toBe(1)
+  expect(confirmRow[0]!.trim()).toBe("enter confirm")
+})
+
 test("deletion lines paint every cell with the warning background", async () => {
   const deletes = Array.from({ length: 6 }, (_, i) => `rm -rf packages/opencode/artifact-dir-${i}`)
   const app = await testRender(() => <Shell maxHeight={15} deletes={deletes} />, { width: 100, height: 20 })

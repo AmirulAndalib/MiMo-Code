@@ -146,19 +146,25 @@ export function BashDeleteBody(props: {
   const dimensions = useTerminalDimensions()
   // A scrollbox stretches to fill available height (its viewport chain is
   // flexGrow:1 with minHeight:"100%" content), so cap it from a wrap estimate.
-  // Word wrap only ever adds rows over ceil(len/width), so the estimate never
-  // exceeds the real row count — worst case the content scrolls.
+  // The divisor matches the body's horizontal insets (border + paddings = 6),
+  // so word wrap produces at least this many rows and the estimate never
+  // over-allocates — worst case the content scrolls.
   const commandRows = createMemo(() => {
-    const width = Math.max(20, dimensions().width - 8)
+    const width = Math.max(20, dimensions().width - 6)
     return ("$ " + props.command)
       .split("\n")
       .reduce((acc, line) => acc + Math.max(1, Math.ceil(line.length / width)), 0)
   })
 
-  const trackOptions = {
+  // Guaranteed visible deletion rows. Keep this at 4+: smaller minHeights on
+  // the scrollbox collide with the vertical scrollbar's own minimum extent and
+  // yoga stops shrinking the section entirely, overflowing the footer.
+  const deletesFloor = createMemo(() => Math.min(props.deletes.length, 4))
+
+  const trackOptions = () => ({
     backgroundColor: props.theme.background,
     foregroundColor: props.theme.borderActive,
-  }
+  })
 
   return (
     <box paddingLeft={1} gap={1} flexShrink={1} minHeight={0}>
@@ -168,22 +174,22 @@ export function BashDeleteBody(props: {
           flexShrink={1}
           minHeight={1}
           scrollAcceleration={props.scrollAcceleration}
-          verticalScrollbarOptions={{ trackOptions }}
+          verticalScrollbarOptions={{ trackOptions: trackOptions() }}
         >
           <text fg={props.theme.text}>{"$ " + props.command}</text>
         </scrollbox>
       </Show>
       <Show when={props.deletes.length > 0}>
-        <box gap={0} flexShrink={1} minHeight={Math.min(props.deletes.length, 4) + 1}>
+        <box gap={0} flexShrink={1} minHeight={deletesFloor() + 1}>
           <text fg={props.theme.textMuted} flexShrink={0}>
             Detected deletions
           </text>
           <scrollbox
-            maxHeight={Math.min(props.deletes.length, 8)}
+            maxHeight={props.deletes.length}
             flexShrink={1}
-            minHeight={Math.min(props.deletes.length, 4)}
+            minHeight={deletesFloor()}
             scrollAcceleration={props.scrollAcceleration}
-            verticalScrollbarOptions={{ trackOptions }}
+            verticalScrollbarOptions={{ trackOptions: trackOptions() }}
           >
             <For each={props.deletes}>
               {(cmd) => (
