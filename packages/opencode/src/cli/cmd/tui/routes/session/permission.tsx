@@ -131,45 +131,68 @@ function TextBody(props: { title: string; description?: string; icon?: string })
 
 type PromptTheme = ReturnType<typeof useTheme>["theme"]
 
-// The command scrolls instead of being squashed by the Prompt's maxHeight
-// (yoga silently drops overflowing text rows), and the deletion lines are
-// pinned outside the scroll area with an explicit warning background so every
-// cell — including spaces — is painted opaquely. Stale glyphs from a previous
-// frame's layout were observed leaking through the unpainted space cells of
-// these lines. Theme comes in as a prop so tests can mount this without the
-// full ThemeProvider context chain.
-export function BashDeleteBody(props: { command: string; deletes: string[]; theme: PromptTheme }) {
+// Command and deletions each live in an explicitly sized scrollbox: the
+// Prompt's maxHeight used to make yoga silently drop overflowing rows (hiding
+// deletion targets), and the unpainted space cells of the warning lines leaked
+// stale glyphs from earlier frames — so deletion lines also paint every cell
+// with an explicit warning background. Theme comes in as a prop so tests can
+// mount this without the full ThemeProvider context chain.
+export function BashDeleteBody(props: {
+  command: string
+  deletes: string[]
+  theme: PromptTheme
+  scrollAcceleration?: ReturnType<typeof getScrollAcceleration>
+}) {
+  const dimensions = useTerminalDimensions()
+  // A scrollbox stretches to fill available height (its viewport chain is
+  // flexGrow:1 with minHeight:"100%" content), so cap it from a wrap estimate.
+  // Word wrap only ever adds rows over ceil(len/width), so the estimate never
+  // exceeds the real row count — worst case the content scrolls.
+  const commandRows = createMemo(() => {
+    const width = Math.max(20, dimensions().width - 8)
+    return ("$ " + props.command)
+      .split("\n")
+      .reduce((acc, line) => acc + Math.max(1, Math.ceil(line.length / width)), 0)
+  })
+
+  const trackOptions = {
+    backgroundColor: props.theme.background,
+    foregroundColor: props.theme.borderActive,
+  }
+
   return (
-    <box paddingLeft={1} gap={1} minHeight={0}>
+    <box paddingLeft={1} gap={1} flexShrink={1} minHeight={0}>
       <Show when={props.command}>
         <scrollbox
-          minHeight={0}
-          verticalScrollbarOptions={{
-            trackOptions: {
-              backgroundColor: props.theme.background,
-              foregroundColor: props.theme.borderActive,
-            },
-          }}
+          maxHeight={commandRows()}
+          flexShrink={1}
+          minHeight={1}
+          scrollAcceleration={props.scrollAcceleration}
+          verticalScrollbarOptions={{ trackOptions }}
         >
           <text fg={props.theme.text}>{"$ " + props.command}</text>
         </scrollbox>
       </Show>
       <Show when={props.deletes.length > 0}>
-        <box gap={0} flexShrink={0}>
-          <text fg={props.theme.textMuted}>Detected deletions</text>
-          <box>
+        <box gap={0} flexShrink={1} minHeight={Math.min(props.deletes.length, 4) + 1}>
+          <text fg={props.theme.textMuted} flexShrink={0}>
+            Detected deletions
+          </text>
+          <scrollbox
+            maxHeight={Math.min(props.deletes.length, 8)}
+            flexShrink={1}
+            minHeight={Math.min(props.deletes.length, 4)}
+            scrollAcceleration={props.scrollAcceleration}
+            verticalScrollbarOptions={{ trackOptions }}
+          >
             <For each={props.deletes}>
               {(cmd) => (
-                <text
-                  fg={selectedForeground(props.theme, props.theme.warning)}
-                  bg={props.theme.warning}
-                  flexShrink={0}
-                >
+                <text fg={selectedForeground(props.theme, props.theme.warning)} bg={props.theme.warning}>
                   {" - " + cmd + " "}
                 </text>
               )}
             </For>
-          </box>
+          </scrollbox>
         </box>
       </Show>
     </box>
@@ -198,6 +221,7 @@ export function PermissionPrompt(props: { request: PermissionRequest }) {
   })
 
   const { theme } = useTheme()
+  const config = useTuiConfig()
 
   return (
     <Switch>
@@ -360,7 +384,14 @@ export function PermissionPrompt(props: { request: PermissionRequest }) {
               return {
                 icon: "✗",
                 title: "Confirm irreversible deletion",
-                body: <BashDeleteBody command={command} deletes={deletes} theme={theme} />,
+                body: (
+                  <BashDeleteBody
+                    command={command}
+                    deletes={deletes}
+                    theme={theme}
+                    scrollAcceleration={getScrollAcceleration(config)}
+                  />
+                ),
               }
             }
 

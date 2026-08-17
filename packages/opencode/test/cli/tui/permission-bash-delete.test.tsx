@@ -26,22 +26,22 @@ const command = [
   "echo done",
 ].join(" && ")
 
-const deletes = Array.from({ length: 6 }, (_, i) => `rm -rf packages/opencode/artifact-dir-${i}`)
+const text = RGBA.fromHex("#eeeeee")
 
 // Mirrors the Prompt shell in permission.tsx: hard maxHeight, header and
 // footer pinned with flexShrink=0, body squeezed in between.
-function Shell(props: { maxHeight: number }) {
+function Shell(props: { maxHeight: number; deletes: string[] }) {
   return (
     <box maxHeight={props.maxHeight}>
       <box gap={1} paddingLeft={1} paddingRight={3} paddingTop={1} paddingBottom={1} flexGrow={1}>
-        <box paddingLeft={1} flexShrink={0}>
-          <text fg={(theme as any).text}>Permission required</text>
-          <text fg={(theme as any).text}>Confirm irreversible deletion</text>
+        <box paddingLeft={0} flexShrink={0}>
+          <text fg={text}>Permission required</text>
+          <text fg={text}>Confirm irreversible deletion</text>
         </box>
-        <BashDeleteBody command={command} deletes={deletes} theme={theme} />
+        <BashDeleteBody command={command} deletes={props.deletes} theme={theme} />
       </box>
       <box flexShrink={0} paddingTop={1} paddingBottom={1} paddingLeft={2}>
-        <text fg={(theme as any).text}>Allow once</text>
+        <text fg={text}>Allow once</text>
       </box>
     </box>
   )
@@ -53,27 +53,54 @@ function sameColor(a: RGBA | undefined, b: RGBA) {
   return buf(a).join(",") === buf(b).join(",")
 }
 
-test("bash_delete prompt keeps every deletion line visible when squeezed", async () => {
-  const app = await testRender(() => <Shell maxHeight={15} />, { width: 100, height: 20 })
+function deletionRows(frame: string) {
+  return frame.split("\n").filter((l) => l.includes("- rm -rf"))
+}
+
+function expectFooterIntact(frame: string) {
+  const footer = frame.split("\n").filter((l) => l.includes("Allow once"))
+  expect(footer.length).toBe(1)
+  expect(footer[0]!.trim()).toBe("Allow once")
+}
+
+test("squeezed prompt keeps deletion lines intact and off the footer", async () => {
+  const deletes = Array.from({ length: 6 }, (_, i) => `rm -rf packages/opencode/artifact-dir-${i}`)
+  const app = await testRender(() => <Shell maxHeight={15} deletes={deletes} />, { width: 100, height: 20 })
   await app.renderOnce()
   await app.renderOnce()
 
   const frame = app.captureCharFrame()
-  for (const cmd of deletes) {
-    expect(frame).toContain("- " + cmd)
-  }
+  const rows = deletionRows(frame)
+  // at least the guaranteed minimum is visible, scrolled from the top, each
+  // row complete (the old body silently dropped interleaved rows instead)
+  expect(rows.length).toBeGreaterThanOrEqual(4)
+  rows.forEach((row, i) => {
+    expect(row).toContain(`- rm -rf packages/opencode/artifact-dir-${i} `)
+  })
   expect(frame).toContain("Detected deletions")
-  expect(frame).toContain("Allow once")
+  expectFooterIntact(frame)
 })
 
-test("bash_delete deletion lines paint every cell with the warning background", async () => {
-  const app = await testRender(() => <Shell maxHeight={15} />, { width: 100, height: 20 })
+test("many deletions never overpaint the footer", async () => {
+  const deletes = Array.from({ length: 14 }, (_, i) => `rm -rf packages/opencode/artifact-dir-${i}`)
+  const app = await testRender(() => <Shell maxHeight={15} deletes={deletes} />, { width: 100, height: 20 })
+  await app.renderOnce()
+  await app.renderOnce()
+
+  const frame = app.captureCharFrame()
+  expect(deletionRows(frame).length).toBeGreaterThanOrEqual(4)
+  expectFooterIntact(frame)
+})
+
+test("deletion lines paint every cell with the warning background", async () => {
+  const deletes = Array.from({ length: 6 }, (_, i) => `rm -rf packages/opencode/artifact-dir-${i}`)
+  const app = await testRender(() => <Shell maxHeight={15} deletes={deletes} />, { width: 100, height: 20 })
   await app.renderOnce()
   await app.renderOnce()
 
   const captured = app.captureSpans()
   const rows = captured.lines.filter((line) => line.spans.some((s) => s.text.includes("- rm -rf")))
-  expect(rows.length).toBe(deletes.length)
+  expect(rows.length).toBeGreaterThanOrEqual(4)
 
   for (const row of rows) {
     const span = row.spans.find((s) => s.text.includes("- rm -rf"))!
@@ -82,4 +109,32 @@ test("bash_delete deletion lines paint every cell with the warning background", 
     expect(span.text.endsWith(" ")).toBe(true)
     expect(sameColor(span.bg, WARNING)).toBe(true)
   }
+})
+
+test("body hugs a short command instead of filling the panel", async () => {
+  const app = await testRender(
+    () => (
+      <box maxHeight={15}>
+        <box gap={1} paddingLeft={1} paddingTop={1} paddingBottom={1} flexGrow={1}>
+          <box flexShrink={0}>
+            <text fg={text}>Permission required</text>
+          </box>
+          <BashDeleteBody command="rm -rf dist/tmp" deletes={["rm -rf dist/tmp"]} theme={theme} />
+        </box>
+        <box flexShrink={0}>
+          <text fg={text}>Allow once</text>
+        </box>
+      </box>
+    ),
+    { width: 80, height: 20 },
+  )
+  await app.renderOnce()
+  await app.renderOnce()
+
+  const lines = app.captureCharFrame().split("\n")
+  const commandRow = lines.findIndex((l) => l.includes("$ rm -rf dist/tmp"))
+  const labelRow = lines.findIndex((l) => l.includes("Detected deletions"))
+  expect(commandRow).toBeGreaterThan(-1)
+  // exactly one gap row between the one-line command and the deletions label
+  expect(labelRow).toBe(commandRow + 2)
 })
