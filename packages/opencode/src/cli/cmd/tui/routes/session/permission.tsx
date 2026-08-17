@@ -149,12 +149,14 @@ export function BashDeleteBody(props: {
   // The divisor matches the body's horizontal insets (border + paddings = 6),
   // so word wrap produces at least this many rows and the estimate never
   // over-allocates — worst case the content scrolls.
-  const commandRows = createMemo(() => {
+  const wrapRows = (text: string) => {
     const width = Math.max(20, dimensions().width - 6)
-    return ("$ " + props.command)
-      .split("\n")
-      .reduce((acc, line) => acc + Math.max(1, Math.ceil(line.length / width)), 0)
-  })
+    return text.split("\n").reduce((acc, line) => acc + Math.max(1, Math.ceil(line.length / width)), 0)
+  }
+  const commandRows = createMemo(() => wrapRows("$ " + props.command))
+  // Long deletion paths word-wrap too; budgeting one row per entry would let a
+  // wrapping entry push later ones behind the scroll despite free space below.
+  const deleteRows = createMemo(() => props.deletes.reduce((acc, cmd) => acc + wrapRows(" - " + cmd + " "), 0))
 
   // Guaranteed visible deletion rows. Don't lower the cap below 4: once the
   // list is long enough to scroll, a scrollbox minHeight smaller than the
@@ -187,7 +189,7 @@ export function BashDeleteBody(props: {
             Detected deletions
           </text>
           <scrollbox
-            maxHeight={props.deletes.length}
+            maxHeight={deleteRows()}
             flexShrink={1}
             minHeight={deletesFloor()}
             scrollAcceleration={props.scrollAcceleration}

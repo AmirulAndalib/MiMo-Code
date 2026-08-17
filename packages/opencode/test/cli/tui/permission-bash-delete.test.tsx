@@ -172,3 +172,34 @@ test("body hugs a short command instead of filling the panel", async () => {
   // exactly one gap row between the one-line command and the deletions label
   expect(labelRow).toBe(commandRow + 2)
 })
+
+test("a wrapping deletion path does not hide later entries behind the scroll", async () => {
+  const deletes = [
+    "rm -rf /Users/someone/projects/very/deeply/nested/build-output/artifacts/cache-directory",
+    "rm -rf short-1",
+    "rm -rf short-2",
+  ]
+  const app = await testRender(
+    () => (
+      <box maxHeight={20}>
+        <box gap={1} paddingLeft={1} paddingTop={1} paddingBottom={1} flexGrow={1}>
+          <box flexShrink={0}>
+            <text fg={text}>Permission required</text>
+          </box>
+          <BashDeleteBody command="rm -rf dist/tmp" deletes={deletes} theme={theme} />
+        </box>
+        <box flexShrink={0}>
+          <text fg={text}>Allow once</text>
+        </box>
+      </box>
+    ),
+    { width: 44, height: 24 },
+  )
+  await app.renderOnce()
+  await app.renderOnce()
+
+  const frame = app.captureCharFrame()
+  // the long path wraps over several rows; the short entries must still render
+  expect(frame).toContain("- rm -rf short-1")
+  expect(frame).toContain("- rm -rf short-2")
+})
