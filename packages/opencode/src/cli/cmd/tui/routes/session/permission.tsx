@@ -156,9 +156,11 @@ export function BashDeleteBody(props: {
       .reduce((acc, line) => acc + Math.max(1, Math.ceil(line.length / width)), 0)
   })
 
-  // Guaranteed visible deletion rows. Keep this at 4+: smaller minHeights on
-  // the scrollbox collide with the vertical scrollbar's own minimum extent and
-  // yoga stops shrinking the section entirely, overflowing the footer.
+  // Guaranteed visible deletion rows. Don't lower the cap below 4: once the
+  // list is long enough to scroll, a scrollbox minHeight smaller than the
+  // vertical scrollbar's minimum extent makes yoga stop shrinking the section
+  // entirely, overflowing the footer. (For 1-3 deletions minHeight equals the
+  // full list height, so no scrollbar appears and the collision can't happen.)
   const deletesFloor = createMemo(() => Math.min(props.deletes.length, 4))
 
   const trackOptions = () => ({

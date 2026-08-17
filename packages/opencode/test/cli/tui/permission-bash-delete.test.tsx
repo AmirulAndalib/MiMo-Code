@@ -54,7 +54,9 @@ function sameColor(a: RGBA | undefined, b: RGBA) {
 }
 
 function deletionRows(frame: string) {
-  return frame.split("\n").filter((l) => l.includes("- rm -rf"))
+  // deletion lines render as " - rm -rf ..." at the body indent; the wrapped
+  // command never starts a row with this exact prefix
+  return frame.split("\n").filter((l) => /^\s+- rm -rf /.test(l))
 }
 
 function expectFooterIntact(frame: string) {
