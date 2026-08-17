@@ -129,6 +129,53 @@ function TextBody(props: { title: string; description?: string; icon?: string })
   )
 }
 
+type PromptTheme = ReturnType<typeof useTheme>["theme"]
+
+// The command scrolls instead of being squashed by the Prompt's maxHeight
+// (yoga silently drops overflowing text rows), and the deletion lines are
+// pinned outside the scroll area with an explicit warning background so every
+// cell — including spaces — is painted opaquely. Stale glyphs from a previous
+// frame's layout were observed leaking through the unpainted space cells of
+// these lines. Theme comes in as a prop so tests can mount this without the
+// full ThemeProvider context chain.
+export function BashDeleteBody(props: { command: string; deletes: string[]; theme: PromptTheme }) {
+  return (
+    <box paddingLeft={1} gap={1} minHeight={0}>
+      <Show when={props.command}>
+        <scrollbox
+          minHeight={0}
+          verticalScrollbarOptions={{
+            trackOptions: {
+              backgroundColor: props.theme.background,
+              foregroundColor: props.theme.borderActive,
+            },
+          }}
+        >
+          <text fg={props.theme.text}>{"$ " + props.command}</text>
+        </scrollbox>
+      </Show>
+      <Show when={props.deletes.length > 0}>
+        <box gap={0} flexShrink={0}>
+          <text fg={props.theme.textMuted}>Detected deletions</text>
+          <box>
+            <For each={props.deletes}>
+              {(cmd) => (
+                <text
+                  fg={selectedForeground(props.theme, props.theme.warning)}
+                  bg={props.theme.warning}
+                  flexShrink={0}
+                >
+                  {" - " + cmd + " "}
+                </text>
+              )}
+            </For>
+          </box>
+        </box>
+      </Show>
+    </box>
+  )
+}
+
 export function PermissionPrompt(props: { request: PermissionRequest }) {
   const sdk = useSDK()
   const sync = useSync()
@@ -313,21 +360,7 @@ export function PermissionPrompt(props: { request: PermissionRequest }) {
               return {
                 icon: "✗",
                 title: "Confirm irreversible deletion",
-                body: (
-                  <box paddingLeft={1} gap={1}>
-                    <Show when={command}>
-                      <text fg={theme.text}>{"$ " + command}</text>
-                    </Show>
-                    <Show when={deletes.length > 0}>
-                      <box gap={0}>
-                        <text fg={theme.textMuted}>Detected deletions</text>
-                        <box>
-                          <For each={deletes}>{(cmd) => <text fg={theme.warning}>{"- " + cmd}</text>}</For>
-                        </box>
-                      </box>
-                    </Show>
-                  </box>
-                ),
+                body: <BashDeleteBody command={command} deletes={deletes} theme={theme} />,
               }
             }
 
