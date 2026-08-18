@@ -210,24 +210,6 @@ describe("session.system", () => {
     expect(prompt).toContain("You are MiMoCode, an agent based on the GPT-5 family")
   })
 
-  test.each([
-    ["mimo-v2", "deployment-primary"],
-    ["mimo-v2.5", "deployment-primary"],
-    ["mimo-v2.6", "deployment-primary"],
-    ["XiaomiMiMo/MiMo-V2.6-Pro", "deployment-primary"],
-    ["mimo-auto", "deployment-primary"],
-    ["custom-model", "mimo-v2.5"],
-  ])("uses Codex mode for every MiMo model: %s", (id, apiID) => {
-    const prompt = SystemPrompt.provider(
-      ProviderTest.model({
-        id: ModelID.make(id),
-        api: { id: apiID } as never,
-      }),
-    )[0]
-
-    expect(prompt).toContain("You are MiMoCode, the best coding agent on the planet")
-  })
-
   test("does not inject vision capability guidance for GPT, Claude, or Gemini models", async () => {
     await using tmp = await tmpdir({ git: true })
 

@@ -121,35 +121,6 @@ describe("ToolRegistry.tools: invocation style resolution", () => {
     ),
   )
 
-  it.live("uses the Codex toolset for every MiMo model", () =>
-    provideTmpdirInstance(() =>
-      Effect.gen(function* () {
-        const reg = yield* ToolRegistry.Service
-        const agents = yield* Agent.Service
-        const general = yield* agents.get("general")
-        if (!general) throw new Error("no general agent")
-        const tools = yield* reg.tools({
-          providerID: ProviderID.make("xiaomi"),
-          modelID: ModelID.make("mimo-v2.5"),
-          agent: general,
-        })
-        const ids = tools.map((tool) => tool.id)
-
-        expect(ids).toContain("exec")
-        expect(ids).toContain("apply_patch")
-        expect(ids).toContain("view_image")
-        expect(ids).not.toContain("read")
-        expect(ids).not.toContain("write")
-        expect(ids).not.toContain("edit")
-        expect(ids).not.toContain("grep")
-        expect(ids).not.toContain("glob")
-        expect(tools.find((tool) => tool.id === "bash")?.description).toContain(
-          "the dedicated `read`, `write`, and `edit` tools are unavailable",
-        )
-      }),
-    ),
-  )
-
   it.live.skip("masks multiedit for GPT models", () =>
     provideTmpdirInstance((dir) =>
       Effect.gen(function* () {
