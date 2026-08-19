@@ -1675,6 +1675,20 @@ export type ServerConfig = {
   cors?: Array<string>
 }
 
+/**
+ * Token lifetime defaults for the temporary local LLM server (mimo llm-server)
+ */
+export type LlmServerConfig = {
+  /**
+   * Default sliding lifetime for issued tokens, measured from last use (e.g. '30m', '12h', '1d', or 'none'). Default '1d'.
+   */
+  ttl?: string
+  /**
+   * Absolute ceiling from issue, regardless of activity (e.g. '7d', or 'none'). Default 'none', so an actively used token is not cut off.
+   */
+  maxAge?: string
+}
+
 export type PermissionActionConfig = "ask" | "allow" | "deny"
 
 export type PermissionObjectConfig = {
@@ -1825,6 +1839,8 @@ export type ProviderConfig = {
       reasoning?: boolean
       temperature?: boolean
       tool_call?: boolean
+      voice_design?: boolean
+      voice_clone?: boolean
       interleaved?:
         | true
         | {
@@ -1979,6 +1995,7 @@ export type Config = {
   $schema?: string
   logLevel?: LogLevel
   server?: ServerConfig
+  llmServer?: LlmServerConfig
   /**
    * Command configuration, see https://mimo.xiaomi.com/mimocode/commands
    */
@@ -2494,6 +2511,8 @@ export type Model = {
     reasoning: boolean
     attachment: boolean
     toolcall: boolean
+    voiceDesign?: boolean
+    voiceClone?: boolean
     input: {
       text: boolean
       audio: boolean
