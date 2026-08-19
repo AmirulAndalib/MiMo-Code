@@ -30,6 +30,9 @@ describe("isGPTModel", () => {
 describe("isMcpToolSearchEnabled", () => {
   test("defaults to GPT models and allows explicit non-GPT opt-in", () => {
     expect(isMcpToolSearchEnabled(false, "claude-opus-4-6")).toBe(false)
+    expect(isMcpToolSearchEnabled(false, "mimo-v2.5")).toBe(false)
+    expect(isMcpToolSearchEnabled(false, "mimo-v2.5-pro")).toBe(false)
+    expect(isMcpToolSearchEnabled(false, "mimo-v2.6")).toBe(true)
     expect(isMcpToolSearchEnabled(false, "gpt-5.2")).toBe(true)
     expect(isMcpToolSearchEnabled(false, "gpt-oss-120b")).toBe(false)
     expect(isMcpToolSearchEnabled(true, "claude-opus-4-6")).toBe(true)
@@ -42,6 +45,12 @@ describe("isMcpToolSearchEnabled", () => {
 })
 
 describe("usesGPTToolset", () => {
+  test("uses the normal toolset for MiMo v2.5 models", () => {
+    expect(usesGPTToolset("mimo-v2.5")).toBe(false)
+    expect(usesGPTToolset("mimo-v2.5-pro")).toBe(false)
+    expect(usesGPTToolset("mimo-v2.6")).toBe(true)
+  })
+
   test("uses the GPT toolset for every model in Codex mode", () => {
     expect(usesGPTToolset("claude-opus-4-6")).toBe(false)
     process.env.MIMOCODE_CODEX_MODE = "true"

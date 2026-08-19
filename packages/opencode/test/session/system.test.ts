@@ -182,9 +182,10 @@ describe("session.system", () => {
     expect(prompt).not.toContain("When possible, prefer parallelization over sequential tool calls")
   })
 
-  test("uses the GPT prompt for Codex and MiMo models", () => {
+  test("uses the GPT prompt for Codex models and the normal prompt for MiMo v2.5 models", () => {
     const gpt = SystemPrompt.provider(ProviderTest.model({ id: ModelID.make("gpt-5.4") }))[0]
-    const prompts = ["gpt-5.4-codex", "mimo-v2.5"].map(
+    const normal = SystemPrompt.provider(ProviderTest.model({ id: ModelID.make("model-default") }))[0]
+    const prompts = ["mimo-v2.5", "mimo-v2.5-pro"].map(
       (id) =>
         SystemPrompt.provider(
           ProviderTest.model({
@@ -193,7 +194,9 @@ describe("session.system", () => {
         )[0],
     )
 
-    expect(prompts).toEqual([gpt, gpt])
+    expect(SystemPrompt.provider(ProviderTest.model({ id: ModelID.make("gpt-5.4-codex") }))[0]).toBe(gpt)
+    expect(prompts).toEqual([normal, normal])
+    expect(SystemPrompt.provider(ProviderTest.model({ id: ModelID.make("mimo-v2.6") }))[0]).toBe(gpt)
   })
 
   test("Codex mode forces the GPT prompt for non-GPT models", () => {
