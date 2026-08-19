@@ -102,6 +102,7 @@ import { DialogTokenPlan } from "../../component/dialog-token-plan"
 import { SessionRetry } from "@/session/retry"
 import { getRevertDiffFiles } from "../../util/revert-diff"
 import * as Collapse from "../../util/collapse"
+import { shouldHideTool } from "../../util/tool-visibility"
 import { planSwitchTarget } from "./plan-switch"
 import {
   createFreeApiSunsetSignal,
@@ -2157,12 +2158,16 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
   const ctx = use()
   const sync = useSync()
 
-  // Hide tool if showDetails is false and tool completed successfully
-  const shouldHide = createMemo(() => {
-    if (ctx.showDetails()) return false
-    if (props.part.state.status !== "completed") return false
-    return true
-  })
+  // A completed exec may be the assistant's entire visible turn. Keep its
+  // clickable summary even when generic tool details are hidden, otherwise a
+  // successful side effect (for example creating a PR) renders as a blank turn.
+  const shouldHide = createMemo(() =>
+    shouldHideTool({
+      showDetails: ctx.showDetails(),
+      tool: props.part.tool,
+      status: props.part.state.status,
+    }),
+  )
 
   const toolprops = {
     get metadata() {
