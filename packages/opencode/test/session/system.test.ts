@@ -180,6 +180,9 @@ describe("session.system", () => {
     expect(prompt).toContain("keep dependencies sequential")
     expect(prompt).toContain("including a single small call")
     expect(prompt).toContain("tools.<name>(...)")
+    expect(prompt).toContain('tools.skill({ name: "<skill-name>" })')
+    expect(prompt).toContain("return result.output")
+    expect(prompt).toContain("never call an unavailable top-level `skill`")
     expect(prompt).not.toContain("When possible, prefer parallelization over sequential tool calls")
   })
 
@@ -286,7 +289,7 @@ describe("session.system", () => {
     })
   })
 
-  test("prompts the model to search skills from the first user query", async () => {
+  test("skill catalog does not include invocation reminders", async () => {
     await using tmp = await tmpdir({ git: true })
     const home = process.env.HOME
     const userProfile = process.env.USERPROFILE
@@ -304,13 +307,10 @@ describe("session.system", () => {
             }).pipe(Effect.provide(SystemPrompt.defaultLayer)),
           )
 
-          expect(prompt).toContain("first user query")
-          expect(prompt).toContain("might benefit from a specialized workflow")
-          expect(prompt).toContain("skill_search")
-          expect(prompt).toContain("action")
-          expect(prompt).toContain("input")
-          expect(prompt).toContain("output")
-          expect(prompt).toContain("audience")
+          expect(prompt).toContain("Skills available in this session:")
+          expect(prompt).not.toContain("first user query")
+          expect(prompt).not.toContain("skill_search")
+          expect(prompt).not.toContain("Use the skill tool")
         },
       })
     } finally {
@@ -378,34 +378,4 @@ description: ${description}
     }
   })
 
-  test("does not prompt blacklisted models to use skill_search", async () => {
-    await using tmp = await tmpdir({ git: true })
-
-    await Instance.provide({
-      directory: tmp.path,
-      fn: async () => {
-        const build = await load(tmp.path, (svc) => svc.get("build"))
-        const prompts = await Effect.runPromise(
-          Effect.gen(function* () {
-            const system = yield* SystemPrompt.Service
-            return yield* Effect.all([
-              system.skills(build!, { id: "gpt-5.4" }),
-              system.skills(build!, { id: "claude-sonnet-4-6" }),
-              system.skills(build!, { id: "kimi-k2.5" }),
-              system.skills(build!, { id: "k2p5", family: "kimi-thinking" }),
-              system.skills(build!, { id: "mimo-v2" }),
-              system.skills(build!, { id: "deepseek-v3.2" }),
-            ])
-          }).pipe(Effect.provide(SystemPrompt.defaultLayer)),
-        )
-
-        expect(prompts[0]).not.toContain("skill_search")
-        expect(prompts[1]).not.toContain("skill_search")
-        expect(prompts[2]).not.toContain("skill_search")
-        expect(prompts[3]).not.toContain("skill_search")
-        expect(prompts[4]).not.toContain("skill_search")
-        expect(prompts[5]).toContain("skill_search")
-      },
-    })
-  })
 })

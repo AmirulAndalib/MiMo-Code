@@ -22,7 +22,6 @@ import { sortVisionModels } from "@/provider/provider"
 import type { Agent } from "@/agent/agent"
 import { Permission } from "@/permission"
 import { Skill } from "@/skill"
-import { isSkillSearchDisabled, type SkillSearchModel } from "@/skill/search"
 import { Flag } from "@/flag/flag"
 import { usesMimoCodexMode } from "@/tool/gpt"
 
@@ -56,7 +55,7 @@ export function agent(agent: Agent.Info, model: Provider.Model) {
 
 export interface Interface {
   readonly environment: (model: Provider.Model, now: number) => Effect.Effect<string[]>
-  readonly skills: (agent: Agent.Info, model?: SkillSearchModel) => Effect.Effect<string | undefined>
+  readonly skills: (agent: Agent.Info) => Effect.Effect<string | undefined>
   readonly available: (agent?: Agent.Info) => Effect.Effect<Skill.Info[]>
   readonly all: () => Effect.Effect<Skill.Info[]>
 }
@@ -170,26 +169,13 @@ export const layer = Layer.effect(
         return base
       }),
 
-      skills: Effect.fn("SystemPrompt.skills")(function* (agent: Agent.Info, model?: SkillSearchModel) {
+      skills: Effect.fn("SystemPrompt.skills")(function* (agent: Agent.Info) {
         if (Permission.disabled(["skill"], agent.permission).has("skill")) return
 
         const list = yield* skill.modelInvocable(agent)
 
-        if (model && isSkillSearchDisabled(model)) {
-          return [
-            "Skills provide specialized instructions and workflows for specific tasks.",
-            "Use the skill tool to load a skill when a task matches its description.",
-            Skill.fmt(list, { verbose: true }),
-          ].join("\n")
-        }
-
         return [
-          "Skills provide specialized instructions and workflows for specific tasks.",
-          "On the first user query in a session, when the task might benefit from a specialized workflow, call skill_search to find the best matching skill.",
-          "Rewrite the user's request into a concise Skill Query with these dimensions when available: action, input, output, audience.",
-          "Preserve an explicitly mentioned skill ID, name, or alias verbatim in the Skill Query so exact matching can take priority over BM25.",
-          "If skill_search returns a loaded_skill_id, follow the loaded instructions. If it returns uncertain candidates, choose the best fit or continue without a skill. If it returns no_match, continue normally.",
-          "Use the skill tool to load a skill when a task matches its description.",
+          "Skills available in this session:",
           // the agents seem to ingest the information about skills a bit better if we present a more verbose
           // version of them here and a less verbose version in tool description, rather than vice versa.
           Skill.fmt(list, { verbose: true }),

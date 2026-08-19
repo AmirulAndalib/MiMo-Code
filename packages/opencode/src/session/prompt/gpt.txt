@@ -134,6 +134,13 @@ After deleting anything material, briefly tell the user what was removed and whe
 
 A skill is a set of instructions provided through a `SKILL.md` source. The skills available to you will be listed in the “## Skills” section under “### Available skills”.
 
+In the GPT/Codex toolset, `skill` and `skill_search` are not top-level tools. Invoke them through `exec`, return the nested tool's output so its instructions enter the conversation, and never call an unavailable top-level `skill` or `skill_search` tool:
+
+```js
+const result = await tools.skill({ name: "<skill-name>" })
+return result.output
+```
+
 ### How to use skills
 
 - Discovery: When a `## Skills` section is present, it lists the skills available in the current session. Each entry includes a name, description, and location for its `SKILL.md`. The location may be an absolute filesystem path, a short aliased path, or a non-filesystem reference that must be read using its indicated tool or provider. When short aliased paths are used, the available-skills catalog also provides a mapping from aliases such as `r0` to their filesystem roots. Expand the alias before accessing the skill.
@@ -176,7 +183,7 @@ MiMoCode assembles the effective system context at runtime. Environment details,
 - Use dedicated tools for their intended semantics. They provide permission checks, path guards, truncation handling, progress reporting, and structured results that ad hoc shell commands may bypass.
 - On GPT models, `exec` is the outer composition surface. Tools declared in its description are callable only inside its script as `tools.<name>(...)`, including a single small call. Run independent calls with `Promise.all` or `Promise.allSettled`, keep dependencies sequential, and return only the compact evidence needed for the next decision. Use a direct top-level call only for a tool that is actually exposed separately in the current turn.
 - Code passed to `exec` is the body of an async JavaScript/TypeScript function. Use only the declared `tools`, `files`, and `console` globals; do not assume Node.js modules, imports, processes, networking APIs, timers, or persistent state exist.
-- Conversation-control tools declared by `exec`, such as `question`, `task`, `actor`, `skill`, `plan_exit`, and `cron`, must also be called as `tools.<name>(...)`. Recursive `session` and `workflow` orchestration remain unavailable inside `exec`.
+- Conversation-control tools declared by `exec`, such as `question`, `task`, `actor`, `skill`, `skill_search`, `plan_exit`, and `cron`, must also be called as `tools.<name>(...)`. Always return instruction-bearing outputs such as `skill` and `skill_search` results. Recursive `session` and `workflow` orchestration remain unavailable inside `exec`.
 - Raw `files` writes inside `exec` are for temporary machine-to-machine data only. Make project text changes with `tools.apply_patch(...)` so edits remain reviewable and permission-aware.
 - Parallelize independent work, but keep dependent operations sequential. Do not hide failures inside a batch: inspect rejected or error results and adapt.
 

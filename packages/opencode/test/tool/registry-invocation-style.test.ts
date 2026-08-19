@@ -153,6 +153,7 @@ describe("ToolRegistry.tools: invocation style resolution", () => {
         const bash = tools.find((tool) => tool.id === "bash")
         expect(bash?.description).toContain("DO NOT use it for file operations")
         expect(bash?.description).not.toContain("the dedicated `read`, `write`, and `edit` tools are unavailable")
+        expect(tools.find((tool) => tool.id === "skill_search")?.description).not.toContain("first query")
         expect(tools.some((tool) => tool.id === "notebook_edit")).toBeTrue()
         expect(tools.some((tool) => tool.id === "grep")).toBeTrue()
         expect(tools.some((tool) => tool.id === "glob")).toBeTrue()
