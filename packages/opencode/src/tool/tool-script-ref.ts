@@ -16,22 +16,10 @@ export const toolScriptRegistry: {
     | undefined
 } = { current: undefined }
 
-export const GPT_TOOL_SCRIPT_ONLY = new Set([
-  "bash",
-  "apply_patch",
-  "view_image",
-  "actor",
-  "task",
-  "question",
-  "webfetch",
-  "skill_search",
-  "skill",
-  "change_directory",
-  "plan_exit",
-  "memory",
-  "history",
-  "cron",
-])
+// Codex keeps one compact advertised surface while the runtime still registers
+// every authorized tool for compatibility with direct calls emitted by the
+// model. `wait` is reserved for the standalone tool once it is available.
+export const GPT_TOP_LEVEL_TOOLS = new Set(["exec", "wait"])
 
 // Recursive orchestration and internal sentinel tools stay outside scripts.
 // Other control-flow tools are intentionally callable through `tools.<id>` so

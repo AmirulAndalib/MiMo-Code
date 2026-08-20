@@ -14,13 +14,18 @@ const it = testEffect(
 )
 
 describe("ToolRegistry.tools: invocation style resolution", () => {
-  it.live("exposes Codex tools through exec instead of top-level function tools", () =>
+  it.live("advertises only exec in Codex mode while keeping hidden tools registered", () =>
     provideTmpdirInstance(() =>
       Effect.gen(function* () {
         const reg = yield* ToolRegistry.Service
         const agents = yield* Agent.Service
         const build = yield* agents.get("build")
         const tools = yield* reg.tools({
+          providerID: ProviderID.opencode,
+          modelID: ModelID.make("openai/gpt-5.4"),
+          agent: build,
+        })
+        const registered = yield* reg.registered({
           providerID: ProviderID.opencode,
           modelID: ModelID.make("openai/gpt-5.4"),
           agent: build,
@@ -43,10 +48,12 @@ describe("ToolRegistry.tools: invocation style resolution", () => {
           "cron",
         ]
 
-        expect(ids).toContain("exec")
+        expect(ids).toEqual(["exec"])
+        expect(registered.map((tool) => tool.id)).toContain("webfetch")
         nested.forEach((id) => expect(ids).not.toContain(id))
 
         const description = tools.find((tool) => tool.id === "exec")?.description ?? ""
+        expect(description).toContain("webfetch(input:")
         nested.filter((id) => id !== "bash").forEach((id) => expect(description).toContain(`${id}(input:`))
         expect(description).toContain("exec_command(input:")
         expect(description).not.toContain("\n  bash(input:")
@@ -94,7 +101,7 @@ describe("ToolRegistry.tools: invocation style resolution", () => {
     30000,
   )
 
-  it.live.skip("exposes skill_search to GPT and Claude models", () =>
+  it.live.skip("keeps skill_search registered but hidden for GPT models", () =>
     provideTmpdirInstance(() =>
       Effect.gen(function* () {
         const reg = yield* ToolRegistry.Service
@@ -110,7 +117,7 @@ describe("ToolRegistry.tools: invocation style resolution", () => {
             })
             .pipe(Effect.map((tools) => tools.map((tool) => tool.id)))
 
-        expect(yield* ids("openai/gpt-5.4")).toContain("skill_search")
+        expect(yield* ids("openai/gpt-5.4")).not.toContain("skill_search")
         expect(yield* ids("anthropic/claude-sonnet-4-6")).toContain("skill_search")
         expect(yield* ids("mimo-v2")).toContain("skill_search")
       }),

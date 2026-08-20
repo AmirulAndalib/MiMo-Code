@@ -119,7 +119,7 @@ import {
   type McpToolSearchMetadata,
 } from "@/tool/mcp-tool-search"
 import { isMcpToolSearchEnabled, usesGPTToolset } from "@/tool/gpt"
-import { GPT_TOOL_SCRIPT_ONLY } from "@/tool/tool-script-ref"
+import { GPT_TOP_LEVEL_TOOLS } from "@/tool/tool-script-ref"
 import { isSkillCatalogReminder, SKILL_CATALOG_REMINDER_MARKER } from "./skill-catalog"
 
 // @ts-ignore
@@ -1267,10 +1267,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         return new Set(actor.tools)
       })
       const whitelist = yield* whitelistFor()
+      const useGPTTools = usesGPTToolset(input.model.id)
       const execAllowedByWhitelist =
-        usesGPTToolset(input.model.id) &&
+        useGPTTools &&
         !!whitelist &&
-        [...whitelist].some((toolID) => GPT_TOOL_SCRIPT_ONLY.has(toolID))
+        [...whitelist].some((toolID) => !GPT_TOP_LEVEL_TOOLS.has(toolID))
       // Whether a permission ask must be non-interactive (fail clean, never hang):
       // true for system-spawned actors (checkpoint-writer/dream/distill) AND any
       // background actor such as compose workflow subagents (spawned as "general"
@@ -1364,7 +1365,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         autoApproveDelete: () => permission.autoApproveDelete(),
       })
 
-      for (const item of yield* registry.tools({
+      // Keep every authorized definition in the AI SDK tool map so an unadvertised
+      // direct call still resolves. `activeTools` below is the separate provider-
+      // facing schema allowlist and stays compact in Codex mode.
+      for (const item of yield* registry.registered({
         modelID: input.model.id,
         providerID: input.model.providerID,
         agent: input.agent,
@@ -1470,7 +1474,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             )
           },
         })
-        if (item.id !== MCP_TOOL_SEARCH_ID) activeTools.add(item.id)
+        if (item.id !== MCP_TOOL_SEARCH_ID && (!useGPTTools || GPT_TOP_LEVEL_TOOLS.has(item.id))) {
+          activeTools.add(item.id)
+        }
       }
 
       const localToolNames = new Set(Object.keys(tools))
@@ -1504,7 +1510,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             parameters: transformed as unknown as JSONObject,
           })
         }
-        if (searchable && !useMcpToolSearch && input.model.capabilities.toolcall) activeTools.add(key)
+        if (searchable && !useMcpToolSearch && input.model.capabilities.toolcall && !useGPTTools) {
+          activeTools.add(key)
+        }
         const executeMcp = (
           args: Parameters<typeof execute>[0],
           opts: Parameters<typeof execute>[1],
@@ -1707,6 +1715,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       }
 
       if (
+        !useGPTTools &&
         useMcpToolSearch &&
         input.model.capabilities.toolcall &&
         mcpCatalog.current.entries.length > 0 &&
@@ -1714,7 +1723,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       ) {
         activeTools.add(MCP_TOOL_SEARCH_ID)
       }
-      loadedMcpTools.forEach((name) => activeTools.add(name))
+      if (!useGPTTools) loadedMcpTools.forEach((name) => activeTools.add(name))
 
       // MCP Tool Search keeps full schemas out of the outer model tool list;
       // it is a context-budget optimization, not an authorization boundary.
