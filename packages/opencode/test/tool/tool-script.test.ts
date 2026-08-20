@@ -332,25 +332,57 @@ describe("exec", () => {
   })
 
   test("exec_command maps to bash while direct bash remains backward compatible", async () => {
-    const seen: string[] = []
-    const defs = [
-      fakeDef("bash", async (args) => {
-        seen.push(args.value)
-        return `ran:${args.value}`
-      }),
-    ]
+    const seen: Array<{ command: string; timeout: number; description: string }> = []
+    const parameters = z.object({
+      command: z.string(),
+      timeout: z.number(),
+      workdir: z.string().optional(),
+      description: z.string(),
+    })
+    const bash: Tool.Def<typeof parameters> = {
+      id: "bash",
+      description: "fake bash",
+      parameters,
+      execute: (args) => {
+        seen.push({ command: args.command, timeout: args.timeout, description: args.description })
+        return Effect.succeed({ title: args.description, output: `ran:${args.command}`, metadata: {} })
+      },
+    }
     const result = await runToolScript(
       `return await Promise.all([
-        tools.bash({ value: "direct" }),
-        tools.exec_command({ value: "alias" }),
+        tools.bash({ command: "direct", timeout: 25000, description: "direct bash" }),
+        tools.exec_command({ cmd: "alias", yield_time_ms: 15000 }),
       ])`,
-      defs,
+      [bash],
     )
     expect(result.metadata.status).toBe("completed")
     expect(result.metadata.toolCalls).toBe(2)
     expect(result.output).toContain("ran:direct")
     expect(result.output).toContain("ran:alias")
-    expect(seen.toSorted()).toEqual(["alias", "direct"])
+    expect(seen).toEqual(expect.arrayContaining([
+      { command: "direct", timeout: 25000, description: "direct bash" },
+      { command: "alias", timeout: 15000, description: "alias" },
+    ]))
+  })
+
+  test("exec_command defaults yield_time_ms to 10000 ms", async () => {
+    const parameters = z.object({
+      command: z.string(),
+      timeout: z.number(),
+      workdir: z.string().optional(),
+      description: z.string(),
+    })
+    const bash: Tool.Def<typeof parameters> = {
+      id: "bash",
+      description: "fake bash",
+      parameters,
+      execute: (args) =>
+        Effect.succeed({ title: args.description, output: String(args.timeout), metadata: {} }),
+    }
+    const result = await runToolScript(`return await tools.exec_command({ cmd: "echo ok" })`, [bash])
+
+    expect(result.metadata.status).toBe("completed")
+    expect(result.output).toContain('"output": "10000"')
   })
 
   test("lists exec_command instead of bash in the code-mode catalog", async () => {
@@ -658,6 +690,13 @@ describe("renderToolScriptDeclarations", () => {
     const text = renderToolScriptDeclarations([fakeDef("bash", async () => "x")])
     expect(text).toContain("exec_command(input:")
     expect(text).toContain("Alias for bash")
+    expect(text).toContain("cmd: string")
+    expect(text).toContain("yield_time_ms?: number")
+    expect(text).not.toContain("command: string")
+    expect(text).not.toContain("timeout?: number")
+    expect(text).not.toContain("interactive?: boolean")
+    const declaration = text.split("\n").find((line) => line.includes("exec_command(input:"))
+    expect(declaration).not.toContain("description:")
     expect(text).not.toContain("\n  bash(input:")
   })
 
