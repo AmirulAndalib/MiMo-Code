@@ -69,8 +69,11 @@ function schemaToTs(schema: any): string {
 /** Render the `tools` API declaration block appended to the tool description. */
 export function renderToolScriptDeclarations(defs: Tool.Def[]): string {
   const aliases = new Set(Object.keys(TOOL_SCRIPT_ALIASES))
+  const aliasTargets = new Set<string>(Object.values(TOOL_SCRIPT_ALIASES))
   const lines = defs
-    .filter((def) => !TOOL_SCRIPT_EXCLUDED.has(def.id) && !aliases.has(def.id))
+    .filter(
+      (def) => !TOOL_SCRIPT_EXCLUDED.has(def.id) && !aliases.has(def.id) && !aliasTargets.has(def.id),
+    )
     .map((def) => {
       const summary = def.description.split("\n").find((l) => l.trim()) ?? ""
       const input = schemaToTs(z.toJSONSchema(def.parameters))
@@ -392,7 +395,9 @@ export const ToolScriptTool = Tool.define(
             Object.entries(mcpTools).filter(([id]) => !byId.has(id) && (!whitelist || whitelist.has(id))),
           )
           const allTools = [
-            ...[...byId.values()].map((def) => ({ name: def.id, description: def.description })),
+            ...[...byId.values()]
+              .filter((def) => !Object.values(TOOL_SCRIPT_ALIASES).some((target) => target === def.id))
+              .map((def) => ({ name: def.id, description: def.description })),
             ...Object.entries(TOOL_SCRIPT_ALIASES).flatMap(([name, target]) => {
               const def = byId.get(target)
               if (!def) return []

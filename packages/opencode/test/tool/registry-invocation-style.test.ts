@@ -47,7 +47,9 @@ describe("ToolRegistry.tools: invocation style resolution", () => {
         nested.forEach((id) => expect(ids).not.toContain(id))
 
         const description = tools.find((tool) => tool.id === "exec")?.description ?? ""
-        nested.forEach((id) => expect(description).toContain(`${id}(input:`))
+        nested.filter((id) => id !== "bash").forEach((id) => expect(description).toContain(`${id}(input:`))
+        expect(description).toContain("exec_command(input:")
+        expect(description).not.toContain("\n  bash(input:")
         expect(description).toContain("timeout measured in milliseconds")
       }),
     ),
@@ -80,8 +82,8 @@ describe("ToolRegistry.tools: invocation style resolution", () => {
         expect(exec?.description).toContain("keep dependent operations sequential")
         expect(exec?.description).toContain("do not use `exec` merely to force concurrency")
         expect(exec?.description).toContain("apply_patch(input:")
-        expect(exec?.description).toContain("bash(input:")
         expect(exec?.description).toContain("exec_command(input:")
+        expect(exec?.description).not.toContain("\n  bash(input:")
         expect(exec?.description).not.toContain("read(input:")
         expect(exec?.description).not.toContain("write(input:")
         expect(exec?.description).not.toContain("edit(input:")

@@ -35,14 +35,14 @@ The script environment provides JavaScript built-ins plus `tools`, `files`, and 
 
 - Call built-in tools, and other tool IDs that are valid JavaScript identifiers, with `await tools.name(input)`.
 - Call request-authorized MCP tools by their exact catalog name (`await tools.mcp__server__tool(input)` or `await tools[name](input)`); the same permission checks as direct calls apply.
-- `await tools.exec_command(...)` invokes the shell through the `bash` alias; only `await tools.mcp__server__tool(...)` invokes an MCP tool.
+- Use `await tools.exec_command(...)` for shell commands. The runtime maps it to the `bash` tool, preserving its input validation, permissions, execution, timeout, and truncation behavior. Only `await tools.mcp__server__tool(...)` invokes an MCP tool.
 - MCP results carry parsed `structuredContent` in the `structured` field when the server provides it.
 - Use `Promise.all` or `Promise.allSettled` only for independent calls; at most 8 run concurrently.
 - Return a small JSON-serializable aggregate. Circular values, BigInt, and throwing getters fail execution.
 - Use `console.log` only for debugging; logs are included in the result.
 - Tool permissions are enforced for every nested call.
 - State does not persist between executions. For temporary cross-execution data, use `files.writeText` and `files.readText` under the OS temp directory.
-- `bash` is available as both `tools.bash(...)` and its alias `tools.exec_command(...)`; both use the same permission and execution path.
+- `tools.bash(...)` remains accepted for backward compatibility, but `exec_command` is the code-mode interface exposed in the declarations and `ALL_TOOLS` catalog.
 - Declared conversation-control tools such as `question`, `task`, `actor`, `skill`, `plan_exit`, and `cron` are available through the same `tools` object. Recursive `session` and `workflow` orchestration are excluded.
 
 By default an execution may make 50 tool calls and use 60000 milliseconds of active compute. The `max_tool_calls` and `timeout` inputs can raise those limits to 500 calls and 600000 milliseconds. `timeout` is always measured in milliseconds. Time waiting for nested tools does not count toward active compute.
