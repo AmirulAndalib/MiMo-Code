@@ -9,10 +9,11 @@ return results.map((result) => result.output)
 
 Use `exec` for every tool declared below, including one small call. JavaScript can also batch multiple independent calls, programmatically transform their results, or keep large intermediate outputs out of the conversation. Run independent calls with `Promise.all` or `Promise.allSettled`, but keep dependent operations sequential.
 
-MCP tools inside `exec` are called through the same global `tools` object as built-in tools. Their names normally use `mcp__<server_name>__<tool_name>`:
+MCP tools inside `exec` are called through the same global `tools` object as built-in tools. MCP catalog names are opaque: they may use underscores, hyphens, or a server-specific prefix, and are not guaranteed to start with `mcp__`. Use the exact `name` from `ALL_TOOLS` and bracket notation:
 
 ```ts
-const result = await tools.mcp__github__get_issue({
+const name = "github-get_issue"
+const result = await tools[name]({
   owner: "openai",
   repo: "codex",
   issue_number: 123,
@@ -24,18 +25,18 @@ return result.structured ?? result.output
 
 ```ts
 const tool = ALL_TOOLS.find(
-  ({ name }) => name.startsWith("mcp__") && name.includes("docs") && name.includes("search"),
+  ({ name, description }) => `${name} ${description}`.toLowerCase().includes("stock"),
 )
 if (!tool) return "No matching MCP tool"
-const result = await tools[tool.name]({ query: "MCP configuration" })
+const result = await tools[tool.name]({ query: "latest stock market data" })
 return result.structured ?? result.output
 ```
 
 The script environment provides JavaScript built-ins plus `tools`, `files`, and `console`. It does not provide Node.js modules, `import`, `require`, `process`, `fetch`, or timers. Use the available tools for external operations.
 
 - Call built-in tools, and other tool IDs that are valid JavaScript identifiers, with `await tools.name(input)`.
-- Call request-authorized MCP tools by their exact catalog name (`await tools.mcp__server__tool(input)` or `await tools[name](input)`); the same permission checks as direct calls apply.
-- Use `await tools.exec_command(...)` for shell commands. The runtime maps it to the `bash` tool, preserving its input validation, permissions, execution, timeout, and truncation behavior. Only `await tools.mcp__server__tool(...)` invokes an MCP tool.
+- Search `ALL_TOOLS` names and descriptions for the capability you need, then call the exact catalog name with `await tools[name](input)`; the same permission checks as direct calls apply. Do not infer availability or MCP status from a name prefix.
+- Use `await tools.exec_command(...)` for shell commands. The runtime maps it to the `bash` tool, preserving its input validation, permissions, execution, timeout, and truncation behavior.
 - MCP results carry parsed `structuredContent` in the `structured` field when the server provides it.
 - Use `Promise.all` or `Promise.allSettled` only for independent calls; at most 8 run concurrently.
 - Return a small JSON-serializable aggregate. Circular values, BigInt, and throwing getters fail execution.

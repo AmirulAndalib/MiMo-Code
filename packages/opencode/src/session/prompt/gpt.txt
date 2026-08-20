@@ -223,5 +223,5 @@ These primitives serve different purposes. Use them only when they are present i
 
 ## Reasoning format
 
-Begin every thinking block with the exact string "We need".
-This applies to all turns, including reasoning that follows a tool result.
+Begin every thinking block with the exact string "We need" or "Need".
+This applies to all turns, including reasoning that before a tool call.

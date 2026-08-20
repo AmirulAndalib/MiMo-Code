@@ -74,7 +74,7 @@ import * as BashInteractive from "./bash-interactive"
 import { resolveInvocationStyle } from "./invocation-style"
 import { BuiltinWorkflow } from "@/workflow/builtin"
 import { ToolScriptTool, renderToolScriptDeclarations } from "./tool-script"
-import { GPT_TOOL_SCRIPT_ONLY, toolScriptRegistry } from "./tool-script-ref"
+import { GPT_TOP_LEVEL_TOOLS, toolScriptRegistry } from "./tool-script-ref"
 import { usesGPTToolset } from "./gpt"
 
 const log = Log.create({ service: "tool.registry" })
@@ -121,6 +121,11 @@ export interface Interface {
   readonly all: () => Effect.Effect<Tool.Def[]>
   readonly named: () => Effect.Effect<{ actor: ActorDef; read: ReadDef }>
   readonly tools: (model: { providerID: ProviderID; modelID: ModelID; agent: Agent.Info }) => Effect.Effect<Tool.Def[]>
+  readonly registered: (model: {
+    providerID: ProviderID
+    modelID: ModelID
+    agent: Agent.Info
+  }) => Effect.Effect<Tool.Def[]>
   readonly reload: () => Effect.Effect<void>
 }
 
@@ -419,23 +424,27 @@ export const layer = Layer.effect(
       return { filtered, useGPTTools }
     })
 
-    // Late-bound ref (see tool-script-ref.ts): exec dispatches through the same
-    // model- and agent-filtered definitions advertised by the outer tool set.
+    // Late-bound ref (see tool-script-ref.ts): exec dispatches through the full
+    // model- and agent-filtered set, including definitions hidden from the
+    // compact Codex top-level schema.
     // The optional fallback is only for direct tool tests without model context.
     toolScriptRegistry.current = (input) =>
       input ? available(input).pipe(Effect.map((result) => result.filtered)) : all()
 
-    const tools: Interface["tools"] = Effect.fn("ToolRegistry.tools")(function* (input) {
+    const definitions = Effect.fn("ToolRegistry.definitions")(function* (
+      input: { providerID: ProviderID; modelID: ModelID; agent: Agent.Info },
+      includeHidden: boolean,
+    ) {
       const availableTools = yield* available(input)
-      const visibleTools = availableTools.useGPTTools
-        ? availableTools.filtered.filter((tool) => !GPT_TOOL_SCRIPT_ONLY.has(tool.id))
+      const selected = availableTools.useGPTTools && !includeHidden
+        ? availableTools.filtered.filter((tool) => GPT_TOP_LEVEL_TOOLS.has(tool.id))
         : availableTools.filtered
 
       const cfg = yield* config.get()
       const resolveStyle = (toolId: string): "json" | "shell" => resolveInvocationStyle(cfg.tool, toolId)
 
       return yield* Effect.forEach(
-        visibleTools,
+        selected,
         Effect.fnUntraced(function* (tool: Tool.Def) {
           using _ = log.time(tool.id)
           const output = {
@@ -469,6 +478,14 @@ export const layer = Layer.effect(
       )
     })
 
+    const tools: Interface["tools"] = Effect.fn("ToolRegistry.tools")(function* (input) {
+      return yield* definitions(input, false)
+    })
+
+    const registered: Interface["registered"] = Effect.fn("ToolRegistry.registered")(function* (input) {
+      return yield* definitions(input, true)
+    })
+
     const named: Interface["named"] = Effect.fn("ToolRegistry.named")(function* () {
       const s = yield* InstanceState.get(state)
       return { actor: s.actor, read: s.read }
@@ -480,7 +497,7 @@ export const layer = Layer.effect(
       yield* InstanceState.invalidate(state)
     })
 
-    return Service.of({ ids, all, named, tools, reload })
+    return Service.of({ ids, all, named, tools, registered, reload })
   }),
 ).pipe(Layer.provide(Git.defaultLayer))
 
