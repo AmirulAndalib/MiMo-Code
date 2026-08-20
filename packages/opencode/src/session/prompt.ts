@@ -109,7 +109,6 @@ import { resolveInvocationStyle, type ToolStyleConfig } from "../tool/invocation
 import { ToolResultError } from "../tool/result-error"
 import { RecoverableError } from "../tool/recoverable"
 import { shouldAutoDream, shouldAutoDistill, DREAM_TASK, DISTILL_TASK, AUTO_DREAM_TITLE, AUTO_DISTILL_TITLE } from "./auto-dream"
-import { skillSearchReminderForSession } from "./skill-search-reminder"
 import {
   createMcpToolSearchCatalog,
   mcpToolCatalogBudget,
@@ -925,7 +924,7 @@ export const layer = Layer.effect(
         ...input.agent,
         permission: Agent.runtimePermission(input.agent, input.session.permission),
       }
-      const skills = yield* sys.skills(runtimeAgent, input.model)
+      const skills = yield* sys.skills(runtimeAgent)
       const catalogText = skills
         ? ["<system-reminder>", SKILL_CATALOG_REMINDER_MARKER, skills, "</system-reminder>"].join("\n")
         : undefined
@@ -953,21 +952,6 @@ export const layer = Layer.effect(
           sessionID: userMessage.info.sessionID,
           type: "text",
           text: catalogText,
-          synthetic: true,
-        })
-        userMessage.parts.push(part)
-      }
-
-      // Search reminders apply only to eligible direct user sessions and models.
-      // They advise the primary agent when to search; the model still decides whether to call.
-      const reminder = skillSearchReminderForSession(input)
-      if (reminder) {
-        const part = yield* sessions.updatePart({
-          id: PartID.ascending(),
-          messageID: userMessage.info.id,
-          sessionID: userMessage.info.sessionID,
-          type: "text",
-          text: reminder,
           synthetic: true,
         })
         userMessage.parts.push(part)
@@ -1077,7 +1061,7 @@ ${entries}
                 ? `SKILL.md for [${toLoad.join(", ")}] has been auto-loaded above.`
                 : ""
               const overflowHint = overflow.length > 0
-                ? `For [${overflow.join(", ")}], use the Skill tool to load them on demand.`
+                ? `SKILL.md for [${overflow.join(", ")}] was not auto-loaded; load each through the current skill tool surface before using it.`
                 : ""
               const part = yield* sessions.updatePart({
                 id: PartID.ascending(),
