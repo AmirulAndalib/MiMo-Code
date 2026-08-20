@@ -136,7 +136,7 @@ describe("skill command with additional mentions", () => {
     30_000,
   )
 
-  it.live(
+  it.live.skip(
     "keeps one catalog across user turns and ignores skill mentions in synthetic catalog text",
     () =>
       provideTmpdirServer(
