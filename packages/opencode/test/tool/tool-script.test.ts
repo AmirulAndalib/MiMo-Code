@@ -331,7 +331,7 @@ describe("exec", () => {
     expect(result.output).toContain("unknown tool: mcp_tool_search")
   })
 
-  test("bash and exec_command dispatch through the same tool definition", async () => {
+  test("exec_command maps to bash while direct bash remains backward compatible", async () => {
     const seen: string[] = []
     const defs = [
       fakeDef("bash", async (args) => {
@@ -351,6 +351,15 @@ describe("exec", () => {
     expect(result.output).toContain("ran:direct")
     expect(result.output).toContain("ran:alias")
     expect(seen.toSorted()).toEqual(["alias", "direct"])
+  })
+
+  test("lists exec_command instead of bash in the code-mode catalog", async () => {
+    const result = await runToolScript(
+      `return ALL_TOOLS.map((tool) => tool.name)`,
+      [fakeDef("bash", async () => "x")],
+    )
+    expect(result.output).toContain('"exec_command"')
+    expect(result.output).not.toContain('"bash"')
   })
 
   test("supports parallel bash calls with millisecond timeouts", async () => {
@@ -645,11 +654,11 @@ describe("renderToolScriptDeclarations", () => {
     }
   })
 
-  test("renders exec_command as an alias for bash", () => {
+  test("exposes exec_command instead of bash in code mode", () => {
     const text = renderToolScriptDeclarations([fakeDef("bash", async () => "x")])
-    expect(text).toContain("bash(input:")
     expect(text).toContain("exec_command(input:")
     expect(text).toContain("Alias for bash")
+    expect(text).not.toContain("\n  bash(input:")
   })
 
 })
