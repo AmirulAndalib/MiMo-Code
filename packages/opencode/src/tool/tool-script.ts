@@ -11,6 +11,7 @@ import { Agent } from "@/agent/agent"
 import type { ModelID, ProviderID } from "../provider/schema"
 import { evalScript, type HostFn } from "../workflow/sandbox"
 import { toolScriptRegistry, TOOL_SCRIPT_ALIASES, TOOL_SCRIPT_EXCLUDED } from "./tool-script-ref"
+import type { HarnessMode } from "./gpt"
 import DESCRIPTION from "./tool-script.txt"
 import * as Tool from "./tool"
 import * as Truncate from "./truncate"
@@ -403,13 +404,14 @@ export const ToolScriptTool = Tool.define(
           if (!getDefs) throw new Error("exec tool registry unavailable")
           const agentInfo = yield* agents.get(ctx.agent)
           const model = ctx.extra?.model as { id: ModelID; providerID: ProviderID } | undefined
+          const harness = ctx.extra?.harness as HarnessMode | undefined
           const whitelist = Array.isArray(ctx.extra?.toolWhitelist)
             ? new Set(ctx.extra.toolWhitelist.filter((id): id is string => typeof id === "string"))
             : undefined
           const defs = (
             yield* getDefs(
               model
-                ? { providerID: model.providerID, modelID: model.id, agent: agentInfo }
+                ? { providerID: model.providerID, modelID: model.id, agent: agentInfo, harness }
                 : undefined,
             )
           ).filter((def) => !TOOL_SCRIPT_EXCLUDED.has(def.id) && (!whitelist || whitelist.has(def.id)))

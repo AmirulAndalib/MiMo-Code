@@ -135,12 +135,21 @@ describe("session.system", () => {
                 }),
                 now,
               ),
+              system.environment(
+                ProviderTest.model({
+                  id: ModelID.make("custom-model"),
+                  api: { id: "claude-sonnet-4-6" } as never,
+                }),
+                now,
+                "codex",
+              ),
             ])
           }).pipe(Effect.provide(SystemPrompt.defaultLayer)),
         )
 
         expect(prompts[0].join("\n")).not.toContain("gitStatus:")
         expect(prompts[1].join("\n")).toContain("gitStatus:")
+        expect(prompts[2].join("\n")).not.toContain("gitStatus:")
       },
     })
   })
@@ -214,6 +223,18 @@ describe("session.system", () => {
     )[0]
 
     expect(prompt).toBe(gpt)
+  })
+
+  test("allows the resolved session mode to override the process harness mode", () => {
+    const model = ProviderTest.model({
+      id: ModelID.make("claude-sonnet-4-6"),
+      providerID: ProviderID.make("anthropic"),
+    })
+    const gpt = SystemPrompt.provider(ProviderTest.model({ id: ModelID.make("gpt-5.4") }))[0]
+
+    expect(SystemPrompt.provider(model, "codex")[0]).toBe(gpt)
+    process.env.MIMOCODE_CODEX_MODE = "true"
+    expect(SystemPrompt.provider(model, "default")[0]).not.toBe(gpt)
   })
 
   test("uses the same prompted subagent system across models", () => {

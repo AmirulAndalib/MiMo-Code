@@ -431,6 +431,7 @@ export const User = Base.extend({
     variant: z.string().optional(),
   }),
   system: z.string().optional(),
+  harness: z.enum(["codex", "default"]).optional(),
   tools: z.record(z.string(), z.boolean()).optional(),
   provenance: Provenance.optional(),
 }).meta({

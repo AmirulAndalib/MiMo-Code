@@ -1062,6 +1062,19 @@ itTool.live("compose's tool list swaps GPT-specific file tools", () =>
       expect(claudeIDs).toContain("read")
       expect(claudeIDs).not.toContain("apply_patch")
       expect(claudeIDs).not.toContain("view_image")
+
+      const claudeCodexIDs = (
+        yield* registry.tools({
+          modelID: ModelID.make("claude-opus-4-7"),
+          providerID: ProviderID.make("anthropic"),
+          agent: compose!,
+          harness: "codex",
+        })
+      ).map((tool) => tool.id)
+      expect(claudeCodexIDs).toContain("exec")
+      expect(claudeCodexIDs).not.toContain("edit")
+      expect(claudeCodexIDs).not.toContain("write")
+      expect(claudeCodexIDs).not.toContain("read")
     }),
   ),
 )

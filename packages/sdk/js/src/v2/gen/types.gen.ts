@@ -997,6 +997,7 @@ export type UserMessage = {
     variant?: string
   }
   system?: string
+  harness?: "codex" | "default"
   tools?: {
     [key: string]: boolean
   }
@@ -1402,6 +1403,10 @@ export type Session = {
     archived?: number
   }
   permission?: PermissionRuleset
+  prompt?: {
+    system?: string
+    harness: "codex" | "default"
+  }
   revert?: {
     messageID: string
     partID?: string
@@ -1531,6 +1536,10 @@ export type SyncEventSessionUpdated = {
         archived: number | null
       }
       permission: PermissionRuleset | null
+      prompt: {
+        system?: string
+        harness: "codex" | "default"
+      } | null
       revert: {
         messageID: string
         partID?: string
@@ -2218,7 +2227,7 @@ export type Config = {
      */
     preserve_recent_tokens?: number
     /**
-     * Token buffer for compaction. Leaves enough window to avoid overflow during compaction.
+     * Token buffer for compaction. Leaves enough window to avoid overflow during compaction (default: up to 33000, capped by the model's maximum output).
      */
     reserved?: number
     /**
@@ -2656,6 +2665,10 @@ export type GlobalSession = {
     archived?: number
   }
   permission?: PermissionRuleset
+  prompt?: {
+    system?: string
+    harness: "codex" | "default"
+  }
   revert?: {
     messageID: string
     partID?: string
@@ -4811,7 +4824,14 @@ export type SessionPromptData = {
       [key: string]: boolean
     }
     format?: OutputFormat
+    /**
+     * Additional system prompt selected by the session's first user query. Later values are ignored.
+     */
     system?: string
+    /**
+     * Harness mode selected by the session's first user query. Later values are ignored. Explicit default overrides the process-wide Codex mode flag.
+     */
+    harness?: "codex" | "default"
     variant?: string
     parts: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
   }
@@ -5026,7 +5046,14 @@ export type SessionPromptAsyncData = {
       [key: string]: boolean
     }
     format?: OutputFormat
+    /**
+     * Additional system prompt selected by the session's first user query. Later values are ignored.
+     */
     system?: string
+    /**
+     * Harness mode selected by the session's first user query. Later values are ignored. Explicit default overrides the process-wide Codex mode flag.
+     */
+    harness?: "codex" | "default"
     variant?: string
     parts: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
   }
