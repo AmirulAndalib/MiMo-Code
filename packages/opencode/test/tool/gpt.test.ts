@@ -45,9 +45,13 @@ describe("isMcpToolSearchEnabled", () => {
 
   test("allows the resolved session mode to override the process mode", () => {
     expect(isMcpToolSearchEnabled(false, "codex", "claude-opus-4-6")).toBe(true)
+    expect(isMcpToolSearchEnabled(false, "auto", "gpt-5.2")).toBe(true)
+    expect(isMcpToolSearchEnabled(false, "auto", "claude-opus-4-6")).toBe(false)
     process.env.MIMOCODE_CODEX_MODE = "true"
+    expect(isMcpToolSearchEnabled(false, "auto", "claude-opus-4-6")).toBe(true)
     expect(isMcpToolSearchEnabled(false, "default", "claude-opus-4-6")).toBe(false)
-    expect(isMcpToolSearchEnabled(false, "default", "mimo-v2.6", "gpt-5.2")).toBe(false)
+    expect(isMcpToolSearchEnabled(false, "default", "mimo-v2.6")).toBe(false)
+    expect(isMcpToolSearchEnabled(false, "default", "gpt-5.2")).toBe(true)
     expect(isMcpToolSearchEnabled(true, "default", "mimo-v2.6")).toBe(true)
   })
 })
@@ -67,9 +71,13 @@ describe("usesGPTToolset", () => {
 
   test("allows the resolved session mode to override the process mode", () => {
     expect(usesGPTToolset("claude-opus-4-6", "codex")).toBe(true)
+    expect(usesGPTToolset("gpt-5.2", "auto")).toBe(true)
+    expect(usesGPTToolset("mimo-v2.6", "auto")).toBe(true)
+    expect(usesGPTToolset("claude-opus-4-6", "auto")).toBe(false)
     process.env.MIMOCODE_CODEX_MODE = "true"
+    expect(usesGPTToolset("claude-opus-4-6", "auto")).toBe(true)
     expect(usesGPTToolset("claude-opus-4-6", "default")).toBe(false)
     expect(usesGPTToolset("mimo-v2.6", "default")).toBe(false)
-    expect(usesGPTToolset("gpt-5.2", "default")).toBe(false)
+    expect(usesGPTToolset("gpt-5.2", "default")).toBe(true)
   })
 })

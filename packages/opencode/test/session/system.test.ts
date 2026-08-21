@@ -63,13 +63,15 @@ describe("session.system", () => {
     expect(prompt).not.toContain("gitStatus:")
   })
 
-  test("explicit default harness overrides MiMo Codex prompt inference", () => {
-    const model = ProviderTest.model({
-      id: ModelID.make("mimo-v2.6"),
-      api: { id: "mimo-v2.6" } as never,
-    })
-    expect(SystemPrompt.provider(model, "codex")[0]).not.toBe(SystemPrompt.provider(model, "default")[0])
-    expect(SystemPrompt.provider(model, "codex")[0]).toContain("Codex")
+  test("GPT ignores harness while explicit default overrides MiMo Codex inference", () => {
+    const gpt = ProviderTest.model({ id: ModelID.make("gpt-5.2"), api: { id: "gpt-5.2" } as never })
+    expect(SystemPrompt.provider(gpt, "default")[0]).toContain("You are Codex")
+    expect(SystemPrompt.provider(gpt, "default")[0]).toContain("tools.apply_patch")
+
+    const mimo = ProviderTest.model({ id: ModelID.make("mimo-v2.6"), api: { id: "mimo-v2.6" } as never })
+    expect(SystemPrompt.provider(mimo, "codex")[0]).toContain("You are Codex")
+    expect(SystemPrompt.provider(mimo, "default")[0]).not.toContain("You are Codex")
+    expect(SystemPrompt.provider(mimo, "default")[0]).not.toContain("tools.apply_patch")
   })
 
   test("renders machine and repository environment only for Claude models", async () => {

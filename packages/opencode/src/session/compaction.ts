@@ -246,8 +246,11 @@ export const layer: Layer.Layer<
       const promptConfig = yield* session.resolvePrompt({ sessionID: input.sessionID })
       const userMessage = {
         ...parent.info,
-        system: promptConfig.system,
-        systemMode: promptConfig.systemMode,
+        // The compaction agent owns its summarization prompt. The session's
+        // extra system prompt is already persisted and will be restored on the
+        // replay/next user turn; injecting it here can change the summary task.
+        system: undefined,
+        systemMode: undefined,
         harness: promptConfig.harness,
       }
       const compactionPart = parent.parts.find((part): part is MessageV2.CompactionPart => part.type === "compaction")

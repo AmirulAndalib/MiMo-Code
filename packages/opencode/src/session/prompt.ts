@@ -4908,7 +4908,7 @@ export const PromptInput = z.object({
     .enum(["auto", "codex", "default"])
     .optional()
     .describe(
-      "Harness mode selected by the session's first user query. Later values are ignored. Auto preserves model/process inference; explicit default forces the native tool schema.",
+      "Harness mode selected by the session's first user query. Later values are ignored. GPT models always use the Codex harness. For other models, auto preserves model/process inference and explicit default forces the native tool schema.",
     ),
   variant: z.string().optional(),
   parts: z.array(
@@ -5008,7 +5008,9 @@ export const CommandInput = z.object({
   harness: z
     .enum(["auto", "codex", "default"])
     .optional()
-    .describe("Harness mode selected by the session's first user command. Later values are ignored."),
+    .describe(
+      "Harness mode selected by the session's first user command. Later values are ignored. GPT models always use the Codex harness. For other models, auto preserves model/process inference and explicit default forces the native tool schema.",
+    ),
   parts: z
     .array(
       z.discriminatedUnion("type", [
