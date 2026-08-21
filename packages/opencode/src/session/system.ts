@@ -33,9 +33,9 @@ function renderGitResult(result: Git.Result, fallback = "(none)") {
 const anthropicEnvironment = new Map<string, string>()
 
 export function provider(model: Provider.Model, harness?: HarnessMode) {
-  if (harness === "codex" || (harness === undefined && Flag.MIMOCODE_CODEX_MODE)) return [PROMPT_GPT]
+  if (harness === "codex" || ((harness === undefined || harness === "auto") && Flag.MIMOCODE_CODEX_MODE)) return [PROMPT_GPT]
   const prompt = (id: string) => {
-    if (usesMimoCodexMode(id)) return PROMPT_GPT
+    if (harness !== "default" && usesMimoCodexMode(id)) return PROMPT_GPT
     if (id.includes("gpt-4") || id.includes("o1") || id.includes("o3")) return PROMPT_BEAST
     if (id.includes("gpt")) return PROMPT_GPT
     if (id.includes("gemini-")) return PROMPT_GEMINI

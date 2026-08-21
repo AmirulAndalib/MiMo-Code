@@ -997,7 +997,8 @@ export type UserMessage = {
     variant?: string
   }
   system?: string
-  harness?: "codex" | "default"
+  systemMode?: "append" | "replace-agent"
+  harness?: "auto" | "codex" | "default"
   tools?: {
     [key: string]: boolean
   }
@@ -1405,7 +1406,8 @@ export type Session = {
   permission?: PermissionRuleset
   prompt?: {
     system?: string
-    harness: "codex" | "default"
+    systemMode?: "append" | "replace-agent"
+    harness: "auto" | "codex" | "default"
   }
   revert?: {
     messageID: string
@@ -1538,7 +1540,8 @@ export type SyncEventSessionUpdated = {
       permission: PermissionRuleset | null
       prompt: {
         system?: string
-        harness: "codex" | "default"
+        systemMode?: "append" | "replace-agent"
+        harness: "auto" | "codex" | "default"
       } | null
       revert: {
         messageID: string
@@ -2667,7 +2670,8 @@ export type GlobalSession = {
   permission?: PermissionRuleset
   prompt?: {
     system?: string
-    harness: "codex" | "default"
+    systemMode?: "append" | "replace-agent"
+    harness: "auto" | "codex" | "default"
   }
   revert?: {
     messageID: string
@@ -4829,9 +4833,13 @@ export type SessionPromptData = {
      */
     system?: string
     /**
-     * Harness mode selected by the session's first user query. Later values are ignored. Explicit default overrides the process-wide Codex mode flag.
+     * Whether the selected system prompt appends to or replaces the agent prompt. Later values are ignored.
      */
-    harness?: "codex" | "default"
+    systemMode?: "append" | "replace-agent"
+    /**
+     * Harness mode selected by the session's first user query. Later values are ignored. Auto preserves model/process inference; explicit default forces the native tool schema.
+     */
+    harness?: "auto" | "codex" | "default"
     variant?: string
     parts: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
   }
@@ -5051,9 +5059,13 @@ export type SessionPromptAsyncData = {
      */
     system?: string
     /**
-     * Harness mode selected by the session's first user query. Later values are ignored. Explicit default overrides the process-wide Codex mode flag.
+     * Whether the selected system prompt appends to or replaces the agent prompt. Later values are ignored.
      */
-    harness?: "codex" | "default"
+    systemMode?: "append" | "replace-agent"
+    /**
+     * Harness mode selected by the session's first user query. Later values are ignored. Auto preserves model/process inference; explicit default forces the native tool schema.
+     */
+    harness?: "auto" | "codex" | "default"
     variant?: string
     parts: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
   }
@@ -5097,6 +5109,18 @@ export type SessionCommandData = {
     arguments: string
     command: string
     variant?: string
+    /**
+     * Additional system prompt selected by the session's first user command. Later values are ignored.
+     */
+    system?: string
+    /**
+     * Whether the selected system prompt appends to or replaces the agent prompt. Later values are ignored.
+     */
+    systemMode?: "append" | "replace-agent"
+    /**
+     * Harness mode selected by the session's first user command. Later values are ignored.
+     */
+    harness?: "auto" | "codex" | "default"
     parts?: Array<{
       id?: string
       type: "file"

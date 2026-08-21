@@ -53,7 +53,12 @@ export const buildLLMRequestPrefix = Effect.fn("Session.buildLLMRequestPrefix")(
   if (!lastUserMsg)
     return yield* Effect.die(new Error("buildLLMRequestPrefix: no user message in msgs"))
   const lastUser = input.prompt
-    ? { ...(lastUserMsg.info as MessageV2.User), system: input.prompt.system, harness: input.prompt.harness }
+    ? {
+        ...(lastUserMsg.info as MessageV2.User),
+        system: input.prompt.system,
+        systemMode: input.prompt.systemMode,
+        harness: input.prompt.harness,
+      }
     : (lastUserMsg.info as MessageV2.User)
 
   // Build system using LLM.buildSystemArray (single source of truth shared with stream())

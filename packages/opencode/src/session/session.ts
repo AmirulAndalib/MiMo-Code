@@ -85,7 +85,7 @@ export function fromRow(row: SessionRow): Info {
     share,
     revert,
     permission: row.permission ?? undefined,
-    prompt: row.prompt ?? undefined,
+    prompt: row.prompt ? PromptConfig.parse(row.prompt) : undefined,
     time: {
       created: row.time_created,
       updated: row.time_updated,
@@ -134,7 +134,8 @@ function getForkedTitle(title: string): string {
 
 export const PromptConfig = z.object({
   system: z.string().optional(),
-  harness: z.enum(["codex", "default"]),
+  systemMode: z.enum(["append", "replace-agent"]).default("append"),
+  harness: z.enum(["auto", "codex", "default"]),
 })
 export type PromptConfig = z.output<typeof PromptConfig>
 
@@ -755,7 +756,8 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
           if (firstUser?.info.role === "user") {
             const prompt: PromptConfig = {
               system: firstUser.info.system,
-              harness: firstUser.info.harness ?? (Flag.MIMOCODE_CODEX_MODE ? "codex" : "default"),
+              systemMode: firstUser.info.systemMode ?? "append",
+              harness: firstUser.info.harness ?? "auto",
             }
             if (input.fallback) yield* patch(input.sessionID, { prompt })
             return prompt
@@ -763,12 +765,16 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
           if (input.fallback) {
             const prompt: PromptConfig = {
               system: input.fallback.system,
-              harness: input.fallback.harness ?? (Flag.MIMOCODE_CODEX_MODE ? "codex" : "default"),
+              systemMode: input.fallback.systemMode ?? "append",
+              harness: input.fallback.harness ?? "auto",
             }
             yield* patch(input.sessionID, { prompt })
             return prompt
           }
-          return { harness: Flag.MIMOCODE_CODEX_MODE ? "codex" : "default" } satisfies PromptConfig
+          return {
+            systemMode: "append",
+            harness: "auto",
+          } satisfies PromptConfig
         }),
       )
     })

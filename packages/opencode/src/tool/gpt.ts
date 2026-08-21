@@ -1,10 +1,11 @@
 import { Flag } from "@/flag/flag"
 
-export type HarnessMode = "codex" | "default"
+export type HarnessMode = "auto" | "codex" | "default"
 
-function usesCodexHarness(harness?: HarnessMode) {
-  if (harness) return harness === "codex"
-  return Flag.MIMOCODE_CODEX_MODE
+function codexHarnessOverride(harness?: HarnessMode): boolean | undefined {
+  if (harness === "codex") return true
+  if (harness === "default") return false
+  return undefined
 }
 
 export function isGPTModel(...values: Array<string | undefined>) {
@@ -18,7 +19,8 @@ export function isMcpToolSearchEnabled(
   harness: HarnessMode | undefined,
   ...modelIDs: Array<string | undefined>
 ) {
-  return usesCodexHarness(harness) || enabled || isGPTModel(...modelIDs) || usesMimoCodexMode(...modelIDs)
+  return enabled || (codexHarnessOverride(harness)
+    ?? (Flag.MIMOCODE_CODEX_MODE || isGPTModel(...modelIDs) || usesMimoCodexMode(...modelIDs)))
 }
 
 export function usesMimoCodexMode(...values: Array<string | undefined>) {
@@ -28,8 +30,8 @@ export function usesMimoCodexMode(...values: Array<string | undefined>) {
 }
 
 export function usesGPTToolset(modelID: string, harness?: HarnessMode) {
-  return (
-    usesCodexHarness(harness) ||
+  return codexHarnessOverride(harness) ?? (
+    Flag.MIMOCODE_CODEX_MODE ||
     (modelID.includes("gpt-") && !modelID.includes("oss") && !modelID.includes("gpt-4")) ||
     usesMimoCodexMode(modelID)
   )

@@ -677,6 +677,7 @@ it.live("locks system and harness to the first user query", () =>
         model: ref,
         noReply: true,
         system: "first system prompt",
+        systemMode: "replace-agent",
         harness: "codex",
         parts: [{ type: "text", text: "first query" }],
       })
@@ -702,7 +703,7 @@ it.live("locks system and harness to the first user query", () =>
 
       const input = (yield* llm.inputs)[0]
       const request = JSON.stringify(input)
-      expect(request).toContain("You are Codex")
+      expect(request).not.toContain("You are Codex")
       expect(request).toContain("first system prompt")
       expect((input.tools as Array<Record<string, unknown>>).map(wireToolName)).toEqual(["exec"])
 
@@ -712,6 +713,7 @@ it.live("locks system and harness to the first user query", () =>
         model: ref,
         noReply: true,
         system: "second system prompt",
+        systemMode: "append",
         harness: "default",
         parts: [{ type: "text", text: "second query" }],
       })
@@ -721,12 +723,15 @@ it.live("locks system and harness to the first user query", () =>
         .filter((message): message is MessageV2.User => message.role === "user")
       expect(users.map((message) => message.harness)).toEqual(["codex", undefined, "codex"])
       expect(users.map((message) => message.system)).toEqual(["first system prompt", undefined, "first system prompt"])
+      expect(users.map((message) => message.systemMode)).toEqual(["replace-agent", undefined, "replace-agent"])
       expect((yield* sessions.get(chat.id)).prompt).toEqual({
         system: "first system prompt",
+        systemMode: "replace-agent",
         harness: "codex",
       })
       expect((yield* sessions.create({ parentID: chat.id })).prompt).toEqual({
         system: "first system prompt",
+        systemMode: "replace-agent",
         harness: "codex",
       })
 
@@ -766,6 +771,7 @@ it.live("locks system and harness to the first user query", () =>
       })
       expect(yield* sessions.resolvePrompt({ sessionID: legacy.id })).toEqual({
         system: "legacy first system",
+        systemMode: "append",
         harness: "default",
       })
       expect((yield* sessions.get(legacy.id)).prompt).toBeUndefined()
@@ -776,6 +782,7 @@ it.live("locks system and harness to the first user query", () =>
         }),
       ).toEqual({
         system: "legacy first system",
+        systemMode: "append",
         harness: "default",
       })
     }),
@@ -846,8 +853,8 @@ it.live("does not pin an empty parent while creating a child", () =>
         parts: [{ type: "text", text: "child first query" }],
       })
 
-      expect((yield* sessions.get(parent.id)).prompt).toEqual({ system: "parent system", harness: "default" })
-      expect((yield* sessions.get(child.id)).prompt).toEqual({ system: "child system", harness: "codex" })
+      expect((yield* sessions.get(parent.id)).prompt).toEqual({ system: "parent system", systemMode: "append", harness: "default" })
+      expect((yield* sessions.get(child.id)).prompt).toEqual({ system: "child system", systemMode: "append", harness: "codex" })
     }),
     { git: true, config: providerCfg },
   ),
@@ -891,6 +898,7 @@ it.live("serializes concurrent first-query pinning", () =>
       expect(pinned).toBeDefined()
       expect(users).toHaveLength(2)
       expect(users.every((message) => message.system === pinned?.system)).toBe(true)
+      expect(users.every((message) => message.systemMode === pinned?.systemMode)).toBe(true)
       expect(users.every((message) => message.harness === pinned?.harness)).toBe(true)
     }),
     { git: true, config: providerCfg },

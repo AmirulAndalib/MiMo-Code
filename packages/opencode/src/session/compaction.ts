@@ -244,7 +244,12 @@ export const layer: Layer.Layer<
         throw new Error(`Compaction parent must be a user message: ${input.parentID}`)
       }
       const promptConfig = yield* session.resolvePrompt({ sessionID: input.sessionID })
-      const userMessage = { ...parent.info, system: promptConfig.system, harness: promptConfig.harness }
+      const userMessage = {
+        ...parent.info,
+        system: promptConfig.system,
+        systemMode: promptConfig.systemMode,
+        harness: promptConfig.harness,
+      }
       const compactionPart = parent.parts.find((part): part is MessageV2.CompactionPart => part.type === "compaction")
 
       // Truncate history at the previous compaction boundary so a repeat
@@ -433,6 +438,7 @@ export const layer: Layer.Layer<
             format: original.format,
             tools: original.tools,
             system: promptConfig.system,
+            systemMode: promptConfig.systemMode,
             harness: promptConfig.harness,
           })
           for (const part of replay.parts) {

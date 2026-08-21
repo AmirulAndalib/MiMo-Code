@@ -2231,6 +2231,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           variant,
         },
         system: input.system,
+        systemMode: input.systemMode,
         harness: input.harness,
         format: input.format,
         provenance: input.provenance,
@@ -2532,10 +2533,15 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       const prompt = yield* sessions.resolvePrompt({
         sessionID: input.sessionID,
         ...(parts.some((part) => !("synthetic" in part) || !part.synthetic)
-          ? { fallback: { system: input.system, harness: input.harness } }
+          ? { fallback: { system: input.system, systemMode: input.systemMode, harness: input.harness } }
           : {}),
       })
-      const message: MessageV2.User = { ...info, system: prompt.system, harness: prompt.harness }
+      const message: MessageV2.User = {
+        ...info,
+        system: prompt.system,
+        systemMode: prompt.systemMode,
+        harness: prompt.harness,
+      }
 
       yield* plugin.trigger(
         "chat.message",
@@ -3356,7 +3362,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           }
 
           if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
-          lastUser = { ...lastUser, system: sessionPrompt.system, harness: sessionPrompt.harness }
+          lastUser = {
+            ...lastUser,
+            system: sessionPrompt.system,
+            systemMode: sessionPrompt.systemMode,
+            harness: sessionPrompt.harness,
+          }
           const usageRecovered =
             !!lastFinished &&
             msgs.some(
@@ -4762,6 +4773,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         agent: userAgent,
         parts,
         variant: input.variant,
+        system: input.system,
+        systemMode: input.systemMode,
+        harness: input.harness,
       })
       yield* bus.publish(Command.Event.Executed, {
         name: input.command,
@@ -4886,11 +4900,15 @@ export const PromptInput = z.object({
     .string()
     .optional()
     .describe("Additional system prompt selected by the session's first user query. Later values are ignored."),
+  systemMode: z
+    .enum(["append", "replace-agent"])
+    .optional()
+    .describe("Whether the selected system prompt appends to or replaces the agent prompt. Later values are ignored."),
   harness: z
-    .enum(["codex", "default"])
+    .enum(["auto", "codex", "default"])
     .optional()
     .describe(
-      "Harness mode selected by the session's first user query. Later values are ignored. Explicit default overrides the process-wide Codex mode flag.",
+      "Harness mode selected by the session's first user query. Later values are ignored. Auto preserves model/process inference; explicit default forces the native tool schema.",
     ),
   variant: z.string().optional(),
   parts: z.array(
@@ -4979,6 +4997,18 @@ export const CommandInput = z.object({
   arguments: z.string(),
   command: z.string(),
   variant: z.string().optional(),
+  system: z
+    .string()
+    .optional()
+    .describe("Additional system prompt selected by the session's first user command. Later values are ignored."),
+  systemMode: z
+    .enum(["append", "replace-agent"])
+    .optional()
+    .describe("Whether the selected system prompt appends to or replaces the agent prompt. Later values are ignored."),
+  harness: z
+    .enum(["auto", "codex", "default"])
+    .optional()
+    .describe("Harness mode selected by the session's first user command. Later values are ignored."),
   parts: z
     .array(
       z.discriminatedUnion("type", [

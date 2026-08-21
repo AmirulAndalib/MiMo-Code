@@ -47,6 +47,8 @@ describe("isMcpToolSearchEnabled", () => {
     expect(isMcpToolSearchEnabled(false, "codex", "claude-opus-4-6")).toBe(true)
     process.env.MIMOCODE_CODEX_MODE = "true"
     expect(isMcpToolSearchEnabled(false, "default", "claude-opus-4-6")).toBe(false)
+    expect(isMcpToolSearchEnabled(false, "default", "mimo-v2.6", "gpt-5.2")).toBe(false)
+    expect(isMcpToolSearchEnabled(true, "default", "mimo-v2.6")).toBe(true)
   })
 })
 
@@ -67,5 +69,7 @@ describe("usesGPTToolset", () => {
     expect(usesGPTToolset("claude-opus-4-6", "codex")).toBe(true)
     process.env.MIMOCODE_CODEX_MODE = "true"
     expect(usesGPTToolset("claude-opus-4-6", "default")).toBe(false)
+    expect(usesGPTToolset("mimo-v2.6", "default")).toBe(false)
+    expect(usesGPTToolset("gpt-5.2", "default")).toBe(false)
   })
 })

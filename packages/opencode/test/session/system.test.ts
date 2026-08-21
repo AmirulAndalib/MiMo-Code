@@ -63,6 +63,15 @@ describe("session.system", () => {
     expect(prompt).not.toContain("gitStatus:")
   })
 
+  test("explicit default harness overrides MiMo Codex prompt inference", () => {
+    const model = ProviderTest.model({
+      id: ModelID.make("mimo-v2.6"),
+      api: { id: "mimo-v2.6" } as never,
+    })
+    expect(SystemPrompt.provider(model, "codex")[0]).not.toBe(SystemPrompt.provider(model, "default")[0])
+    expect(SystemPrompt.provider(model, "codex")[0]).toContain("Codex")
+  })
+
   test("renders machine and repository environment only for Claude models", async () => {
     await using tmp = await tmpdir({ git: true })
     await $`git branch -M prompt-test`.cwd(tmp.path).quiet()
