@@ -33,6 +33,7 @@ import { ActorRegistry } from "@/actor/registry"
 import { Memory } from "@/memory"
 import { isRetryableTransientError } from "./retry"
 import { MCP_TOOL_SEARCH_ID } from "@/tool/mcp-tool-search"
+import { TOOL_SCRIPT_EXCLUDED } from "@/tool/tool-script-ref"
 import { deriveLiveness } from "@/actor/schema"
 import { SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
 import { Flag } from "@/flag/flag"
@@ -939,11 +940,18 @@ function resolveTools(input: Pick<StreamInput, "tools" | "activeTools" | "agent"
     Object.keys(input.tools),
     Agent.runtimePermission(input.agent, input.permission),
   )
+  const allowExecGateway =
+    input.activeTools?.includes("exec") === true &&
+    Object.keys(input.tools).some(
+      (key) => !TOOL_SCRIPT_EXCLUDED.has(key) && input.user.tools?.[key] !== false && !disabled.has(key),
+    )
   return Record.filter(
     input.tools,
     (_, key) =>
       input.user.tools?.[key] !== false &&
-      (!disabled.has(key) || (key === MCP_TOOL_SEARCH_ID && input.activeTools?.includes(key) === true)),
+      (!disabled.has(key) ||
+        (key === MCP_TOOL_SEARCH_ID && input.activeTools?.includes(key) === true) ||
+        (key === "exec" && allowExecGateway)),
   )
 }
 
