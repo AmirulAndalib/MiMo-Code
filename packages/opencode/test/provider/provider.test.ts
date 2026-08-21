@@ -2124,7 +2124,7 @@ test("closest checks multiple query terms in order", async () => {
   })
 })
 
-test("model limit defaults to DEFAULT_CONTEXT_WINDOW (1M) when not specified (F41)", async () => {
+test("model limits use family defaults when not specified (F41)", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       await Bun.write(
@@ -2142,6 +2142,18 @@ test("model limit defaults to DEFAULT_CONTEXT_WINDOW (1M) when not specified (F4
                   tool_call: true,
                   // no limit specified
                 },
+                "claude-default": {
+                  name: "Claude",
+                  tool_call: true,
+                },
+                "gpt-default": {
+                  name: "GPT",
+                  tool_call: true,
+                },
+                "mimo-default": {
+                  name: "MiMo",
+                  tool_call: true,
+                },
               },
               options: { apiKey: "test" },
             },
@@ -2157,6 +2169,12 @@ test("model limit defaults to DEFAULT_CONTEXT_WINDOW (1M) when not specified (F4
       const model = providers[ProviderID.make("no-limit")].models["model"]
       expect(model.limit.context).toBe(1_000_000)
       expect(model.limit.output).toBe(0)
+      for (const id of ["claude-default", "gpt-default", "mimo-default"]) {
+        expect(providers[ProviderID.make("no-limit")].models[id].limit).toEqual({
+          context: 1_000_000,
+          output: 128_000,
+        })
+      }
     },
   })
 })
@@ -2942,4 +2960,3 @@ test("plugin config enabled and disabled providers are honored", async () => {
     },
   })
 })
-
