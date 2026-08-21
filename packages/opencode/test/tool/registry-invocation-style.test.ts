@@ -57,7 +57,7 @@ describe("ToolRegistry.tools: invocation style resolution", () => {
         nested.filter((id) => id !== "bash").forEach((id) => expect(description).toContain(`${id}(input:`))
         expect(description).toContain("exec_command(input:")
         expect(description).not.toContain("\n  bash(input:")
-        expect(description).toContain("timeout measured in milliseconds")
+        expect(description).toContain("`timeout` is always measured in milliseconds")
       }),
     ),
   )
