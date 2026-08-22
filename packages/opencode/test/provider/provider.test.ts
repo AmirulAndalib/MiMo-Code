@@ -1522,6 +1522,84 @@ test("provider with custom npm package", async () => {
   })
 })
 
+test("xiaomi models use the Responses harness for free-form exec PTC", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        path.join(dir, "mimocode.json"),
+        JSON.stringify({
+          $schema: "https://opencode.ai/config.json",
+          enabled_providers: ["xiaomi"],
+          provider: {
+            xiaomi: {
+              npm: "@ai-sdk/openai-compatible",
+              models: {
+                "mimo-ptc-test": {
+                  name: "MiMo PTC Test",
+                  tool_call: true,
+                  limit: { context: 8192, output: 2048 },
+                },
+              },
+              options: {
+                apiKey: "test-key",
+                baseURL: "https://example.test/v1",
+              },
+            },
+          },
+        }),
+      )
+    },
+  })
+  await Instance.provide({
+    directory: tmp.path,
+    init: async () => {
+      set("XIAOMI_API_KEY", "test-key")
+    },
+    fn: async () => {
+      const model = await getModel(ProviderID.make("xiaomi"), ModelID.make("mimo-ptc-test"))
+      const language = await getLanguage(model)
+      expect(language.provider).toBe("xiaomi.responses")
+    },
+  })
+})
+
+test("xiaomi models outside PTC mode stay on Chat Completions", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        path.join(dir, "mimocode.json"),
+        JSON.stringify({
+          $schema: "https://opencode.ai/config.json",
+          enabled_providers: ["xiaomi"],
+          provider: {
+            xiaomi: {
+              models: {
+                "mimo-v2.5": {
+                  name: "MiMo V2.5",
+                  tool_call: true,
+                  limit: { context: 8192, output: 2048 },
+                },
+              },
+              options: { apiKey: "test-key", baseURL: "https://example.test/v1" },
+            },
+          },
+        }),
+      )
+    },
+  })
+  await Instance.provide({
+    directory: tmp.path,
+    init: async () => {
+      set("XIAOMI_API_KEY", "test-key")
+    },
+    fn: async () => {
+      const model = await getModel(ProviderID.make("xiaomi"), ModelID.make("mimo-v2.5"))
+      const language = await getLanguage(model)
+      expect(language.provider).toBe("xiaomi.chat")
+    },
+  })
+})
+
 // Edge cases for model configuration
 
 test("model alias name defaults to alias key when id differs", async () => {

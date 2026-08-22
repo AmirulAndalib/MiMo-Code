@@ -353,7 +353,7 @@ export const ToolScriptTool = Tool.define(
         code: z
           .string()
           .describe(
-            "Raw JavaScript or TypeScript source for the body of an async function, not JSON or a Markdown code block. Call tools via the global `tools` object; inspect `ALL_TOOLS` when needed; `return` the final aggregated value.",
+            "The `code` field value is raw JavaScript or TypeScript source for the body of an async function, not JSON or a Markdown code block. The outer exec tool arguments must still be a JSON object containing this field. Call tools via the global `tools` object; inspect `ALL_TOOLS` when needed; `return` the final aggregated value.",
           ),
         max_tool_calls: z
           .number()

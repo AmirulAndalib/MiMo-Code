@@ -199,6 +199,18 @@ export async function repairToolCall(input: RepairToolCallInput): Promise<Repair
 
   const schema = await Promise.resolve(input.getSchema(resolvedName))
   const parsed = parseToolInput(input.input)
+  const codeSchema = isRecord(schema.properties) ? schema.properties.code : undefined
+  if (
+    resolvedName === "exec" &&
+    typeof parsed === "string" &&
+    isRecord(codeSchema) &&
+    codeSchema.type === "string"
+  ) {
+    return {
+      toolName: resolvedName,
+      input: JSON.stringify({ code: parsed }),
+    }
+  }
   const normalized = normalizeInput(parsed, schema)
   const repairedInput = stringifyToolInput(normalized)
 
