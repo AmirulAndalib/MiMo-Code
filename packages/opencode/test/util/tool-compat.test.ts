@@ -193,6 +193,41 @@ describe("util.tool-compat", () => {
 
       expect(repaired).toBeUndefined()
     })
+
+    test("wraps raw exec source in the code argument object", async () => {
+      const execSchema = {
+        type: "object",
+        properties: {
+          code: { type: "string" },
+          max_tool_calls: { type: "number" },
+        },
+        required: ["code"],
+      } satisfies JSONSchema7
+      const source = 'const result = await tools.exec_command({ cmd: "pwd" }); return result.output'
+
+      const repaired = await repairToolCall({
+        toolName: "exec",
+        input: source,
+        toolNames: ["exec"],
+        getSchema: () => execSchema,
+      })
+
+      expect(repaired).toEqual({
+        toolName: "exec",
+        input: JSON.stringify({ code: source }),
+      })
+    })
+
+    test("does not wrap raw input for other object tools", async () => {
+      const repaired = await repairToolCall({
+        toolName: "read",
+        input: "/tmp/a.ts",
+        toolNames: ["read"],
+        getSchema: () => readSchema,
+      })
+
+      expect(repaired).toBeUndefined()
+    })
   })
 
   describe("parseToolInput CJK / broken unicode escapes", () => {

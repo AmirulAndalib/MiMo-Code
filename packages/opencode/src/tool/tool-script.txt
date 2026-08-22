@@ -1,5 +1,7 @@
 Execute JavaScript to orchestrate the available tools.
 
+On Responses APIs, `exec` is exposed as a custom tool whose input is this raw source body. On JSON function-tool transports, the compatibility envelope is `{"code":"<source>"}`. Do not add that envelope inside the source itself.
+
 Write the body of an async function. The global `tools` object exposes every tool available to this execution, and each method returns a promise:
 
 ```ts

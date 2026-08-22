@@ -27,6 +27,7 @@ import { AppFileSystem } from "@mimo-ai/shared/filesystem"
 import { isRecord } from "@/util/record"
 import { withStatics } from "@/util/schema"
 import { isFreeApiModel, isFreeApiSunset } from "@/util/free-api-sunset"
+import { usesMimoCodexMode } from "../tool/gpt"
 
 import * as ProviderTransform from "./transform"
 import { ModelID, ProviderID } from "./schema"
@@ -323,6 +324,14 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
           return sdk.responses(modelID)
         },
         options: { headerTimeout: DEFAULT_OPENAI_HEADER_TIMEOUT },
+      }),
+    xiaomi: () =>
+      Effect.succeed({
+        autoload: false,
+        async getModel(sdk: any, modelID: string, _options?: Record<string, any>) {
+          return usesMimoCodexMode(modelID) ? sdk.responses(modelID) : sdk.languageModel(modelID)
+        },
+        options: {},
       }),
     xai: () =>
       Effect.succeed({
@@ -1719,7 +1728,14 @@ const layer: Layer.Layer<
           return wrapSSE(bounded, chunkTimeout, chunkAbortCtl)
         }
 
-        const bundledLoader = BUNDLED_PROVIDERS[model.api.npm]
+        const bundledLoader =
+          model.providerID === "xiaomi" && model.api.npm === "@ai-sdk/openai-compatible"
+            ? () =>
+                import("./sdk/copilot").then(
+                  (module) => (options: any) =>
+                    module.createOpenaiCompatible({ ...options, customToolNames: ["exec"] }),
+                )
+            : BUNDLED_PROVIDERS[model.api.npm]
         if (bundledLoader) {
           log.info("using bundled provider", {
             providerID: model.providerID,
