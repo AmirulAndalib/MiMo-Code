@@ -860,6 +860,103 @@ it.live("does not pin an empty parent while creating a child", () =>
   ),
 )
 
+it.live("persists auto as its own harness mode", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* () {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const explicit = yield* sessions.create({ title: "Explicit auto" })
+      const omitted = yield* sessions.create({ title: "Omitted harness" })
+
+      yield* prompt.prompt({
+        sessionID: explicit.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        harness: "auto",
+        parts: [{ type: "text", text: "first explicit auto query" }],
+      })
+      yield* prompt.prompt({
+        sessionID: explicit.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        harness: "codex",
+        parts: [{ type: "text", text: "later override" }],
+      })
+      yield* prompt.prompt({
+        sessionID: omitted.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "first omitted query" }],
+      })
+
+      expect((yield* sessions.get(explicit.id)).prompt?.harness).toBe("auto")
+      expect((yield* sessions.get(omitted.id)).prompt?.harness).toBe("auto")
+      const users = (yield* sessions.messages({ sessionID: explicit.id }))
+        .map((message) => message.info)
+        .filter((message): message is MessageV2.User => message.role === "user")
+      expect(users.map((message) => message.harness)).toEqual(["auto", "auto"])
+    }),
+    { git: true, config: providerCfg },
+  ),
+)
+
+it.live("restores the pinned prompt after compaction without sending it to the summarizer", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* ({ llm }) {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const compaction = yield* SessionCompaction.Service
+      const chat = yield* sessions.create({ title: "Compaction prompt" })
+      const marker = "SESSION_SYSTEM_MUST_SKIP_COMPACTION"
+
+      const first = yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        system: marker,
+        systemMode: "replace-agent",
+        harness: "codex",
+        parts: [{ type: "text", text: "first query" }],
+      })
+
+      yield* llm.text("summary")
+      expect(
+        yield* compaction.process({
+          parentID: first.info.id,
+          messages: yield* sessions.messages({ sessionID: chat.id }),
+          sessionID: chat.id,
+          auto: false,
+        }),
+      ).toBe("continue")
+      expect(JSON.stringify((yield* llm.inputs)[0])).not.toContain(marker)
+
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "after compaction" }],
+      })
+      yield* llm.text("continued")
+      yield* prompt.loop({ sessionID: chat.id })
+
+      const request = (yield* llm.inputs)[1]
+      expect(JSON.stringify(request)).toContain(marker)
+      expect((request.tools as Array<Record<string, unknown>>).map(wireToolName)).toEqual(["exec"])
+      expect((yield* sessions.get(chat.id)).prompt).toEqual({
+        system: marker,
+        systemMode: "replace-agent",
+        harness: "codex",
+      })
+    }),
+    { git: true, config: providerCfg },
+  ),
+)
+
 it.live("serializes concurrent first-query pinning", () =>
   provideTmpdirServer(
     Effect.fnUntraced(function* () {
@@ -1419,6 +1516,36 @@ mcpIt.live(
         expect(tools.map(wireToolName)).toEqual(["exec"])
         expect(JSON.stringify(tools)).not.toContain("private_window_id")
         expect(JSON.stringify(tools)).not.toContain("Secret nested MCP error selector")
+      }),
+      { git: true, config: gptProviderCfg },
+    ),
+  30_000,
+)
+
+mcpIt.live(
+  "keeps the Codex prompt and tool schema for GPT models with the default harness",
+  () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const prompt = yield* SessionPrompt.Service
+        const sessions = yield* Session.Service
+        const session = yield* sessions.create({ title: "GPT Codex tools" })
+
+        yield* prompt.prompt({
+          sessionID: session.id,
+          agent: "build",
+          model: { providerID: ProviderID.openai, modelID: ModelID.make("gpt-5.2") },
+          harness: "default",
+          noReply: true,
+          parts: [{ type: "text", text: "inspect the Codex tools" }],
+        })
+        yield* llm.text("done")
+        yield* prompt.loop({ sessionID: session.id })
+
+        const request = (yield* llm.inputs)[0]
+        expect((request.tools as Array<Record<string, unknown>>).map(wireToolName)).toEqual(["exec"])
+        expect(JSON.stringify(request)).toContain("You are Codex")
+        expect(JSON.stringify(request)).toContain("tools.apply_patch")
       }),
       { git: true, config: gptProviderCfg },
     ),

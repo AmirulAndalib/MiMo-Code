@@ -19,8 +19,8 @@ export function isMcpToolSearchEnabled(
   harness: HarnessMode | undefined,
   ...modelIDs: Array<string | undefined>
 ) {
-  return enabled || (codexHarnessOverride(harness)
-    ?? (Flag.MIMOCODE_CODEX_MODE || isGPTModel(...modelIDs) || usesMimoCodexMode(...modelIDs)))
+  if (isGPTModel(...modelIDs)) return true
+  return enabled || (codexHarnessOverride(harness) ?? (Flag.MIMOCODE_CODEX_MODE || usesMimoCodexMode(...modelIDs)))
 }
 
 export function usesMimoCodexMode(...values: Array<string | undefined>) {
@@ -30,9 +30,6 @@ export function usesMimoCodexMode(...values: Array<string | undefined>) {
 }
 
 export function usesGPTToolset(modelID: string, harness?: HarnessMode) {
-  return codexHarnessOverride(harness) ?? (
-    Flag.MIMOCODE_CODEX_MODE ||
-    (modelID.includes("gpt-") && !modelID.includes("oss") && !modelID.includes("gpt-4")) ||
-    usesMimoCodexMode(modelID)
-  )
+  if (isGPTModel(modelID)) return true
+  return codexHarnessOverride(harness) ?? (Flag.MIMOCODE_CODEX_MODE || usesMimoCodexMode(modelID))
 }
