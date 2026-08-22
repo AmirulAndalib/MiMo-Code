@@ -9,10 +9,16 @@ import type { Effect } from "effect"
 import type { Agent } from "../agent/agent"
 import type { ModelID, ProviderID } from "../provider/schema"
 import type * as Tool from "./tool"
+import type { HarnessMode } from "./gpt"
 
 export const toolScriptRegistry: {
   current:
-    | ((input?: { providerID: ProviderID; modelID: ModelID; agent: Agent.Info }) => Effect.Effect<Tool.Def[]>)
+    | ((input?: {
+        providerID: ProviderID
+        modelID: ModelID
+        agent: Agent.Info
+        harness?: HarnessMode
+      }) => Effect.Effect<Tool.Def[]>)
     | undefined
 } = { current: undefined }
 

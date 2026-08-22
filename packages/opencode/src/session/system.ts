@@ -23,7 +23,7 @@ import type { Agent } from "@/agent/agent"
 import { Permission } from "@/permission"
 import { Skill } from "@/skill"
 import { Flag } from "@/flag/flag"
-import { usesMimoCodexMode } from "@/tool/gpt"
+import { type HarnessMode, isGPTModel, usesMimoCodexMode } from "@/tool/gpt"
 
 function renderGitResult(result: Git.Result, fallback = "(none)") {
   if (result.exitCode !== 0) return fallback
@@ -32,12 +32,12 @@ function renderGitResult(result: Git.Result, fallback = "(none)") {
 
 const anthropicEnvironment = new Map<string, string>()
 
-export function provider(model: Provider.Model) {
-  if (Flag.MIMOCODE_CODEX_MODE) return [PROMPT_GPT]
+export function provider(model: Provider.Model, harness?: HarnessMode) {
+  if (harness === "codex" || ((harness === undefined || harness === "auto") && Flag.MIMOCODE_CODEX_MODE)) return [PROMPT_GPT]
   const prompt = (id: string) => {
-    if (usesMimoCodexMode(id)) return PROMPT_GPT
+    if (isGPTModel(id)) return PROMPT_GPT
+    if (usesMimoCodexMode(id)) return harness === "default" ? PROMPT_DEFAULT : PROMPT_GPT
     if (id.includes("gpt-4") || id.includes("o1") || id.includes("o3")) return PROMPT_BEAST
-    if (id.includes("gpt")) return PROMPT_GPT
     if (id.includes("gemini-")) return PROMPT_GEMINI
     if (id.includes("claude")) return PROMPT_ANTHROPIC
     if (id.toLowerCase().includes("trinity")) return PROMPT_TRINITY
@@ -49,12 +49,12 @@ export function provider(model: Provider.Model) {
   return [prompt(model.id) ?? prompt(model.api.id) ?? PROMPT_DEFAULT]
 }
 
-export function agent(agent: Agent.Info, model: Provider.Model) {
-  return agent.prompt ? [agent.prompt] : provider(model)
+export function agent(agent: Agent.Info, model: Provider.Model, harness?: HarnessMode) {
+  return agent.prompt ? [agent.prompt] : provider(model, harness)
 }
 
 export interface Interface {
-  readonly environment: (model: Provider.Model, now: number) => Effect.Effect<string[]>
+  readonly environment: (model: Provider.Model, now: number, harness?: HarnessMode) => Effect.Effect<string[]>
   readonly skills: (agent: Agent.Info) => Effect.Effect<string | undefined>
   readonly available: (agent?: Agent.Info) => Effect.Effect<Skill.Info[]>
   readonly all: () => Effect.Effect<Skill.Info[]>
@@ -70,10 +70,14 @@ export const layer = Layer.effect(
     const git = yield* Git.Service
 
     return Service.of({
-      environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model, now: number) {
+      environment: Effect.fn("SystemPrompt.environment")(function* (
+        model: Provider.Model,
+        now: number,
+        harness?: HarnessMode,
+      ) {
         if (!Flag.MIMOCODE_ENABLE_DYNAMIC_SYSTEM_PROMPT) return []
         const project = Instance.project
-        if (provider(model)[0] === PROMPT_ANTHROPIC) {
+        if (provider(model, harness)[0] === PROMPT_ANTHROPIC) {
           const key = `${Instance.directory}\0${now}\0${model.providerID}\0${model.api.id}`
           const cached = anthropicEnvironment.get(key)
           if (cached)

@@ -2412,6 +2412,8 @@ export class Session2 extends HeyApiClient {
       }
       format?: OutputFormat
       system?: string
+      systemMode?: "append" | "replace-agent"
+      harness?: "auto" | "codex" | "default"
       variant?: string
       parts?: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
     },
@@ -2437,6 +2439,8 @@ export class Session2 extends HeyApiClient {
             { in: "body", key: "tools" },
             { in: "body", key: "format" },
             { in: "body", key: "system" },
+            { in: "body", key: "systemMode" },
+            { in: "body", key: "harness" },
             { in: "body", key: "variant" },
             { in: "body", key: "parts" },
           ],
@@ -2554,6 +2558,8 @@ export class Session2 extends HeyApiClient {
       }
       format?: OutputFormat
       system?: string
+      systemMode?: "append" | "replace-agent"
+      harness?: "auto" | "codex" | "default"
       variant?: string
       parts?: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
     },
@@ -2579,6 +2585,8 @@ export class Session2 extends HeyApiClient {
             { in: "body", key: "tools" },
             { in: "body", key: "format" },
             { in: "body", key: "system" },
+            { in: "body", key: "systemMode" },
+            { in: "body", key: "harness" },
             { in: "body", key: "variant" },
             { in: "body", key: "parts" },
           ],
@@ -2613,6 +2621,9 @@ export class Session2 extends HeyApiClient {
       arguments?: string
       command?: string
       variant?: string
+      system?: string
+      systemMode?: "append" | "replace-agent"
+      harness?: "auto" | "codex" | "default"
       parts?: Array<{
         id?: string
         type: "file"
@@ -2638,6 +2649,9 @@ export class Session2 extends HeyApiClient {
             { in: "body", key: "arguments" },
             { in: "body", key: "command" },
             { in: "body", key: "variant" },
+            { in: "body", key: "system" },
+            { in: "body", key: "systemMode" },
+            { in: "body", key: "harness" },
             { in: "body", key: "parts" },
           ],
         },

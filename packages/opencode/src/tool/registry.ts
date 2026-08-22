@@ -75,7 +75,7 @@ import { resolveInvocationStyle } from "./invocation-style"
 import { BuiltinWorkflow } from "@/workflow/builtin"
 import { ToolScriptTool, renderToolScriptDeclarations } from "./tool-script"
 import { GPT_TOP_LEVEL_TOOLS, TOOL_SCRIPT_EXCLUDED, toolScriptRegistry } from "./tool-script-ref"
-import { usesGPTToolset } from "./gpt"
+import { type HarnessMode, usesGPTToolset } from "./gpt"
 
 const log = Log.create({ service: "tool.registry" })
 
@@ -120,11 +120,17 @@ export interface Interface {
   readonly ids: () => Effect.Effect<string[]>
   readonly all: () => Effect.Effect<Tool.Def[]>
   readonly named: () => Effect.Effect<{ actor: ActorDef; read: ReadDef }>
-  readonly tools: (model: { providerID: ProviderID; modelID: ModelID; agent: Agent.Info }) => Effect.Effect<Tool.Def[]>
+  readonly tools: (model: {
+    providerID: ProviderID
+    modelID: ModelID
+    agent: Agent.Info
+    harness?: HarnessMode
+  }) => Effect.Effect<Tool.Def[]>
   readonly registered: (model: {
     providerID: ProviderID
     modelID: ModelID
     agent: Agent.Info
+    harness?: HarnessMode
   }) => Effect.Effect<Tool.Def[]>
   readonly reload: () => Effect.Effect<void>
 }
@@ -359,8 +365,9 @@ export const layer = Layer.effect(
       providerID: ProviderID
       modelID: ModelID
       agent: Agent.Info
+      harness?: HarnessMode
     }) {
-      const useGPTTools = usesGPTToolset(input.modelID)
+      const useGPTTools = usesGPTToolset(input.modelID, input.harness)
       let filtered = (yield* all()).filter((tool) => {
         if (tool.id === ToolScriptTool.id) return useGPTTools || Flag.MIMOCODE_ENABLE_EXEC_TOOL
         if (tool.id === CodeSearchTool.id || tool.id === WebSearchTool.id) {
@@ -439,7 +446,7 @@ export const layer = Layer.effect(
       input ? available(input).pipe(Effect.map((result) => result.filtered)) : all()
 
     const definitions = Effect.fn("ToolRegistry.definitions")(function* (
-      input: { providerID: ProviderID; modelID: ModelID; agent: Agent.Info },
+      input: { providerID: ProviderID; modelID: ModelID; agent: Agent.Info; harness?: HarnessMode },
       includeHidden: boolean,
     ) {
       const availableTools = yield* available(input)

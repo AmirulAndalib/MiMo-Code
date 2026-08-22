@@ -321,7 +321,9 @@ const live: Layer.Layer<
       const system: string[] = []
       system.push(
         [
-          ...SystemPrompt.agent(input.agent, input.model),
+          ...(input.user.systemMode === "replace-agent"
+            ? []
+            : SystemPrompt.agent(input.agent, input.model, input.user.harness)),
           // any custom prompt passed into this call
           ...input.system,
           // any custom prompt from last user message

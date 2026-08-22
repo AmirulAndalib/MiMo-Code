@@ -311,9 +311,11 @@ export const layer = Layer.effect(
         // parity, so fall through to empty rather than emit a divergent date.
         const captureSession = yield* sessions.get(input.sessionID).pipe(Effect.catch(() => Effect.succeed(undefined)))
         if (!captureSession) return empty
+        const capturePrompt = yield* sessions.resolvePrompt({ sessionID: input.sessionID })
+        const captureMessages = input.msgs as MessageV2.WithParts[]
         const [env, instructions] = yield* Effect.all([
           Flag.MIMOCODE_ENABLE_DYNAMIC_SYSTEM_PROMPT
-            ? sys.environment(model, captureSession.time.created)
+            ? sys.environment(model, captureSession.time.created, capturePrompt.harness)
             : Effect.succeed([]),
           instruction.system().pipe(Effect.orDie),
         ])
@@ -324,8 +326,9 @@ export const layer = Layer.effect(
           sessionID: input.sessionID,
           agent: ag,
           model,
-          msgs: input.msgs as Parameters<typeof buildLLMRequestPrefix>[0]["msgs"],
+          msgs: captureMessages,
           additions,
+          prompt: capturePrompt,
         }).pipe(
           Effect.provideService(LLM.Service, llm),
           Effect.provideService(ToolRegistry.Service, registry),
@@ -1232,6 +1235,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       agentID?: string
       task_id?: string
       mcpContext: MCP.TurnContext
+      harness?: MessageV2.User["harness"]
     }) {
       using _ = log.time("resolveTools")
       const tools: Record<string, AITool> = {}
@@ -1249,6 +1253,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       const execMcp: { current: Record<string, AITool> } = { current: {} }
       const useMcpToolSearch = isMcpToolSearchEnabled(
         Flag.MIMOCODE_EXPERIMENTAL_MCP_TOOL_SEARCH,
+        input.harness,
         input.model.id,
         input.model.api.id,
         input.model.family,
@@ -1267,7 +1272,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         return new Set(actor.tools)
       })
       const whitelist = yield* whitelistFor()
-      const useGPTTools = usesGPTToolset(input.model.id)
+      const useGPTTools = usesGPTToolset(input.model.id, input.harness)
       const execAllowedByWhitelist =
         useGPTTools &&
         !!whitelist &&
@@ -1317,6 +1322,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         callID: options.toolCallId,
         extra: {
           model: input.model,
+          harness: input.harness,
           bypassAgentCheck: input.bypassAgentCheck,
           promptOps,
           ...(whitelist ? { toolWhitelist: [...whitelist] } : {}),
@@ -1372,6 +1378,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         modelID: input.model.id,
         providerID: input.model.providerID,
         agent: input.agent,
+        harness: input.harness,
       })) {
         const schema = ProviderTransform.schema(input.model, z.toJSONSchema(item.parameters))
         tools[item.id] = tool({
@@ -2224,6 +2231,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           variant,
         },
         system: input.system,
+        systemMode: input.systemMode,
+        harness: input.harness,
         format: input.format,
         provenance: input.provenance,
       }
@@ -2521,6 +2530,19 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         return { info, parts: [] }
       }
 
+      const prompt = yield* sessions.resolvePrompt({
+        sessionID: input.sessionID,
+        ...(parts.some((part) => !("synthetic" in part) || !part.synthetic)
+          ? { fallback: { system: input.system, systemMode: input.systemMode, harness: input.harness } }
+          : {}),
+      })
+      const message: MessageV2.User = {
+        ...info,
+        system: prompt.system,
+        systemMode: prompt.systemMode,
+        harness: prompt.harness,
+      }
+
       yield* plugin.trigger(
         "chat.message",
         {
@@ -2530,10 +2552,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           messageID: input.messageID,
           variant: input.variant,
         },
-        { message: info, parts },
+        { message, parts },
       )
 
-      const parsed = MessageV2.Info.safeParse(info)
+      const parsed = MessageV2.Info.safeParse(message)
       if (!parsed.success) {
         log.error("invalid user message before save", {
           sessionID: input.sessionID,
@@ -2557,10 +2579,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         })
       })
 
-      yield* sessions.updateMessage(info)
+      yield* sessions.updateMessage(message)
       for (const part of parts) yield* sessions.updatePart(part)
 
-      return { info, parts }
+      return { info: message, parts }
     }, Effect.scoped)
 
     const sweepOrphanAssistants = Effect.fn("SessionPrompt.sweepOrphanAssistants")(function* (
@@ -2733,6 +2755,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         const slog = elog.with({ sessionID })
         let structured: unknown | undefined
         let step = 0
+        const sessionPrompt = yield* sessions.resolvePrompt({ sessionID })
         const session = yield* sessions.get(sessionID)
         let lastFinishedForPrune: MessageV2.Assistant | undefined
         let lastModelForPrune: Provider.Model | undefined
@@ -3339,6 +3362,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           }
 
           if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
+          lastUser = {
+            ...lastUser,
+            system: sessionPrompt.system,
+            systemMode: sessionPrompt.systemMode,
+            harness: sessionPrompt.harness,
+          }
           const usageRecovered =
             !!lastFinished &&
             msgs.some(
@@ -3765,6 +3794,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               agentID: lastUser.agentID,
               task_id,
               mcpContext,
+              harness: lastUser.harness,
             })
             const tools = resolvedTools.tools
             const activeTools = resolvedTools.activeTools
@@ -4025,7 +4055,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
             const [env, instructions] = yield* Effect.all([
               Flag.MIMOCODE_ENABLE_DYNAMIC_SYSTEM_PROMPT
-                ? sys.environment(model, session.time.created)
+                ? sys.environment(model, session.time.created, sessionPrompt.harness)
                 : Effect.succeed([]),
               instruction.system().pipe(Effect.orDie),
             ])
@@ -4061,6 +4091,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 model,
                 msgs,
                 additions,
+                prompt: sessionPrompt,
               }).pipe(
                 Effect.provideService(LLM.Service, llm),
                 Effect.provideService(ToolRegistry.Service, registry),
@@ -4742,6 +4773,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         agent: userAgent,
         parts,
         variant: input.variant,
+        system: input.system,
+        systemMode: input.systemMode,
+        harness: input.harness,
       })
       yield* bus.publish(Command.Event.Executed, {
         name: input.command,
@@ -4862,7 +4896,20 @@ export const PromptInput = z.object({
     .optional()
     .describe("@deprecated tools and permissions have been merged, you can set permissions on the session itself now"),
   format: MessageV2.Format.optional(),
-  system: z.string().optional(),
+  system: z
+    .string()
+    .optional()
+    .describe("Additional system prompt selected by the session's first user query. Later values are ignored."),
+  systemMode: z
+    .enum(["append", "replace-agent"])
+    .optional()
+    .describe("Whether the selected system prompt appends to or replaces the agent prompt. Later values are ignored."),
+  harness: z
+    .enum(["auto", "codex", "default"])
+    .optional()
+    .describe(
+      "Harness mode selected by the session's first user query. Later values are ignored. GPT models always use the Codex harness. For other models, auto preserves model/process inference and explicit default forces the native tool schema.",
+    ),
   variant: z.string().optional(),
   parts: z.array(
     z.discriminatedUnion("type", [
@@ -4950,6 +4997,20 @@ export const CommandInput = z.object({
   arguments: z.string(),
   command: z.string(),
   variant: z.string().optional(),
+  system: z
+    .string()
+    .optional()
+    .describe("Additional system prompt selected by the session's first user command. Later values are ignored."),
+  systemMode: z
+    .enum(["append", "replace-agent"])
+    .optional()
+    .describe("Whether the selected system prompt appends to or replaces the agent prompt. Later values are ignored."),
+  harness: z
+    .enum(["auto", "codex", "default"])
+    .optional()
+    .describe(
+      "Harness mode selected by the session's first user command. Later values are ignored. GPT models always use the Codex harness. For other models, auto preserves model/process inference and explicit default forces the native tool schema.",
+    ),
   parts: z
     .array(
       z.discriminatedUnion("type", [

@@ -63,6 +63,17 @@ describe("session.system", () => {
     expect(prompt).not.toContain("gitStatus:")
   })
 
+  test("GPT ignores harness while explicit default overrides MiMo Codex inference", () => {
+    const gpt = ProviderTest.model({ id: ModelID.make("gpt-5.2"), api: { id: "gpt-5.2" } as never })
+    expect(SystemPrompt.provider(gpt, "default")[0]).toContain("You are Codex")
+    expect(SystemPrompt.provider(gpt, "default")[0]).toContain("tools.apply_patch")
+
+    const mimo = ProviderTest.model({ id: ModelID.make("mimo-v2.6"), api: { id: "mimo-v2.6" } as never })
+    expect(SystemPrompt.provider(mimo, "codex")[0]).toContain("You are Codex")
+    expect(SystemPrompt.provider(mimo, "default")[0]).not.toContain("You are Codex")
+    expect(SystemPrompt.provider(mimo, "default")[0]).not.toContain("tools.apply_patch")
+  })
+
   test("renders machine and repository environment only for Claude models", async () => {
     await using tmp = await tmpdir({ git: true })
     await $`git branch -M prompt-test`.cwd(tmp.path).quiet()
@@ -135,12 +146,21 @@ describe("session.system", () => {
                 }),
                 now,
               ),
+              system.environment(
+                ProviderTest.model({
+                  id: ModelID.make("custom-model"),
+                  api: { id: "claude-sonnet-4-6" } as never,
+                }),
+                now,
+                "codex",
+              ),
             ])
           }).pipe(Effect.provide(SystemPrompt.defaultLayer)),
         )
 
         expect(prompts[0].join("\n")).not.toContain("gitStatus:")
         expect(prompts[1].join("\n")).toContain("gitStatus:")
+        expect(prompts[2].join("\n")).not.toContain("gitStatus:")
       },
     })
   })
@@ -214,6 +234,18 @@ describe("session.system", () => {
     )[0]
 
     expect(prompt).toBe(gpt)
+  })
+
+  test("allows the resolved session mode to override the process harness mode", () => {
+    const model = ProviderTest.model({
+      id: ModelID.make("claude-sonnet-4-6"),
+      providerID: ProviderID.make("anthropic"),
+    })
+    const gpt = SystemPrompt.provider(ProviderTest.model({ id: ModelID.make("gpt-5.4") }))[0]
+
+    expect(SystemPrompt.provider(model, "codex")[0]).toBe(gpt)
+    process.env.MIMOCODE_CODEX_MODE = "true"
+    expect(SystemPrompt.provider(model, "default")[0]).not.toBe(gpt)
   })
 
   test("uses the same prompted subagent system across models", () => {
