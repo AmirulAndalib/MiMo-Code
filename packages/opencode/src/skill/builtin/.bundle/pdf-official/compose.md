@@ -160,8 +160,8 @@ way a CJK PDF comes out unreadable, so:
 
 - **Never** reference a CJK font you have not verified on this machine.
   "Source Han Sans / 思源黑体 / Noto Sans CJK" are usually NOT installed;
-  macOS `PingFang.ttc` is not readable from the font dirs; Hiragino uses CFF
-  outlines reportlab's `TTFont` cannot parse.
+  macOS `PingFang.ttc` and `Hiragino Sans GB` are CFF-flavored OpenType —
+  reportlab's `TTFont` only parses TrueType (`glyf`) outlines and raises on CFF.
 - The terminal fallback for CJK is the built-in CID font — **never Helvetica**.
 
 Resolve the font with this ladder (first hit wins) and use the returned name
@@ -178,7 +178,7 @@ CJK_TTF_CANDIDATES = {
         "/System/Library/Fonts/STHeiti Light.ttc",        # sans; 简/繁/日
         "/System/Library/Fonts/STHeiti Medium.ttc",       # heavier weight
         "/System/Library/Fonts/Supplemental/Songti.ttc",  # serif; full 简, partial 繁
-        "/Library/Fonts/Arial Unicode.ttf",               # widest coverage incl. 한국어
+        "/Library/Fonts/Arial Unicode.ttf",               # widest coverage; macOS 11+ usually not preinstalled (comes with Office)
     ],
     "Windows": [
         r"C:\Windows\Fonts\msyh.ttc",    # 微软雅黑 sans
@@ -186,7 +186,9 @@ CJK_TTF_CANDIDATES = {
         r"C:\Windows\Fonts\simsun.ttc",  # 宋体 serif
     ],
     "Linux": [
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",       # Debian/Ubuntu
+        "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",     # Fedora/RHEL
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",            # Arch
         "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
     ],
 }
