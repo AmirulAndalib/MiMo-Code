@@ -3,6 +3,8 @@ import os from "os"
 import z from "zod"
 import { SessionID, MessageID, PartID } from "./schema"
 import { MessageV2 } from "./message-v2"
+import { base64ByteSize, classifyAttachment, oversizedAttachmentNotice } from "@/util/media"
+import { shrinkAttachment } from "@/provider/image"
 import { classifyAssistantStep } from "./classify"
 import { Log, Token } from "../util"
 import { SessionRevert } from "./revert"
@@ -2566,7 +2568,39 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   { ...part, messageID: info.id, sessionID: input.sessionID },
                 ]
               }
-              break
+              // Inline payloads (clipboard pastes) are classified on the base64
+              // length: an oversized image within the source ceiling is
+              // recompressed, anything else oversized is dropped.
+              const inline = part.url.slice(part.url.indexOf(",") + 1)
+              const inlineSize = base64ByteSize(inline)
+              const verdict = classifyAttachment(part.mime, inlineSize)
+              if (verdict === "fits") break
+              const fitted = verdict === "shrink" ? shrinkAttachment(part.mime, Buffer.from(inline, "base64")) : undefined
+              if (!fitted) {
+                return [
+                  {
+                    messageID: info.id,
+                    sessionID: input.sessionID,
+                    type: "text",
+                    synthetic: true,
+                    text: oversizedAttachmentNotice({
+                      label: `"${part.filename ?? part.mime}"`,
+                      size: inlineSize,
+                      compressed: verdict === "shrink",
+                      hint: "It was not attached.",
+                    }),
+                  },
+                ]
+              }
+              return [
+                {
+                  ...part,
+                  messageID: info.id,
+                  sessionID: input.sessionID,
+                  mime: fitted.mime,
+                  url: `data:${fitted.mime};base64,${fitted.base64}`,
+                },
+              ]
             case "file:": {
               log.info("file", { mime: part.mime })
               const filepath = fileURLToPath(part.url)
@@ -2712,23 +2746,58 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 ]
               }
 
+              const call: Draft<MessageV2.Part> = {
+                messageID: info.id,
+                sessionID: input.sessionID,
+                type: "text",
+                synthetic: true,
+                text: `Called the Read tool with the following input: {"file_path":"${filepath}"}`,
+              }
+              // Size gate on stat, before the file is read (see classifyAttachment):
+              // an under-limit file is inlined as-is, an oversized image within
+              // the source ceiling is read and recompressed, and anything else
+              // oversized becomes a notice without being read, so it never
+              // reaches the session DB.
+              const size = yield* fsys.stat(filepath).pipe(
+                Effect.map((info) => Number(info.size)),
+                Effect.catch(() => Effect.succeed(0)),
+              )
+              const verdict = classifyAttachment(part.mime, size)
+              const fitted =
+                verdict === "reject"
+                  ? undefined
+                  : verdict === "shrink"
+                    ? shrinkAttachment(part.mime, Buffer.from(yield* fsys.readFile(filepath).pipe(Effect.catch(Effect.die))))
+                    : {
+                        mime: part.mime,
+                        base64: Buffer.from(yield* fsys.readFile(filepath).pipe(Effect.catch(Effect.die))).toString("base64"),
+                      }
+              if (!fitted) {
+                return [
+                  call,
+                  {
+                    messageID: info.id,
+                    sessionID: input.sessionID,
+                    type: "text",
+                    synthetic: true,
+                    text: oversizedAttachmentNotice({
+                      label: `"${filepath}" (${part.mime})`,
+                      size,
+                      compressed: verdict === "shrink",
+                      hint: "It was not attached.",
+                    }),
+                  },
+                ]
+              }
               return [
-                {
-                  messageID: info.id,
-                  sessionID: input.sessionID,
-                  type: "text",
-                  synthetic: true,
-                  text: `Called the Read tool with the following input: {"file_path":"${filepath}"}`,
-                },
+                call,
                 {
                   id: part.id,
                   messageID: info.id,
                   sessionID: input.sessionID,
                   type: "file",
-                  url:
-                    `data:${part.mime};base64,` +
-                    Buffer.from(yield* fsys.readFile(filepath).pipe(Effect.catch(Effect.die))).toString("base64"),
-                  mime: part.mime,
+                  url: `data:${fitted.mime};base64,${fitted.base64}`,
+                  mime: fitted.mime,
                   filename: part.filename!,
                   source: part.source,
                 },
