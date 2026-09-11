@@ -76,6 +76,7 @@ import { DialogSubagent } from "./dialog-subagent.tsx"
 import { isActorToolRunning } from "./actor-tool-state"
 import { Flag } from "@/flag/flag"
 import { parseActorNotification } from "@/inbox/render"
+import { ActorNotificationWarnings } from "./actor-notification-warnings"
 import { LANGUAGE_EXTENSIONS } from "@/lsp/language"
 import parsers from "../../../../../../parsers-config.ts"
 import * as Clipboard from "../../util/clipboard"
@@ -1686,23 +1687,24 @@ function UserMessage(props: {
           // structured rows rather than raw <actor-notification> XML.
           const style = createMemo(() => {
             const s = note().status
-            if (s === "completed") return { icon: "✓", fg: theme.success, label: "completed" }
-            if (s === "failed") return { icon: "✗", fg: theme.error, label: "failed" }
-            if (s === "stalled") return { icon: "⏳", fg: theme.warning, label: "stalled" }
-            if (s === "ended") return { icon: "⊙", fg: theme.textMuted, label: "ended" }
-            return { icon: "⊜", fg: theme.textMuted, label: "cancelled" }
+            if (s === "completed") return { icon: "✓", fg: theme.success, label: t("tui.session.actor_status.completed") }
+            if (s === "failed") return { icon: "✗", fg: theme.error, label: t("tui.session.actor_status.failed") }
+            if (s === "stalled") return { icon: "⏳", fg: theme.warning, label: t("tui.session.actor_status.stalled") }
+            if (s === "ended") return { icon: "⊙", fg: theme.textMuted, label: t("tui.session.actor_status.ended") }
+            return { icon: "⊜", fg: theme.textMuted, label: t("tui.session.actor_status.cancelled") }
           })
           return (
             <box id={props.message.id} marginTop={props.index === 0 ? 0 : 1} paddingLeft={2} flexDirection="row" gap={1}>
               <text fg={theme.textMuted}>
                 <span style={{ bg: theme.backgroundElement, fg: style().fg, bold: true }}>
                   {" "}
-                  {style().icon} sub-session {style().label}{" "}
+                  {style().icon} {style().label}{" "}
                 </span>
                 <span style={{ fg: theme.text }}> {note().description}</span>
                 <Show when={note().summary}>
                   <span style={{ fg: theme.textMuted }}> — {note().summary}</span>
                 </Show>
+                <ActorNotificationWarnings warnings={note().warnings} label={t("tui.session.actor_warning")} color={theme.warning} />
               </text>
             </box>
           )

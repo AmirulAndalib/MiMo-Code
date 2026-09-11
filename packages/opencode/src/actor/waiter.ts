@@ -3,7 +3,7 @@ import { Bus } from "@/bus"
 import { ActorRegistry } from "@/actor/registry"
 import type { Actor } from "@/actor/schema"
 import { Session } from "@/session"
-import type { SessionID } from "@/session/schema"
+import type { SessionID, MessageID } from "@/session/schema"
 import { ActorStatusChanged } from "@/actor/events"
 import { parseReturnHeader, type ReturnStatus } from "@/actor/return-header"
 
@@ -24,6 +24,7 @@ export interface WaitResult {
   // reconciled status from the spawn outcome Deferred instead.
   reportedStatus?: ReturnStatus
   reportedSummary?: string
+  warnings?: string[]
   time?: { created: number; updated: number; completed?: number }
 }
 
@@ -40,11 +41,7 @@ function isWaitResolving(entry: Pick<Actor, "status" | "lastOutcome" | "lifecycl
 }
 
 export interface Interface {
-  readonly wait: (input: {
-    sessionID: SessionID
-    actor_id: string
-    timeout_ms?: number
-  }) => Effect.Effect<WaitResult>
+  readonly wait: (input: { sessionID: SessionID; actor_id: string; timeout_ms?: number }) => Effect.Effect<WaitResult>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/ActorWaiter") {}
@@ -62,11 +59,18 @@ export const layer: Layer.Layer<Service, never, Bus.Service | ActorRegistry.Serv
     // ephemeral actors. structured (json_schema) takes precedence over text:
     // when present, the text part (often a pre-tool-call preamble) is dropped to
     // avoid duplicating the result downstream (spec §5.2).
-    const lastAssistantResult = (sessionID: SessionID, actorID: string) =>
+    const lastAssistantResult = (sessionID: SessionID, actorID: string, messageID?: MessageID) =>
       Effect.gen(function* () {
         const msgs = yield* sessions.messages({ sessionID, agentID: actorID })
-        const last = msgs.findLast((m) => m.info.role === "assistant")
+        const last = messageID
+          ? msgs.find((message) => message.info.id === messageID && message.info.role === "assistant")
+          : msgs.findLast((m) => m.info.role === "assistant" && (!m.info.error || m.info.actorResult))
         if (!last) return { result: undefined as string | undefined, structured: undefined as unknown }
+        if (last.info.role === "assistant" && last.info.actorResult) {
+          const delivery = last.info.actorResult
+          return { result: delivery.finalText, structured: delivery.structured, delivery }
+        }
+        if (messageID) return { result: undefined as string | undefined, structured: undefined as unknown }
         const structured = last.info.role === "assistant" ? last.info.structured : undefined
         if (structured !== undefined) return { result: undefined as string | undefined, structured }
         const textPart = last.parts.findLast(
@@ -78,10 +82,14 @@ export const layer: Layer.Layer<Service, never, Bus.Service | ActorRegistry.Serv
     const snapshot = (sessionID: SessionID, actorID: string, entry: Actor): Effect.Effect<WaitResult> =>
       Effect.gen(function* () {
         const extracted =
-          entry.status === "idle" && entry.lastOutcome === "success"
-            ? yield* lastAssistantResult(sessionID, actorID)
+          entry.status === "idle" &&
+          (entry.lastOutcome === "success" || (entry.lastOutcome === "failure" && entry.resultMessageID))
+            ? yield* lastAssistantResult(sessionID, actorID, entry.resultMessageID)
             : { result: undefined as string | undefined, structured: undefined as unknown }
-        const reported = parseReturnHeader(extracted.result)
+        const delivery = "delivery" in extracted ? extracted.delivery : undefined
+        const reported = delivery
+          ? { status: delivery.reportedStatus, summary: delivery.reportedSummary }
+          : parseReturnHeader(extracted.result)
         return {
           status: entry.status,
           actor_id: entry.actorID,
@@ -96,6 +104,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service | ActorRegistry.Serv
           ...(extracted.structured !== undefined ? { structured: extracted.structured } : {}),
           ...(reported.status ? { reportedStatus: reported.status } : {}),
           ...(reported.summary ? { reportedSummary: reported.summary } : {}),
+          ...(delivery?.warnings?.length ? { warnings: delivery.warnings } : {}),
           time: entry.time,
         }
       })
@@ -127,9 +136,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service | ActorRegistry.Serv
               const snap = yield* snapshot(input.sessionID, input.actor_id, fresh)
               Deferred.doneUnsafe(resolved, Effect.succeed(snap))
             }).pipe(
-              Effect.catchCause((cause) =>
-                Effect.logError(`waiter rehydrate failed: ${cause}`),
-              ),
+              Effect.catchCause((cause) => Effect.logError(`waiter rehydrate failed: ${cause}`)),
               Effect.provide(context),
             ),
           )
@@ -147,6 +154,8 @@ export const layer: Layer.Layer<Service, never, Bus.Service | ActorRegistry.Serv
               Effect.catchTag("TimeoutError", () => Effect.succeed(null)),
             )
             if (raced === null) {
+              const final = yield* reg.get(input.sessionID, input.actor_id)
+              if (final && isWaitResolving(final)) return yield* snapshot(input.sessionID, input.actor_id, final)
               return { status: "timeout" as const, actor_id: input.actor_id }
             }
             return raced

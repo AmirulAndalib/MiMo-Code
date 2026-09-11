@@ -630,6 +630,7 @@ export const ActorTool = Tool.define(
             background: entry.background,
             turnCount: entry.turnCount,
             lastTurnTime: entry.lastTurnTime,
+            lastOutcome: entry.lastOutcome,
             ...(entry.lastError !== undefined ? { error: entry.lastError } : {}),
             time: entry.time,
           }
@@ -876,7 +877,8 @@ export const ActorTool = Tool.define(
         // error in output." (The explicit action="wait" returns the structured
         // snapshot as a regular tool result — that's a different contract.)
         if (outcome.status === "failure") {
-          return yield* Effect.fail(new Error(`Tool execution failed: ${outcome.error ?? "unknown"}`))
+          const partial = outcome.structured !== undefined ? JSON.stringify(outcome.structured) : outcome.finalText
+          return yield* Effect.fail(new Error(`Tool execution failed: ${outcome.error ?? "unknown"}${partial === undefined ? "" : `\nPartial result: ${partial}`}`))
         }
 
         const resultText =
@@ -902,6 +904,7 @@ export const ActorTool = Tool.define(
             `<actor_result status="${statusAttr}"${summaryAttr}>`,
             resultText,
             "</actor_result>",
+            ...(outcome.status === "success" ? (outcome.warnings ?? []).map((warning) => `Warning: ${warning}`) : []),
           ].join("\n"),
         }
       })
