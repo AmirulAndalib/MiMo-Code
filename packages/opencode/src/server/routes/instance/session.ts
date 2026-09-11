@@ -1053,10 +1053,16 @@ export const SessionRoutes = lazy(() =>
         agentID: z.string().optional(),
         task_id: z.string().optional(),
         titleLocale: z.string().optional(),
+        modelProviderID: z.string().optional(),
+        modelID: z.string().optional(),
       })),
       async (c) => {
         const params = c.req.valid("param")
         const query = c.req.valid("query")
+        // modelProviderID / modelID 必须同时提供,否则 400(不允许只覆盖一侧)。
+        if (!!query.modelProviderID !== !!query.modelID) {
+          return c.json({ data: { name: "InvalidRequest", data: { message: "modelProviderID and modelID must be provided together" } } }, 400)
+        }
         await runRequest(
           "SessionRoutes.resume.assertNotBusy",
           c,
@@ -1088,6 +1094,7 @@ export const SessionRoutes = lazy(() =>
             agentID: query.agentID,
             task_id: query.task_id,
             titleLocale: query.titleLocale,
+            ...(query.modelProviderID && query.modelID ? { model: { providerID: query.modelProviderID, modelID: query.modelID } } : {}),
           })),
         ).catch((error) => {
           log.error("session resume failed", { sessionID: params.sessionID, error })

@@ -441,6 +441,8 @@ export interface ResumeTurnInput {
   agentID?: string
   task_id?: string
   titleLocale?: string
+  /** 可选模型覆盖：用户在继续前切换了模型时，用新模型执行恢复步。 */
+  model?: { providerID: string; modelID: string }
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionPrompt") {}
@@ -3099,7 +3101,14 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       const msgs = yield* sessions.messages({ sessionID: input.sessionID, agentID: input.agentID ?? "main" })
       const candidates: RecoveryCandidate[] = []
       for (const [index, msg] of msgs.entries()) {
-        if (msg.info.role !== "assistant" || "completed" in msg.info.time) continue
+        if (msg.info.role !== "assistant") continue
+        // 未完成 assistant 才是恢复候选。步级 time.completed 不等于整轮完成——
+        // tool-calls(工具步完但整轮未答)、length(输出截断)、无 finish(中断)均可恢复;
+        // stop / other 等已正常或已终态收尾的不进候选(allowlist,不靠排除法)。
+        // 有 error = 没完成 = 可恢复(processor 注释不变量):任何 error 消息都是候选,
+        // 包括 abandon 后 completed+AbortedError+finish=stop 的场景(恢复失败后仍可重试)。
+        if ("completed" in msg.info.time && !msg.info.error && msg.info.finish && msg.info.finish !== "tool-calls" && msg.info.finish !== "length") continue
+        if (msg.info.finish === "stop" && !msg.info.error) continue
         const assistant = msg.info
         if (!msgs.some((parent) => parent.info.role === "user" && parent.info.id === assistant.parentID)) continue
         if (msgs.slice(index + 1).some((later) => later.info.role === "user" || later.info.role === "assistant")) continue
@@ -3119,10 +3128,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     }) {
       const messages = yield* sessions.messages({ sessionID: input.sessionID, agentID: input.agentID ?? "main" })
       const message = messages.find((item) => item.info.id === input.assistantMessageID)
-      if (!message || message.info.role !== "assistant" || "completed" in message.info.time) return
+      if (!message || message.info.role !== "assistant") return
+      // 已标记 completed 且已有 error → 幂等跳过
+      if ("completed" in message.info.time && message.info.error) return
       yield* sessions.updateMessage({
         ...message.info,
-        time: { ...message.info.time, completed: Date.now() },
+        time: { ...message.info.time, completed: message.info.time.completed ?? Date.now() },
         error: new MessageV2.AbortedError({ message: "Abandoned: resumed as a new assistant turn" }).toObject(),
       })
     })
@@ -3133,8 +3144,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       task_id?: string,
       notifyParentOnComplete?: boolean,
       titleLocale?: string,
+      resumeFrom?: string,
+      modelOverride?: { providerID: string; modelID: string },
     ) => Effect.Effect<MessageV2.WithParts> = Effect.fn("SessionPrompt.run")(
-      function* (sessionID: SessionID, agentID?: string, task_id?: string, notifyParentOnComplete?: boolean, titleLocale?: string) {
+      function* (sessionID: SessionID, agentID?: string, task_id?: string, notifyParentOnComplete?: boolean, titleLocale?: string, resumeFrom?: string, modelOverride?: { providerID: string; modelID: string }) {
         const ctx = yield* InstanceState.context
         const slog = elog.with({ sessionID })
         let structured: unknown | undefined
@@ -3822,7 +3835,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             continue
           }
 
-          if (lastAssistant) {
+          if (lastAssistant && lastAssistant.id !== resumeFrom) {
             const classification = classifyAssistantStep({
               phase: "existing-assistant",
               lastUser,
@@ -3914,7 +3927,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             }
           }
 
-          const model = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID, lastUser)
+          const modelProviderID = modelOverride ? ProviderID.make(modelOverride.providerID) : lastUser.model.providerID
+          const modelModelID = modelOverride ? ModelID.make(modelOverride.modelID) : lastUser.model.modelID
+          const model = yield* getModel(modelProviderID, modelModelID, sessionID, lastUser)
           lastModelForPrune = model
           lastFinishedForPrune = usageRecovered ? undefined : lastFinished
           const task = tasks.pop()
@@ -5363,6 +5378,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         )
       }
       const agentID = input.agentID ?? "main"
+      // 校验 model override 在 abandon 之前:getModel 失败时不能先把原消息改成 abandoned。
+      if (input.model) {
+        yield* getModel(ProviderID.make(input.model.providerID), ModelID.make(input.model.modelID), input.sessionID)
+      }
       // Abandon the recovered assistant BEFORE detaching runLoop so callers that
       // observe Error / completed state see it immediately (not only in ensuring
       // after the detached loop finishes). ensuring below remains as an idempotent
@@ -5372,7 +5391,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         input.sessionID,
         agentID,
         lastAssistant(input.sessionID, agentID),
-        runLoop(input.sessionID, agentID, input.task_id, undefined, input.titleLocale).pipe(
+        runLoop(input.sessionID, agentID, input.task_id, undefined, input.titleLocale, input.assistantMessageID, input.model).pipe(
           Effect.ensuring(
             abandonRecoveredAssistant({ sessionID: input.sessionID, assistantMessageID: input.assistantMessageID, agentID }).pipe(
               Effect.catchCause((cause) =>
@@ -5399,13 +5418,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         )
       }
       const agentID = input.agentID ?? "main"
+      // 校验 model override 在 abandon 之前:getModel 失败时不能先把原消息改成 abandoned。
+      if (input.model) {
+        yield* getModel(ProviderID.make(input.model.providerID), ModelID.make(input.model.modelID), input.sessionID)
+      }
       // Abandon before detaching runLoop — same timing requirement as resume.
       yield* abandonRecoveredAssistant({ sessionID: input.sessionID, assistantMessageID: input.assistantMessageID, agentID })
       yield* state.start(
         input.sessionID,
         agentID,
         lastAssistant(input.sessionID, agentID),
-        runLoop(input.sessionID, agentID, input.task_id, undefined, input.titleLocale).pipe(
+        runLoop(input.sessionID, agentID, input.task_id, undefined, input.titleLocale, input.assistantMessageID, input.model).pipe(
           Effect.ensuring(
             abandonRecoveredAssistant({ sessionID: input.sessionID, assistantMessageID: input.assistantMessageID, agentID }).pipe(
               Effect.catchCause((cause) =>
