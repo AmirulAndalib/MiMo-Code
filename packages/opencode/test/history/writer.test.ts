@@ -81,7 +81,7 @@ describe("History.Writer", () => {
             sessionID: sessionID,
             messageID: "msg_t",
             type: "text",
-            text: "hello world",
+            text: "hello data:image/png;base64,YWJj world",
           } as any,
           time: Date.now(),
         })
@@ -92,7 +92,8 @@ describe("History.Writer", () => {
           db.select().from(HistoryFtsTable).where(eq(HistoryFtsTable.part_id, "prt_w1")).get(),
         )
         expect(row).toBeTruthy()
-        expect(row?.body).toBe("hello world")
+        expect(row?.body).toBe("hello [media image/png] world")
+        expect(row?.body).not.toContain("YWJj")
         expect(row?.kind).toBe("user_text")
         expect(row?.session_id).toBe(sessionID)
         expect(row?.project_id).toBe("proj_t")
