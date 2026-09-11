@@ -2,7 +2,7 @@ import path from "path"
 import { rm } from "node:fs/promises"
 import { Global } from "../../src/global"
 import { PNG } from "pngjs"
-import { describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { NamedError } from "@mimo-ai/shared/util/error"
 import { fileURLToPath } from "url"
 import { Cause, Effect, Exit, Fiber, Layer } from "effect"
@@ -1259,5 +1259,137 @@ describe("session.prompt F37 subagent context isolation", () => {
     } finally {
       void server.stop(true)
     }
+  })
+})
+
+describe("session.prompt oversized attachment", () => {
+  // Flag.MIMOCODE_MAX_ATTACHMENT_SIZE, lowered so the fixtures stay small.
+  const LIMIT = 4096
+  const CEILING = 32 * 1024
+  beforeAll(() => {
+    process.env["MIMOCODE_MAX_ATTACHMENT_SIZE"] = String(LIMIT)
+    process.env["MIMOCODE_MAX_ATTACHMENT_SOURCE_SIZE"] = String(CEILING)
+  })
+  afterAll(() => {
+    delete process.env["MIMOCODE_MAX_ATTACHMENT_SIZE"]
+    delete process.env["MIMOCODE_MAX_ATTACHMENT_SOURCE_SIZE"]
+  })
+  const config = { agent: { build: { model: "openai/gpt-5.2" } } }
+  const noFileParts = (parts: MessageV2.Part[]) => parts.every((part) => part.type !== "file")
+  const notice = (parts: MessageV2.Part[], needle: string) =>
+    parts.some((part) => part.type === "text" && part.synthetic === true && part.text.includes(needle))
+
+  test("stats a file attachment first and replaces an oversized undecodable one with a notice", async () => {
+    await using tmp = await tmpdir({ git: true, config })
+    const huge = path.join(tmp.path, "huge.png")
+    // Valid PNG signature, garbage body: over the limit and not compressible.
+    const bytes = Buffer.alloc(LIMIT + 1)
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes)
+    await Bun.write(huge, bytes)
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: () =>
+        run(
+          Effect.gen(function* () {
+            const prompt = yield* SessionPrompt.Service
+            const sessions = yield* Session.Service
+            const session = yield* sessions.create({})
+            const msg = yield* prompt.prompt({
+              sessionID: session.id,
+              agent: "build",
+              noReply: true,
+              parts: [
+                { type: "text", text: "look at @huge.png" },
+                { type: "file", mime: "image/png", url: `file://${huge}`, filename: "huge.png" },
+              ],
+            })
+            if (msg.info.role !== "user") throw new Error("expected user message")
+            expect(noFileParts(msg.parts)).toBe(true)
+            expect(notice(msg.parts, `"${huge}" (image/png) is ${bytes.byteLength} bytes`)).toBe(true)
+
+            const stored = yield* sessions.messages({ sessionID: session.id })
+            expect(noFileParts(stored.flatMap((item) => item.parts))).toBe(true)
+            yield* sessions.remove(session.id)
+          }),
+        ),
+    })
+  })
+
+  test("recompresses an oversized decodable file attachment and stores the smaller copy", async () => {
+    await using tmp = await tmpdir({ git: true, config })
+    const huge = path.join(tmp.path, "photo.png")
+    const png = new PNG({ width: 120, height: 120 })
+    let seed = 4242
+    for (let i = 0; i < png.data.length; i++) {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff
+      png.data[i] = i % 4 === 3 ? 255 : seed % 256
+    }
+    const bytes = PNG.sync.write(png)
+    expect(bytes.byteLength).toBeGreaterThan(LIMIT)
+    expect(bytes.byteLength).toBeLessThanOrEqual(CEILING)
+    await Bun.write(huge, bytes)
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: () =>
+        run(
+          Effect.gen(function* () {
+            const prompt = yield* SessionPrompt.Service
+            const sessions = yield* Session.Service
+            const session = yield* sessions.create({})
+            const msg = yield* prompt.prompt({
+              sessionID: session.id,
+              agent: "build",
+              noReply: true,
+              parts: [
+                { type: "text", text: "look at @photo.png" },
+                { type: "file", mime: "image/png", url: `file://${huge}`, filename: "photo.png" },
+              ],
+            })
+            if (msg.info.role !== "user") throw new Error("expected user message")
+            const stored = yield* sessions.messages({ sessionID: session.id })
+            const file = stored.flatMap((item) => item.parts).find((part) => part.type === "file")
+            if (file?.type !== "file") throw new Error("expected a stored file part")
+            expect(file.mime).toBe("image/jpeg")
+            expect(Buffer.from(file.url.slice(file.url.indexOf(",") + 1), "base64").byteLength).toBeLessThanOrEqual(LIMIT)
+            yield* sessions.remove(session.id)
+          }),
+        ),
+    })
+  })
+
+  test("drops an oversized inline data attachment with a notice", async () => {
+    await using tmp = await tmpdir({ git: true, config })
+    // Uncompressible: not an image at all, so it can only be dropped.
+    const base64 = "A".repeat(Math.ceil((LIMIT + 1) / 3) * 4)
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: () =>
+        run(
+          Effect.gen(function* () {
+            const prompt = yield* SessionPrompt.Service
+            const sessions = yield* Session.Service
+            const session = yield* sessions.create({})
+            const msg = yield* prompt.prompt({
+              sessionID: session.id,
+              agent: "build",
+              noReply: true,
+              parts: [
+                { type: "text", text: "what is this" },
+                { type: "file", mime: "audio/wav", url: `data:audio/wav;base64,${base64}`, filename: "clip.wav" },
+              ],
+            })
+            if (msg.info.role !== "user") throw new Error("expected user message")
+            expect(noFileParts(msg.parts)).toBe(true)
+            expect(notice(msg.parts, `"clip.wav" is`)).toBe(true)
+
+            const stored = yield* sessions.messages({ sessionID: session.id })
+            expect(noFileParts(stored.flatMap((item) => item.parts))).toBe(true)
+            yield* sessions.remove(session.id)
+          }),
+        ),
+    })
   })
 })
