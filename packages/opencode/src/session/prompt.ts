@@ -3,7 +3,16 @@ import os from "os"
 import z from "zod"
 import { SessionID, MessageID, PartID } from "./schema"
 import { MessageV2 } from "./message-v2"
-import { base64ByteSize, classifyAttachment, oversizedAttachmentNotice } from "@/util/media"
+import {
+  base64ByteSize,
+  classifyAttachment,
+  fitsMediaBase64,
+  isAudioAttachment,
+  isVideoAttachment,
+  MAX_MEDIA_BASE64_BYTES,
+  oversizedAttachmentNotice,
+  oversizedMediaNotice,
+} from "@/util/media"
 import { shrinkAttachment } from "@/provider/image"
 import { classifyAssistantStep } from "./classify"
 import { Log, Token } from "../util"
@@ -2575,6 +2584,24 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               // recompressed, anything else oversized is dropped.
               const inline = part.url.slice(part.url.indexOf(",") + 1)
               const inlineSize = base64ByteSize(inline)
+              if (
+                (isAudioAttachment(part.mime) || isVideoAttachment(part.mime)) &&
+                inline.length > MAX_MEDIA_BASE64_BYTES
+              ) {
+                return [
+                  {
+                    messageID: info.id,
+                    sessionID: input.sessionID,
+                    type: "text",
+                    synthetic: true,
+                    text: oversizedMediaNotice({
+                      label: `"${part.filename ?? part.mime}"`,
+                      size: inlineSize,
+                      hint: "It was not attached.",
+                    }),
+                  },
+                ]
+              }
               const verdict = classifyAttachment(part.mime, inlineSize)
               if (verdict === "fits") break
               const fitted = verdict === "shrink" ? shrinkAttachment(part.mime, Buffer.from(inline, "base64")) : undefined
@@ -2764,6 +2791,23 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 Effect.map((info) => Number(info.size)),
                 Effect.catch(() => Effect.succeed(0)),
               )
+              const media = isAudioAttachment(part.mime) || isVideoAttachment(part.mime)
+              if (media && !fitsMediaBase64(size)) {
+                return [
+                  call,
+                  {
+                    messageID: info.id,
+                    sessionID: input.sessionID,
+                    type: "text",
+                    synthetic: true,
+                    text: oversizedMediaNotice({
+                      label: `"${filepath}" (${part.mime})`,
+                      size,
+                      hint: "It was not attached.",
+                    }),
+                  },
+                ]
+              }
               const verdict = classifyAttachment(part.mime, size)
               const fitted =
                 verdict === "reject"

@@ -53,10 +53,21 @@ describe("adapter declarations", () => {
     }
   })
 
-  test("openai-compatible declares audio supported only for wav/mp3/mpeg", () => {
+  test("openai-compatible declares audio supported for the MiMo formats (wav/mp3/flac/m4a/ogg)", () => {
     const declaration = ModelCapability.adapterDeclaration("@ai-sdk/openai-compatible")
     expect(declaration.audio.support).toBe("supported")
-    expect(declaration.audio.mimeTypes).toEqual(["audio/wav", "audio/mp3", "audio/mpeg"])
+    expect(declaration.audio.mimeTypes).toEqual([
+      "audio/wav",
+      "audio/x-wav",
+      "audio/mp3",
+      "audio/mpeg",
+      "audio/flac",
+      "audio/x-flac",
+      "audio/mp4",
+      "audio/m4a",
+      "audio/x-m4a",
+      "audio/ogg",
+    ])
   })
 
   test("anthropic and bedrock adapters declare audio KNOWN-ABSENT, not unknown", () => {
@@ -110,9 +121,9 @@ describe("rejectionFor", () => {
   test("rejects an audio MIME the adapter does not accept", () => {
     const subject = model({ id: "mimo-v2.5", audio: true })
     const reason = ModelCapability.rejectionFor(subject, [
-      { modality: "audio", mimeType: "audio/flac", bytes: 1000 },
+      { modality: "audio", mimeType: "audio/aac", bytes: 1000 },
     ])
-    expect(reason).toEqual({ kind: "mime-unsupported", modality: "audio", mimeType: "audio/flac" })
+    expect(reason).toEqual({ kind: "mime-unsupported", modality: "audio", mimeType: "audio/aac" })
   })
 
   test("rejects content over the declared byte cap", () => {

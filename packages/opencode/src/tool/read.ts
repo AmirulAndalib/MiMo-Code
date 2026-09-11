@@ -11,18 +11,66 @@ import { Instance } from "../project/instance"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { SessionCwd } from "./session-cwd"
 import { Instruction } from "../session/instruction"
-import { Provider } from "@/provider"
+import { ModelCapability, Provider } from "@/provider"
 import { shrinkAttachment } from "@/provider/image"
 import { builtinSkillRoot } from "@/skill/builtin/extract"
 import {
   classifyAttachment,
+  fitsMediaBase64,
+  isAudioAttachment,
   isImageAttachment,
   isPdfAttachment,
+  isVideoAttachment,
   oversizedAttachmentNotice,
+  oversizedMediaNotice,
   sniffAttachmentMime,
 } from "@/util/media"
 
 const DEFAULT_READ_LIMIT = 2000
+
+// Formats the MiMo audio/video APIs document, keyed by the MIME the adapter
+// declaration lists (see capability-registry.ts) so the description names only
+// what the current model+adapter can actually take.
+const AUDIO_FORMAT_NAMES: Record<string, string> = {
+  "audio/wav": "wav",
+  "audio/x-wav": "wav",
+  "audio/mp3": "mp3",
+  "audio/mpeg": "mp3",
+  "audio/flac": "flac",
+  "audio/x-flac": "flac",
+  "audio/mp4": "m4a",
+  "audio/m4a": "m4a",
+  "audio/x-m4a": "m4a",
+  "audio/ogg": "ogg",
+}
+const AUDIO_FORMATS = ["wav", "mp3", "flac", "m4a", "ogg"]
+const VIDEO_FORMATS = ["mp4", "mov", "avi", "wmv"]
+
+/**
+ * The audio/video paragraph of the tool description, or undefined when the
+ * model accepts neither. Appended per model by the tool registry so a
+ * text-only model is never told it can attach media.
+ */
+export function describeMedia(model: Provider.Model | undefined) {
+  if (!model) return undefined
+  const audio = model.capabilities.input.audio
+    ? (() => {
+        const declared = ModelCapability.modelDeclaration(model, "audio")
+        const names =
+          declared.support === "supported" && declared.mimeTypes !== "any"
+            ? [...new Set(declared.mimeTypes.map((mime) => AUDIO_FORMAT_NAMES[mime] ?? mime))]
+            : AUDIO_FORMATS
+        return `audio (${names.join(", ")})`
+      })()
+    : undefined
+  const video = model.capabilities.input.video ? `video (${VIDEO_FORMATS.join(", ")})` : undefined
+  const kinds = [audio, video].filter((kind): kind is string => kind !== undefined)
+  if (kinds.length === 0) return undefined
+  return [
+    `- You can read and understand ${kinds.join(" and ")} files directly: this tool returns them as file attachments, and you can then describe, transcribe, summarize, or answer questions about their content yourself, without an external transcription or vision service.`,
+    `- Media is inlined when small enough (about 37 MB on disk, 50 MB once base64-encoded); otherwise the tool explains why the file was not read. Read the file first, then analyze its content in the same turn.`,
+  ].join("\n")
+}
 const MAX_LINE_LENGTH = 2000
 const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`
 const MAX_BYTES = 50 * 1024
@@ -223,7 +271,9 @@ export const ReadTool = Tool.define(
       // source ceiling is read and recompressed below. Either way nothing over
       // the limit becomes base64 or reaches the session DB.
       const verdict =
-        isImageAttachment(mime) || isPdfAttachment(mime) ? classifyAttachment(mime, Number(stat.size)) : "fits"
+        isImageAttachment(mime) || isPdfAttachment(mime) || isAudioAttachment(mime) || isVideoAttachment(mime)
+          ? classifyAttachment(mime, Number(stat.size))
+          : "fits"
       if (verdict === "reject") {
         const warning = oversizedAttachmentNotice({
           label: `"${path.basename(filepath)}" (${mime})`,
@@ -339,6 +389,69 @@ export const ReadTool = Tool.define(
             {
               type: "file" as const,
               mime,
+              url: `data:${mime};base64,${Buffer.from(bytes).toString("base64")}`,
+            },
+          ],
+        }
+      }
+
+      if (isAudioAttachment(mime) || isVideoAttachment(mime)) {
+        // Audio and video are opaque to the read tool: the bytes go to the model
+        // as an inline `data:` attachment, or nowhere. Gate on the model first,
+        // then on the encoded size, so a file the model cannot take is never
+        // read and an oversized one never becomes base64.
+        const kind = isAudioAttachment(mime) ? "audio" : "video"
+        const supported = model?.capabilities.input[kind] ?? false
+        if (!supported) {
+          const warning = [
+            `Cannot attach ${kind} "${path.basename(filepath)}" — the current model has no ${kind} input support, so the file was not read.`,
+            `Ask the user to switch to a model with ${kind} input, or use a shell tool (e.g. ffprobe) to inspect its metadata instead.`,
+          ].join("\n")
+          return {
+            title,
+            output: warning,
+            metadata: { preview: warning, truncated: false, loaded: loaded.map((item) => item.filepath) },
+          }
+        }
+        // The model may take audio while its adapter can only serialize some
+        // formats (the OpenAI-compatible chat adapter emits input_audio for
+        // wav/mp3 only). Refuse those up front instead of attaching bytes that
+        // tool-attachment.ts would later replace with a placeholder.
+        const declared = model && kind === "audio" ? ModelCapability.modelDeclaration(model, "audio") : undefined
+        if (declared?.support === "supported" && declared.mimeTypes !== "any" && !declared.mimeTypes.includes(mime)) {
+          const warning = [
+            `Cannot attach audio "${path.basename(filepath)}" (${mime}) — the current provider only accepts ${declared.mimeTypes.join(", ")}, so the file was not read.`,
+            `Convert it first (e.g. ffmpeg -i "${filepath}" /tmp/example.wav) and read the converted file.`,
+          ].join("\n")
+          return {
+            title,
+            output: warning,
+            metadata: { preview: warning, truncated: false, loaded: loaded.map((item) => item.filepath) },
+          }
+        }
+        if (!fitsMediaBase64(Number(stat.size))) {
+          const warning = oversizedMediaNotice({
+            label: `"${path.basename(filepath)}" (${mime})`,
+            size: Number(stat.size),
+            hint: "It was not read.",
+          })
+          return {
+            title,
+            output: warning,
+            metadata: { preview: warning, truncated: false, loaded: loaded.map((item) => item.filepath) },
+          }
+        }
+        const bytes = yield* fs.readFile(filepath)
+        const output = `${kind === "audio" ? "Audio" : "Video"} read successfully and attached for the model to analyze`
+        return {
+          title,
+          output,
+          metadata: { preview: output, truncated: false, loaded: loaded.map((item) => item.filepath) },
+          attachments: [
+            {
+              type: "file" as const,
+              mime,
+              filename: path.basename(filepath),
               url: `data:${mime};base64,${Buffer.from(bytes).toString("base64")}`,
             },
           ],

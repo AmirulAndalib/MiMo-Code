@@ -10,7 +10,22 @@ export type ToolAttachmentRoute = "native" | "synthetic" | "placeholder"
 
 const MAX_ATTACHMENT_NAME_LENGTH = 120
 const SAFE_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"])
-const OPENAI_AUDIO_MIMES = new Set(["audio/wav", "audio/mp3", "audio/mpeg"])
+// The formats the MiMo audio API documents (MP3, WAV, FLAC, M4A, OGG), as the
+// MIMEs a mime lookup or sniff yields for them. The stock openai-compatible
+// adapter only knows wav/mp3; patches/@ai-sdk%2Fopenai-compatible@2.0.41.patch
+// extends its input_audio format map to the rest.
+const OPENAI_AUDIO_MIMES = new Set([
+  "audio/wav",
+  "audio/x-wav",
+  "audio/mp3",
+  "audio/mpeg",
+  "audio/flac",
+  "audio/x-flac",
+  "audio/mp4",
+  "audio/m4a",
+  "audio/x-m4a",
+  "audio/ogg",
+])
 const BEDROCK_TEXT_MIMES = new Set(["text/csv", "text/html", "text/plain", "text/markdown"])
 const OPENAI_CHAT_PACKAGES = new Set(["@ai-sdk/openai-compatible"])
 const ANTHROPIC_PACKAGES = new Set(["@ai-sdk/anthropic", "@ai-sdk/google-vertex/anthropic"])
@@ -51,7 +66,11 @@ function providerAcceptsSynthetic(model: Provider.Model, attachment: ToolAttachm
     if (OPENAI_CHAT_PACKAGES.has(npm)) return OPENAI_AUDIO_MIMES.has(mime)
     return GOOGLE_PACKAGES.has(npm)
   }
-  if (mime.startsWith("video/")) return isInlineAttachment(attachment) && GOOGLE_PACKAGES.has(npm)
+  // The patched openai-compatible chat adapter serializes inline video as a
+  // `video_url` data URL (patches/@ai-sdk%2Fopenai-compatible@2.0.41.patch).
+  if (mime.startsWith("video/")) {
+    return isInlineAttachment(attachment) && (GOOGLE_PACKAGES.has(npm) || OPENAI_CHAT_PACKAGES.has(npm))
+  }
   if (mime.startsWith("text/")) {
     if (!isInlineAttachment(attachment)) return false
     if (OPENAI_CHAT_PACKAGES.has(npm) || GOOGLE_PACKAGES.has(npm)) return true

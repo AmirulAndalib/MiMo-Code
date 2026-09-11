@@ -8,7 +8,7 @@ import { GlobTool } from "./glob"
 import { GrepTool } from "./grep"
 import { HistoryTool } from "./history"
 import { MemoryTool } from "./memory"
-import { ReadTool } from "./read"
+import { ReadTool, describeMedia } from "./read"
 import { ViewImageTool } from "./view-image"
 import { ActorTool } from "./actor"
 import { TaskTool } from "./task"
@@ -152,6 +152,7 @@ export const layer = Layer.effect(
     const agents = yield* Agent.Service
     const skill = yield* Skill.Service
     const truncate = yield* Truncate.Service
+    const provider = yield* Provider.Service
 
     const invalid = yield* InvalidTool
     const actor = yield* ActorTool
@@ -449,6 +450,17 @@ export const layer = Layer.effect(
     toolScriptRegistry.current = (input) =>
       input ? available(input).pipe(Effect.map((result) => result.filtered)) : all()
 
+    // The read tool's media paragraph depends on the model the turn runs on.
+    const describeReadMedia = Effect.fn("ToolRegistry.describeReadMedia")(function* (input: {
+      providerID: ProviderID
+      modelID: ModelID
+    }) {
+      const model = yield* provider
+        .getModel(input.providerID, input.modelID)
+        .pipe(Effect.catchDefect(() => Effect.succeed(undefined)))
+      return describeMedia(model)
+    })
+
     const definitions = Effect.fn("ToolRegistry.definitions")(function* (
       input: {
         providerID: ProviderID
@@ -488,6 +500,7 @@ export const layer = Layer.effect(
             id: tool.id,
             description: [
               description,
+              tool.id === ReadTool.id ? yield* describeReadMedia(input) : undefined,
               tool.id === ActorTool.id ? yield* describeTask(input.agent) : undefined,
               tool.id === WorkflowTool.id ? yield* describeWorkflow() : undefined,
               tool.id === ToolScriptTool.id ? yield* describeToolScript(availableTools.filtered) : undefined,

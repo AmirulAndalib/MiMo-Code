@@ -6,12 +6,39 @@ export function isPdfAttachment(mime: string) {
   return mime === "application/pdf"
 }
 
+export function isAudioAttachment(mime: string) {
+  return mime.startsWith("audio/")
+}
+
+export function isVideoAttachment(mime: string) {
+  return mime.startsWith("video/")
+}
+
 export function isMedia(mime: string) {
-  return mime.startsWith("image/") || isPdfAttachment(mime)
+  return mime.startsWith("image/") || isAudioAttachment(mime) || isVideoAttachment(mime) || isPdfAttachment(mime)
 }
 
 export function isImageAttachment(mime: string) {
   return mime.startsWith("image/") && mime !== "image/svg+xml" && mime !== "image/vnd.fastbidsheet"
+}
+
+// Inline audio/video is sent as a `data:{mime};base64,...` string, and the
+// provider bounds the ENCODED string (50 MB for both the MiMo audio and video
+// APIs), not the decoded bytes. Base64 grows the payload by 4/3, so a file must
+// stay under ~37.5 MB on disk to fit. Checked on the stat size, before any
+// bytes are read.
+export const MAX_MEDIA_BASE64_BYTES = 50 * 1024 * 1024
+
+export function base64Length(size: number) {
+  return Math.ceil(size / 3) * 4
+}
+
+export function fitsMediaBase64(size: number) {
+  return base64Length(size) <= MAX_MEDIA_BASE64_BYTES
+}
+
+export function oversizedMediaNotice(input: { label: string; size: number; hint: string }) {
+  return `Attachment ${input.label} is ${input.size} bytes, which encodes to ${base64Length(input.size)} bytes of base64, over the ${mb(MAX_MEDIA_BASE64_BYTES)} inline media limit. ${input.hint}`
 }
 
 export function sniffAttachmentMime(bytes: Uint8Array, fallback: string) {
@@ -22,6 +49,9 @@ export function sniffAttachmentMime(bytes: Uint8Array, fallback: string) {
   if (startsWith(bytes, [0x25, 0x50, 0x44, 0x46, 0x2d])) return "application/pdf"
   if (startsWith(bytes, [0x52, 0x49, 0x46, 0x46]) && startsWith(bytes.subarray(8), [0x57, 0x45, 0x42, 0x50])) {
     return "image/webp"
+  }
+  if (startsWith(bytes, [0x52, 0x49, 0x46, 0x46]) && startsWith(bytes.subarray(8), [0x57, 0x41, 0x56, 0x45])) {
+    return "audio/wav"
   }
 
   return fallback

@@ -58,8 +58,20 @@ export const DEFAULT_MAX_TEXT_BYTES = 1 * 1024 * 1024
 
 const SAFE_IMAGE_MIMES = ["image/jpeg", "image/png", "image/gif", "image/webp"]
 // Mirrors OPENAI_AUDIO_MIMES in src/session/tool-attachment.ts — the set the
-// OpenAI-compatible chat adapter can serialize as input_audio.
-const OPENAI_AUDIO_MIMES = ["audio/wav", "audio/mp3", "audio/mpeg"]
+// (repo-patched) OpenAI-compatible chat adapter can serialize as input_audio:
+// the MiMo audio API's MP3, WAV, FLAC, M4A and OGG.
+const OPENAI_AUDIO_MIMES = [
+  "audio/wav",
+  "audio/x-wav",
+  "audio/mp3",
+  "audio/mpeg",
+  "audio/flac",
+  "audio/x-flac",
+  "audio/mp4",
+  "audio/m4a",
+  "audio/x-m4a",
+  "audio/ogg",
+]
 
 const TEXT_SUPPORTED: ModalityDeclaration = {
   support: "supported",
@@ -96,9 +108,12 @@ const ADAPTERS: Record<string, AdapterDeclaration> = {
     text: TEXT_SUPPORTED,
     image: IMAGE_SUPPORTED,
     audio: { support: "supported", mimeTypes: OPENAI_AUDIO_MIMES, maxBytes: DEFAULT_MAX_MEDIA_BYTES },
-    // Observed: wav/mp3/mpeg serialize to `input_audio`; flac and ogg throw
-    // "'audio media type ...' functionality not supported".
-    evidence: "@ai-sdk/openai-compatible@3 serializes wav/mp3/mpeg as input_audio and rejects other audio",
+    // Observed: the stock adapter serializes wav/mp3/mpeg to `input_audio` and
+    // throws "'audio media type ...' functionality not supported" for the rest;
+    // the repo patch extends the format map to flac/m4a/ogg. Anything outside
+    // that list (e.g. audio/aac) still throws.
+    evidence:
+      "@ai-sdk/openai-compatible@2 (repo-patched) serializes wav/mp3/flac/m4a/ogg as input_audio and rejects other audio",
   },
   "@ai-sdk/google": {
     text: TEXT_SUPPORTED,

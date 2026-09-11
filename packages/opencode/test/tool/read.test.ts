@@ -11,7 +11,7 @@ import { Instance } from "../../src/project/instance"
 import { SessionID, MessageID } from "../../src/session/schema"
 import { ModelID } from "../../src/provider/schema"
 import { Instruction } from "../../src/session/instruction"
-import { ReadTool } from "../../src/tool/read"
+import { ReadTool, describeMedia } from "../../src/tool/read"
 import { Truncate } from "../../src/tool"
 import { Tool } from "../../src/tool"
 import { Filesystem } from "../../src/util"
@@ -576,6 +576,136 @@ describe("tool.read pdf capability gate", () => {
       expect(result.output).toContain('Cannot attach PDF "doc.pdf"')
       expect(result.output).toContain(path.join("pdf-official", "SKILL.md"))
       expect(result.metadata.truncated).toBe(false)
+    }),
+  )
+})
+
+describe("tool.read audio and video capability gate", () => {
+  // Minimal RIFF/WAVE header: sniffed as audio/wav regardless of the mime
+  // lookup, and full of zero bytes so the binary detector would otherwise
+  // refuse it.
+  const wav = Buffer.concat([
+    Buffer.from("RIFF"),
+    Buffer.from([0x24, 0x00, 0x00, 0x00]),
+    Buffer.from("WAVEfmt "),
+    Buffer.alloc(24),
+  ])
+  const mediaModel = (input: { audio?: boolean; video?: boolean; npm?: string }) =>
+    ProviderTest.model({
+      id: ModelID.make("media"),
+      providerID: visionModel.providerID,
+      api: { id: "media", url: "https://example.com", npm: input.npm ?? "@ai-sdk/openai" },
+      capabilities: {
+        ...visionModel.capabilities,
+        input: { ...visionModel.capabilities.input, audio: input.audio ?? false, video: input.video ?? false },
+      },
+    })
+
+  it.live("attaches audio when the active model accepts audio input", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      yield* put(path.join(dir, "clip.wav"), wav)
+
+      const result = yield* exec(
+        dir,
+        { file_path: path.join(dir, "clip.wav") },
+        { ...ctx, extra: { model: mediaModel({ audio: true }) } },
+      )
+      expect(result.output).toContain("Audio read successfully")
+      expect(result.attachments?.length).toBe(1)
+      expect(result.attachments?.[0].mime).toBe("audio/wav")
+      expect(result.attachments?.[0].filename).toBe("clip.wav")
+      expect(result.attachments?.[0].url).toBe(`data:audio/wav;base64,${wav.toString("base64")}`)
+    }),
+  )
+
+  it.live("refuses audio without reading it when the model lacks audio input", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      yield* put(path.join(dir, "clip.wav"), wav)
+
+      const result = yield* exec(dir, { file_path: path.join(dir, "clip.wav") })
+      expect(result.attachments).toBeUndefined()
+      expect(result.output).toContain('Cannot attach audio "clip.wav"')
+      expect(result.output).toContain("no audio input support")
+    }),
+  )
+
+  it.live("refuses an audio format the provider adapter cannot serialize", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      yield* put(path.join(dir, "clip.aac"), Buffer.from("\xff\xf1\0\0\0\0", "binary"))
+
+      const result = yield* exec(
+        dir,
+        { file_path: path.join(dir, "clip.aac") },
+        { ...ctx, extra: { model: mediaModel({ audio: true, npm: "@ai-sdk/openai-compatible" }) } },
+      )
+      expect(result.attachments).toBeUndefined()
+      expect(result.output).toContain('Cannot attach audio "clip.aac" (audio/aac)')
+      expect(result.output).toContain("audio/wav")
+    }),
+  )
+
+  it.live("attaches video when the active model accepts video input", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const mp4 = Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from("ftypmp42"), Buffer.alloc(12)])
+      yield* put(path.join(dir, "clip.mp4"), mp4)
+
+      const result = yield* exec(
+        dir,
+        { file_path: path.join(dir, "clip.mp4") },
+        { ...ctx, extra: { model: mediaModel({ video: true }) } },
+      )
+      expect(result.output).toContain("Video read successfully")
+      expect(result.attachments?.[0].mime).toBe("video/mp4")
+
+      const denied = yield* exec(dir, { file_path: path.join(dir, "clip.mp4") })
+      expect(denied.attachments).toBeUndefined()
+      expect(denied.output).toContain('Cannot attach video "clip.mp4"')
+    }),
+  )
+})
+
+describe("tool.read media description", () => {
+  const withMedia = (input: { audio?: boolean; video?: boolean; npm?: string }) =>
+    ProviderTest.model({
+      api: { id: "media", url: "https://example.com", npm: input.npm ?? "@ai-sdk/openai" },
+      capabilities: {
+        ...visionModel.capabilities,
+        input: { ...visionModel.capabilities.input, audio: input.audio ?? false, video: input.video ?? false },
+      },
+    })
+
+  it.live("omits the media paragraph for a model without audio or video input", () =>
+    Effect.sync(() => {
+      expect(describeMedia(undefined)).toBeUndefined()
+      expect(describeMedia(withMedia({}))).toBeUndefined()
+    }),
+  )
+
+  it.live("names only the modalities the model accepts", () =>
+    Effect.sync(() => {
+      const audio = describeMedia(withMedia({ audio: true }))
+      expect(audio).toContain("audio (wav, mp3, flac, m4a, ogg)")
+      expect(audio).not.toContain("video")
+
+      const video = describeMedia(withMedia({ video: true }))
+      expect(video).toContain("video (mp4, mov, avi, wmv)")
+      expect(video).not.toContain("audio")
+
+      expect(describeMedia(withMedia({ audio: true, video: true }))).toContain(
+        "audio (wav, mp3, flac, m4a, ogg) and video (mp4, mov, avi, wmv)",
+      )
+    }),
+  )
+
+  it.live("narrows the audio formats to what the provider adapter can serialize", () =>
+    Effect.sync(() => {
+      expect(describeMedia(withMedia({ audio: true, npm: "@ai-sdk/openai-compatible" }))).toContain(
+        "audio (wav, mp3, flac, m4a, ogg)",
+      )
     }),
   )
 })
