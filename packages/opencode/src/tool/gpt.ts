@@ -29,15 +29,6 @@ export function isMcpToolSearchEnabled(
   return enabled || usesCodexMode(harness, ...modelIDs)
 }
 
-export function isMimoModel(...values: Array<string | undefined>) {
-  return values.some((value) => value && /(?:^|[/_-])mimo(?:$|[/_.-])/i.test(value))
-}
-
-export function usesMimoResponsesApi(...values: Array<string | undefined>) {
-  const ids = values.flatMap((value) => (value ? [value.toLowerCase()] : []))
-  return isMimoModel(...ids) && ids.some((id) => /(?:^|[/_.-])ptc(?:$|[/_.-])/.test(id))
-}
-
 export function usesGPTToolset(
   modelID: string,
   harness?: HarnessMode,

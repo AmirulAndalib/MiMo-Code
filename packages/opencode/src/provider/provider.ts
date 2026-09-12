@@ -27,7 +27,6 @@ import { AppFileSystem } from "@mimo-ai/shared/filesystem"
 import { isRecord } from "@/util/record"
 import { withStatics } from "@/util/schema"
 import { isFreeApiModel, isFreeApiSunset } from "@/util/free-api-sunset"
-import { usesMimoResponsesApi } from "../tool/gpt"
 
 import * as ProviderTransform from "./transform"
 import { ModelID, ProviderID } from "./schema"
@@ -326,14 +325,6 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
           return sdk.responses(modelID)
         },
         options: { headerTimeout: DEFAULT_OPENAI_HEADER_TIMEOUT },
-      }),
-    xiaomi: () =>
-      Effect.succeed({
-        autoload: false,
-        async getModel(sdk: any, modelID: string, _options?: Record<string, any>) {
-          return usesMimoResponsesApi(modelID) ? sdk.responses(modelID) : sdk.languageModel(modelID)
-        },
-        options: {},
       }),
     xai: () =>
       Effect.succeed({
@@ -1137,6 +1128,19 @@ function cost(c: ModelsDev.Model["cost"]): Model["cost"] {
   return result
 }
 
+const OPENAI_COMPATIBLE_NPM = "@ai-sdk/openai-compatible"
+
+// MiMo models (and the `mimo-auto` smart alias) only speak the OpenAI-compatible Chat
+// Completions API. Whatever npm a catalog entry or mimocode.json declares for such an
+// id, the model is pinned to @ai-sdk/openai-compatible.
+export function isMimoOrSmartModel(id: string) {
+  return /(^|[/_-])mimo(?:-|$)/i.test(id) || id === "mimo-auto"
+}
+
+function resolveModelNpm(npm: string, ...ids: string[]) {
+  return ids.some(isMimoOrSmartModel) ? OPENAI_COMPATIBLE_NPM : npm
+}
+
 function fromModelsDevModel(provider: ModelsDev.Provider, model: ModelsDev.Model): Model {
   const base: Model = {
     id: ModelID.make(model.id),
@@ -1146,7 +1150,7 @@ function fromModelsDevModel(provider: ModelsDev.Provider, model: ModelsDev.Model
     api: {
       id: model.id,
       url: model.provider?.api ?? provider.api ?? "",
-      npm: model.provider?.npm ?? provider.npm ?? "@ai-sdk/openai-compatible",
+      npm: resolveModelNpm(model.provider?.npm ?? provider.npm ?? OPENAI_COMPATIBLE_NPM, model.id),
     },
     status: model.status ?? "active",
     headers: {},
@@ -1306,12 +1310,15 @@ const layer: Layer.Layer<
           for (const [modelID, model] of Object.entries(provider.models ?? {})) {
             const existingModel = parsed.models[model.id ?? modelID]
             const apiID = model.id ?? existingModel?.api.id ?? modelID
-            const apiNpm =
+            const apiNpm = resolveModelNpm(
               model.provider?.npm ??
-              provider.npm ??
-              existingModel?.api.npm ??
-              modelsDev[providerID]?.npm ??
-              "@ai-sdk/openai-compatible"
+                provider.npm ??
+                existingModel?.api.npm ??
+                modelsDev[providerID]?.npm ??
+                OPENAI_COMPATIBLE_NPM,
+              modelID,
+              apiID,
+            )
             const name = iife(() => {
               if (model.name) return model.name
               if (model.id && model.id !== modelID) return modelID
@@ -1352,7 +1359,7 @@ const layer: Layer.Layer<
                 interleaved:
                   model.interleaved ??
                   existingModel?.capabilities.interleaved ??
-                  (!existingModel && apiNpm === "@ai-sdk/openai-compatible" && apiID.includes("deepseek")
+                  (!existingModel && apiNpm === OPENAI_COMPATIBLE_NPM && apiID.includes("deepseek")
                     ? { field: "reasoning_content" }
                     : false),
               },
@@ -1713,25 +1720,7 @@ const layer: Layer.Layer<
           return wrapSSE(bounded, chunkTimeout, chunkAbortCtl)
         }
 
-        // Xiaomi: only PTC needs the bundled Responses harness (free-form `exec` custom tool);
-        // every non-PTC model must stay on the stock openai-compatible chat model. The bundled
-        // Copilot fork only understands Copilot's `reasoning_text`, so routing chat through it
-        // silently drops the `reasoning_content` that Xiaomi models stream back.
-        const bundledLoader =
-          model.providerID === "xiaomi" && model.api.npm === "@ai-sdk/openai-compatible"
-            ? () =>
-                Promise.all([BUNDLED_PROVIDERS["@ai-sdk/openai-compatible"](), import("./sdk/copilot")]).then(
-                  ([createChat, copilot]) =>
-                    (options: any) => {
-                      const chat = createChat(options)
-                      const responses = copilot.createOpenaiCompatible({ ...options, customToolNames: ["exec"] })
-                      return {
-                        languageModel: (modelId: string) => chat.languageModel(modelId),
-                        responses: (modelId: string) => responses.responses(modelId),
-                      }
-                    },
-                )
-            : BUNDLED_PROVIDERS[model.api.npm]
+        const bundledLoader = BUNDLED_PROVIDERS[model.api.npm]
         if (bundledLoader) {
           log.info("using bundled provider", {
             providerID: model.providerID,
