@@ -1978,7 +1978,7 @@ test("mimo model ids are pinned to @ai-sdk/openai-compatible in config", async (
       expect(models["gpt-5.4"].api.npm).toBe("@ai-sdk/openai")
       expect(models["mimosa-1"].api.npm).toBe("@ai-sdk/openai")
       // Only the SDK is pinned; the provider stays as configured.
-      expect(models["MiMo-V2.6"].providerID).toBe("my-gateway")
+      expect(models["MiMo-V2.6"].providerID).toBe(ProviderID.make("my-gateway"))
     },
   })
 })
@@ -2009,7 +2009,7 @@ test("mimo model ids are pinned to @ai-sdk/openai-compatible from models.dev", (
   expect(models["xiaomi/mimo-v2.5"].api.npm).toBe("@ai-sdk/openai-compatible")
   expect(models["XiaomiMiMo/MiMo-V2.5-Pro"].api.npm).toBe("@ai-sdk/openai-compatible")
   expect(models["gpt-5.4"].api.npm).toBe("@ai-sdk/openai")
-  expect(models["xiaomi/mimo-v2.5"].providerID).toBe("test-provider")
+  expect(models["xiaomi/mimo-v2.5"].providerID).toBe(ProviderID.make("test-provider"))
 })
 
 test("isMimoOrSmartModel matches mimo ids and the mimo-auto alias only", () => {
