@@ -61,12 +61,32 @@ describe("session tool attachment routing", () => {
       npm: "@ai-sdk/openai-compatible",
       image: true,
       audio: true,
+      video: true,
       pdf: true,
     })
 
     expect(routeToolAttachment({ model, attachment: attachment("image/png"), allowNative: true })).toBe("synthetic")
     expect(routeToolAttachment({ model, attachment: attachment("audio/wav"), allowNative: true })).toBe("synthetic")
-    expect(routeToolAttachment({ model, attachment: attachment("audio/ogg"), allowNative: true })).toBe("placeholder")
+    expect(routeToolAttachment({ model, attachment: attachment("audio/ogg"), allowNative: true })).toBe("synthetic")
+    expect(routeToolAttachment({ model, attachment: attachment("audio/x-flac"), allowNative: true })).toBe("synthetic")
+    expect(routeToolAttachment({ model, attachment: attachment("audio/aac"), allowNative: true })).toBe("placeholder")
+    expect(routeToolAttachment({ model, attachment: attachment("video/mp4"), allowNative: true })).toBe("synthetic")
+    expect(routeToolAttachment({ model, attachment: attachment("video/quicktime"), allowNative: true })).toBe(
+      "synthetic",
+    )
+    // The patch would serialize any video/* as video_url, but the MiMo video
+    // API only takes mp4/mov/avi/wmv, so the rest never leave as attachments.
+    expect(routeToolAttachment({ model, attachment: attachment("video/webm"), allowNative: true })).toBe("placeholder")
+    expect(routeToolAttachment({ model, attachment: attachment("video/x-matroska"), allowNative: true })).toBe(
+      "placeholder",
+    )
+    expect(
+      routeToolAttachment({
+        model,
+        attachment: { mime: "video/mp4", url: "https://example.com/clip.mp4", filename: "clip.mp4" },
+        allowNative: true,
+      }),
+    ).toBe("placeholder")
     expect(routeToolAttachment({ model, attachment: attachment("application/octet-stream"), allowNative: true })).toBe(
       "placeholder",
     )

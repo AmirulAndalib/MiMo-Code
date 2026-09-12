@@ -3,7 +3,16 @@ import os from "os"
 import z from "zod"
 import { SessionID, MessageID, PartID } from "./schema"
 import { MessageV2 } from "./message-v2"
-import { base64ByteSize, classifyAttachment, oversizedAttachmentNotice } from "@/util/media"
+import {
+  base64ByteSize,
+  classifyAttachment,
+  fitsMediaBase64,
+  isAudioAttachment,
+  isVideoAttachment,
+  MAX_MEDIA_BASE64_BYTES,
+  oversizedAttachmentNotice,
+  oversizedMediaNotice,
+} from "@/util/media"
 import { shrinkAttachment } from "@/provider/image"
 import { classifyAssistantStep } from "./classify"
 import { Log, Token } from "../util"
@@ -2576,9 +2585,27 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               }
               // Inline payloads (clipboard pastes) are classified on the base64
               // length: an oversized image within the source ceiling is
-              // recompressed, anything else oversized is dropped.
+              // recompressed, anything else oversized is dropped. Audio and
+              // video are bounded only by the provider's ENCODED-size cap (see
+              // MAX_MEDIA_BASE64_BYTES) and never enter classifyAttachment.
               const inline = part.url.slice(part.url.indexOf(",") + 1)
               const inlineSize = base64ByteSize(inline)
+              if (isAudioAttachment(part.mime) || isVideoAttachment(part.mime)) {
+                if (inline.length <= MAX_MEDIA_BASE64_BYTES) break
+                return [
+                  {
+                    messageID: info.id,
+                    sessionID: input.sessionID,
+                    type: "text",
+                    synthetic: true,
+                    text: oversizedMediaNotice({
+                      label: `"${part.filename ?? part.mime}"`,
+                      size: inlineSize,
+                      hint: "It was not attached.",
+                    }),
+                  },
+                ]
+              }
               const verdict = classifyAttachment(part.mime, inlineSize)
               if (verdict === "fits") break
               const fitted = verdict === "shrink" ? shrinkAttachment(part.mime, Buffer.from(inline, "base64")) : undefined
@@ -2763,12 +2790,31 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               // an under-limit file is inlined as-is, an oversized image within
               // the source ceiling is read and recompressed, and anything else
               // oversized becomes a notice without being read, so it never
-              // reaches the session DB.
+              // reaches the session DB. Audio and video are bounded only by the
+              // provider's ENCODED-size cap (fitsMediaBase64) and never enter
+              // classifyAttachment.
               const size = yield* fsys.stat(filepath).pipe(
                 Effect.map((info) => Number(info.size)),
                 Effect.catch(() => Effect.succeed(0)),
               )
-              const verdict = classifyAttachment(part.mime, size)
+              const media = isAudioAttachment(part.mime) || isVideoAttachment(part.mime)
+              if (media && !fitsMediaBase64(size)) {
+                return [
+                  call,
+                  {
+                    messageID: info.id,
+                    sessionID: input.sessionID,
+                    type: "text",
+                    synthetic: true,
+                    text: oversizedMediaNotice({
+                      label: `"${filepath}" (${part.mime})`,
+                      size,
+                      hint: "It was not attached.",
+                    }),
+                  },
+                ]
+              }
+              const verdict = media ? "fits" : classifyAttachment(part.mime, size)
               const fitted =
                 verdict === "reject"
                   ? undefined

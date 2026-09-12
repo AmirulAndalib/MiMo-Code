@@ -1,8 +1,50 @@
 diff --git a/dist/index.js b/dist/index.js
-index dca128d3a790378c51a24a16d92585178343b278..84f21b064e487c62377241fb0737321cd0968e76 100644
+index dca128d..abe027f 100644
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -791,6 +791,7 @@
+@@ -114,9 +114,20 @@ function getAudioFormat(mediaType) {
+   switch (mediaType) {
+     case "audio/wav":
+       return "wav";
++    case "audio/x-wav":
++      return "wav";
+     case "audio/mp3":
+     case "audio/mpeg":
+       return "mp3";
++    case "audio/flac":
++    case "audio/x-flac":
++      return "flac";
++    case "audio/mp4":
++    case "audio/m4a":
++    case "audio/x-m4a":
++      return "m4a";
++    case "audio/ogg":
++      return "ogg";
+     default:
+       return null;
+   }
+@@ -196,6 +207,20 @@ function convertToOpenAICompatibleChatMessages(prompt) {
+                     ...partMetadata
+                   };
+                 }
++                if (part.mediaType.startsWith("video/")) {
++                  if (part.data instanceof URL) {
++                    throw new import_provider.UnsupportedFunctionalityError({
++                      functionality: "video file parts with URLs"
++                    });
++                  }
++                  return {
++                    type: "video_url",
++                    video_url: {
++                      url: `data:${part.mediaType};base64,${(0, import_provider_utils.convertToBase64)(part.data)}`
++                    },
++                    ...partMetadata
++                  };
++                }
+                 if (part.mediaType.startsWith("text/")) {
+                   const textContent = part.data instanceof URL ? part.data.toString() : typeof part.data === "string" ? new TextDecoder().decode(
+                     (0, import_provider_utils.convertBase64ToUint8Array)(part.data)
+@@ -791,6 +816,7 @@ var OpenAICompatibleChatLanguageModel = class {
                        arguments: (_e = toolCallDelta.function.arguments) != null ? _e : ""
                      },
                      hasFinished: false,
@@ -10,7 +52,7 @@ index dca128d3a790378c51a24a16d92585178343b278..84f21b064e487c62377241fb0737321c
                      thoughtSignature: (_h = (_g = (_f = toolCallDelta.extra_content) == null ? void 0 : _f.google) == null ? void 0 : _g.thought_signature) != null ? _h : void 0
                    };
                    const toolCall2 = toolCalls[index];
-@@ -803,24 +804,7 @@
+@@ -803,24 +829,7 @@ var OpenAICompatibleChatLanguageModel = class {
                        });
                      }
                      if ((0, import_provider_utils2.isParsableJson)(toolCall2.function.arguments)) {
@@ -36,7 +78,7 @@ index dca128d3a790378c51a24a16d92585178343b278..84f21b064e487c62377241fb0737321c
                      }
                    }
                    continue;
-@@ -837,25 +821,8 @@
+@@ -837,25 +846,8 @@ var OpenAICompatibleChatLanguageModel = class {
                    id: toolCall.id,
                    delta: (_o = toolCallDelta.function.arguments) != null ? _o : ""
                  });
@@ -64,7 +106,7 @@ index dca128d3a790378c51a24a16d92585178343b278..84f21b064e487c62377241fb0737321c
                  }
                }
              }
-@@ -879,7 +846,7 @@
+@@ -879,7 +871,7 @@ var OpenAICompatibleChatLanguageModel = class {
                  type: "tool-call",
                  toolCallId: (_a2 = toolCall.id) != null ? _a2 : (0, import_provider_utils2.generateId)(),
                  toolName: toolCall.function.name,
@@ -74,10 +116,52 @@ index dca128d3a790378c51a24a16d92585178343b278..84f21b064e487c62377241fb0737321c
                    providerMetadata: {
                      [providerOptionsName]: {
 diff --git a/dist/index.mjs b/dist/index.mjs
-index 3b1e1b6bdec5032e3b4fa5ffbcc8cdf3dfe1cc40..6a926f818251fd1f046e3aa816842d9517332ca9 100644
+index 3b1e1b6..4abca1c 100644
 --- a/dist/index.mjs
 +++ b/dist/index.mjs
-@@ -778,6 +778,7 @@
+@@ -99,9 +99,20 @@ function getAudioFormat(mediaType) {
+   switch (mediaType) {
+     case "audio/wav":
+       return "wav";
++    case "audio/x-wav":
++      return "wav";
+     case "audio/mp3":
+     case "audio/mpeg":
+       return "mp3";
++    case "audio/flac":
++    case "audio/x-flac":
++      return "flac";
++    case "audio/mp4":
++    case "audio/m4a":
++    case "audio/x-m4a":
++      return "m4a";
++    case "audio/ogg":
++      return "ogg";
+     default:
+       return null;
+   }
+@@ -181,6 +192,20 @@ function convertToOpenAICompatibleChatMessages(prompt) {
+                     ...partMetadata
+                   };
+                 }
++                if (part.mediaType.startsWith("video/")) {
++                  if (part.data instanceof URL) {
++                    throw new UnsupportedFunctionalityError({
++                      functionality: "video file parts with URLs"
++                    });
++                  }
++                  return {
++                    type: "video_url",
++                    video_url: {
++                      url: `data:${part.mediaType};base64,${convertToBase64(part.data)}`
++                    },
++                    ...partMetadata
++                  };
++                }
+                 if (part.mediaType.startsWith("text/")) {
+                   const textContent = part.data instanceof URL ? part.data.toString() : typeof part.data === "string" ? new TextDecoder().decode(
+                     convertBase64ToUint8Array(part.data)
+@@ -778,6 +803,7 @@ var OpenAICompatibleChatLanguageModel = class {
                        arguments: (_e = toolCallDelta.function.arguments) != null ? _e : ""
                      },
                      hasFinished: false,
@@ -85,7 +169,7 @@ index 3b1e1b6bdec5032e3b4fa5ffbcc8cdf3dfe1cc40..6a926f818251fd1f046e3aa816842d95
                      thoughtSignature: (_h = (_g = (_f = toolCallDelta.extra_content) == null ? void 0 : _f.google) == null ? void 0 : _g.thought_signature) != null ? _h : void 0
                    };
                    const toolCall2 = toolCalls[index];
-@@ -790,24 +791,7 @@
+@@ -790,24 +816,7 @@ var OpenAICompatibleChatLanguageModel = class {
                        });
                      }
                      if (isParsableJson(toolCall2.function.arguments)) {
@@ -111,7 +195,7 @@ index 3b1e1b6bdec5032e3b4fa5ffbcc8cdf3dfe1cc40..6a926f818251fd1f046e3aa816842d95
                      }
                    }
                    continue;
-@@ -824,25 +808,8 @@
+@@ -824,25 +833,8 @@ var OpenAICompatibleChatLanguageModel = class {
                    id: toolCall.id,
                    delta: (_o = toolCallDelta.function.arguments) != null ? _o : ""
                  });
@@ -139,7 +223,7 @@ index 3b1e1b6bdec5032e3b4fa5ffbcc8cdf3dfe1cc40..6a926f818251fd1f046e3aa816842d95
                  }
                }
              }
-@@ -866,7 +833,7 @@
+@@ -866,7 +858,7 @@ var OpenAICompatibleChatLanguageModel = class {
                  type: "tool-call",
                  toolCallId: (_a2 = toolCall.id) != null ? _a2 : generateId(),
                  toolName: toolCall.function.name,

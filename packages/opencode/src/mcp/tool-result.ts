@@ -1,6 +1,14 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js"
 import { isRecord } from "@/util/record"
-import { base64ByteSize, classifyAttachment, oversizedAttachmentNotice } from "@/util/media"
+import {
+  base64ByteSize,
+  classifyAttachment,
+  isAudioAttachment,
+  isVideoAttachment,
+  MAX_MEDIA_BASE64_BYTES,
+  oversizedAttachmentNotice,
+  oversizedMediaNotice,
+} from "@/util/media"
 import { shrinkAttachment } from "@/provider/image"
 
 export type ToolResultAttachment = {
@@ -53,6 +61,14 @@ export function normalizeToolResult(result: CallToolResult): NormalizedToolResul
   // oversized image within the source ceiling is decoded and recompressed.
   const fit = (label: string, mime: string, base64: string) => {
     const size = base64ByteSize(base64)
+    // Audio/video travel as an inline data URL, and the provider bounds the
+    // encoded string rather than the decoded bytes (see MAX_MEDIA_BASE64_BYTES),
+    // so they never enter classifyAttachment.
+    if (isAudioAttachment(mime) || isVideoAttachment(mime)) {
+      if (base64.length <= MAX_MEDIA_BASE64_BYTES) return { mime, base64 }
+      text.push(oversizedMediaNotice({ label, size, hint: "It was dropped." }))
+      return undefined
+    }
     const verdict = classifyAttachment(mime, size)
     if (verdict === "fits") return { mime, base64 }
     const fitted = verdict === "shrink" ? shrinkAttachment(mime, Buffer.from(base64, "base64")) : undefined

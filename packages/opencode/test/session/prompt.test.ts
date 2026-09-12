@@ -1359,9 +1359,10 @@ describe("session.prompt oversized attachment", () => {
     })
   })
 
-  test("drops an oversized inline data attachment with a notice", async () => {
+  test("attaches oversized inline audio that fits the encoded media cap", async () => {
     await using tmp = await tmpdir({ git: true, config })
-    // Uncompressible: not an image at all, so it can only be dropped.
+    // Over Flag.MIMOCODE_MAX_ATTACHMENT_SIZE, but audio is bounded only by the
+    // provider's encoded-size cap (MAX_MEDIA_BASE64_BYTES), so it passes.
     const base64 = "A".repeat(Math.ceil((LIMIT + 1) / 3) * 4)
 
     await Instance.provide({
@@ -1382,8 +1383,41 @@ describe("session.prompt oversized attachment", () => {
               ],
             })
             if (msg.info.role !== "user") throw new Error("expected user message")
+            const file = msg.parts.find((part) => part.type === "file")
+            expect(file?.type === "file" && file.url).toBe(`data:audio/wav;base64,${base64}`)
+            expect(notice(msg.parts, `"clip.wav" is`)).toBe(false)
+            yield* sessions.remove(session.id)
+          }),
+        ),
+    })
+  })
+
+  test("drops an oversized inline data attachment with a notice", async () => {
+    await using tmp = await tmpdir({ git: true, config })
+    // Uncompressible: not an image (and not audio/video, which have their own
+    // encoded-size cap), so it can only be dropped.
+    const base64 = "A".repeat(Math.ceil((LIMIT + 1) / 3) * 4)
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: () =>
+        run(
+          Effect.gen(function* () {
+            const prompt = yield* SessionPrompt.Service
+            const sessions = yield* Session.Service
+            const session = yield* sessions.create({})
+            const msg = yield* prompt.prompt({
+              sessionID: session.id,
+              agent: "build",
+              noReply: true,
+              parts: [
+                { type: "text", text: "what is this" },
+                { type: "file", mime: "application/pdf", url: `data:application/pdf;base64,${base64}`, filename: "doc.pdf" },
+              ],
+            })
+            if (msg.info.role !== "user") throw new Error("expected user message")
             expect(noFileParts(msg.parts)).toBe(true)
-            expect(notice(msg.parts, `"clip.wav" is`)).toBe(true)
+            expect(notice(msg.parts, `"doc.pdf" is`)).toBe(true)
 
             const stored = yield* sessions.messages({ sessionID: session.id })
             expect(noFileParts(stored.flatMap((item) => item.parts))).toBe(true)
