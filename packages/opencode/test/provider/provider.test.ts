@@ -1832,48 +1832,7 @@ test("provider with custom npm package", async () => {
   })
 })
 
-test("xiaomi models use the Responses harness for free-form exec PTC", async () => {
-  await using tmp = await tmpdir({
-    init: async (dir) => {
-      await Bun.write(
-        path.join(dir, "mimocode.json"),
-        JSON.stringify({
-          $schema: "https://opencode.ai/config.json",
-          enabled_providers: ["xiaomi"],
-          provider: {
-            xiaomi: {
-              npm: "@ai-sdk/openai-compatible",
-              models: {
-                "mimo-ptc-test": {
-                  name: "MiMo PTC Test",
-                  tool_call: true,
-                  limit: { context: 8192, output: 2048 },
-                },
-              },
-              options: {
-                apiKey: "test-key",
-                baseURL: "https://example.test/v1",
-              },
-            },
-          },
-        }),
-      )
-    },
-  })
-  await Instance.provide({
-    directory: tmp.path,
-    init: async () => {
-      set("XIAOMI_API_KEY", "test-key")
-    },
-    fn: async () => {
-      const model = await getModel(ProviderID.make("xiaomi"), ModelID.make("mimo-ptc-test"))
-      const language = await getLanguage(model)
-      expect(language.provider).toBe("xiaomi.responses")
-    },
-  })
-})
-
-test("xiaomi models outside PTC mode stay on Chat Completions regardless of version", async () => {
+test("xiaomi models stay on Chat Completions regardless of version", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       await Bun.write(
@@ -1913,13 +1872,13 @@ test("xiaomi models outside PTC mode stay on Chat Completions regardless of vers
       )
       const languages = await Promise.all(models.map((model) => getLanguage(model)))
       expect(languages.map((language) => language.provider)).toEqual(["xiaomi.chat", "xiaomi.chat"])
-      // Non-PTC must be the stock SDK, not the bundled Copilot fork (which only parses `reasoning_text`).
+      // Must be the stock SDK, not the bundled Copilot fork (which only parses `reasoning_text`).
       for (const language of languages) expect(language).toBeInstanceOf(OpenAICompatibleChatLanguageModel)
     },
   })
 })
 
-test("xiaomi non-PTC chat streams reasoning_content as reasoning parts", async () => {
+test("xiaomi chat streams reasoning_content as reasoning parts", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       await Bun.write(
