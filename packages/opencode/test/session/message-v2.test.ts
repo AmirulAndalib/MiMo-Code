@@ -789,9 +789,9 @@ describe("session.message-v2.toModelMessage", () => {
                 {
                   ...basePart(assistantID, "file-3"),
                   type: "file",
-                  mime: "audio/ogg",
-                  filename: "unsupported.ogg",
-                  url: "data:audio/ogg;base64,T2dnUw==",
+                  mime: "audio/aac",
+                  filename: "unsupported.aac",
+                  url: "data:audio/aac;base64,//FQgA==",
                 },
                 {
                   ...basePart(assistantID, "file-4"),
@@ -858,7 +858,7 @@ describe("session.message-v2.toModelMessage", () => {
           },
           {
             type: "text",
-            text: '[Tool attachment "unsupported.ogg" (audio/ogg) was retained but cannot be safely sent to this model/provider.]',
+            text: '[Tool attachment "unsupported.aac" (audio/aac) was retained but cannot be safely sent to this model/provider.]',
           },
           {
             type: "text",
