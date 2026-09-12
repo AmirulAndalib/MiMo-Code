@@ -112,6 +112,7 @@ describe("@ai-sdk/openai-compatible video is serialized by the repo patch", () =
   // inlined as a `data:` URL and no per-part tuning fields (the API defaults
   // fps and media_resolution). A dependency upgrade that drops the patch fails here.
   test.each(["video/mp4", "video/quicktime"])("%s is serialized as video_url", async (mediaType) => {
+    expect(ModelCapability.adapterDeclaration("@ai-sdk/openai-compatible").video.mimeTypes).toContain(mediaType)
     const outcome = await sendAudio("openai-compatible", mediaType)
     expect(outcome).not.toHaveProperty("error")
     if ("error" in outcome) throw new Error("unreachable")

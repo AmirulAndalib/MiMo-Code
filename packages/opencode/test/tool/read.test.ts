@@ -666,6 +666,25 @@ describe("tool.read audio and video capability gate", () => {
       expect(denied.output).toContain('Cannot attach video "clip.mp4"')
     }),
   )
+
+  it.live("refuses a video format the MiMo video API does not take", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      // EBML header: what a .webm/.mkv starts with. The mime lookup yields
+      // video/webm from the extension, which is outside mp4/mov/avi/wmv.
+      yield* put(path.join(dir, "clip.webm"), Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3]), Buffer.alloc(12)]))
+
+      const result = yield* exec(
+        dir,
+        { file_path: path.join(dir, "clip.webm") },
+        { ...ctx, extra: { model: mediaModel({ video: true, npm: "@ai-sdk/openai-compatible" }) } },
+      )
+      expect(result.attachments).toBeUndefined()
+      expect(result.output).toContain('Cannot attach video "clip.webm" (video/webm)')
+      expect(result.output).toContain("video/mp4, video/quicktime, video/x-msvideo, video/x-ms-wmv")
+      expect(result.output).toContain("/tmp/example.mp4")
+    }),
+  )
 })
 
 describe("tool.read media description", () => {
@@ -698,6 +717,16 @@ describe("tool.read media description", () => {
       expect(describeMedia(withMedia({ audio: true, video: true }))).toContain(
         "audio (wav, mp3, flac, m4a, ogg) and video (mp4, mov, avi, wmv)",
       )
+    }),
+  )
+
+  it.live("narrows the video formats to what the MiMo video API takes", () =>
+    Effect.gen(function* () {
+      expect(describeMedia(withMedia({ video: true, npm: "@ai-sdk/openai-compatible" }))).toContain(
+        "video (mp4, mov, avi, wmv)",
+      )
+      // An adapter that carries any video/* falls back to the documented list.
+      expect(describeMedia(withMedia({ video: true, npm: "@ai-sdk/google" }))).toContain("video (mp4, mov, avi, wmv)")
     }),
   )
 
@@ -773,6 +802,33 @@ describe("tool.read attachment size limit", () => {
       expect(result.output).toContain(`"giant.png" (image/png) is ${bytes.byteLength} bytes`)
       expect(result.output).toContain("ceiling above which compression is not attempted")
       expect(result.output).toContain("It was not read")
+    }),
+  )
+
+  it.live("attaches audio over the attachment limit when it fits the encoded media cap", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      // Audio is bounded by the provider's encoded-size cap (fitsMediaBase64),
+      // not Flag.MIMOCODE_MAX_ATTACHMENT_SIZE, so a file over LIMIT is still read.
+      const bytes = Buffer.concat([
+        Buffer.from("RIFF"),
+        Buffer.from([0x24, 0x00, 0x00, 0x00]),
+        Buffer.from("WAVEfmt "),
+        Buffer.alloc(LIMIT),
+      ])
+      expect(bytes.byteLength).toBeGreaterThan(LIMIT)
+      yield* put(path.join(dir, "long.wav"), bytes)
+      const model = ProviderTest.model({
+        id: ModelID.make("media"),
+        providerID: visionModel.providerID,
+        api: { id: "media", url: "https://example.com", npm: "@ai-sdk/openai" },
+        capabilities: { ...visionModel.capabilities, input: { ...visionModel.capabilities.input, audio: true } },
+      })
+
+      const result = yield* exec(dir, { file_path: path.join(dir, "long.wav") }, { ...ctx, extra: { model } })
+      expect(result.output).toContain("Audio read successfully")
+      expect(result.attachments?.length).toBe(1)
+      expect(result.attachments?.[0].url).toBe(`data:audio/wav;base64,${bytes.toString("base64")}`)
     }),
   )
 

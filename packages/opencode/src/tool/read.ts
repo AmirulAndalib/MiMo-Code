@@ -44,7 +44,25 @@ const AUDIO_FORMAT_NAMES: Record<string, string> = {
   "audio/ogg": "ogg",
 }
 const AUDIO_FORMATS = ["wav", "mp3", "flac", "m4a", "ogg"]
+const VIDEO_FORMAT_NAMES: Record<string, string> = {
+  "video/mp4": "mp4",
+  "video/quicktime": "mov",
+  "video/x-msvideo": "avi",
+  "video/x-ms-wmv": "wmv",
+}
 const VIDEO_FORMATS = ["mp4", "mov", "avi", "wmv"]
+
+// The format names the current model+adapter can take for one media kind:
+// the adapter declaration's MIME list when it has one, else the documented
+// MiMo API formats.
+function mediaFormatNames(model: Provider.Model, kind: "audio" | "video") {
+  const declared = ModelCapability.modelDeclaration(model, kind)
+  const names = kind === "audio" ? AUDIO_FORMAT_NAMES : VIDEO_FORMAT_NAMES
+  const fallback = kind === "audio" ? AUDIO_FORMATS : VIDEO_FORMATS
+  return declared.support === "supported" && declared.mimeTypes !== "any"
+    ? [...new Set(declared.mimeTypes.map((mime) => names[mime] ?? mime))]
+    : fallback
+}
 
 /**
  * The audio/video paragraph of the tool description, or undefined when the
@@ -53,17 +71,8 @@ const VIDEO_FORMATS = ["mp4", "mov", "avi", "wmv"]
  */
 export function describeMedia(model: Provider.Model | undefined) {
   if (!model) return undefined
-  const audio = model.capabilities.input.audio
-    ? (() => {
-        const declared = ModelCapability.modelDeclaration(model, "audio")
-        const names =
-          declared.support === "supported" && declared.mimeTypes !== "any"
-            ? [...new Set(declared.mimeTypes.map((mime) => AUDIO_FORMAT_NAMES[mime] ?? mime))]
-            : AUDIO_FORMATS
-        return `audio (${names.join(", ")})`
-      })()
-    : undefined
-  const video = model.capabilities.input.video ? `video (${VIDEO_FORMATS.join(", ")})` : undefined
+  const audio = model.capabilities.input.audio ? `audio (${mediaFormatNames(model, "audio").join(", ")})` : undefined
+  const video = model.capabilities.input.video ? `video (${mediaFormatNames(model, "video").join(", ")})` : undefined
   const kinds = [audio, video].filter((kind): kind is string => kind !== undefined)
   if (kinds.length === 0) return undefined
   return [
@@ -269,11 +278,11 @@ export const ReadTool = Tool.define(
       // Size gate on stat, before any bytes are read (see classifyAttachment):
       // a rejected PDF or image is never read, an oversized image within the
       // source ceiling is read and recompressed below. Either way nothing over
-      // the limit becomes base64 or reaches the session DB.
+      // the limit becomes base64 or reaches the session DB. Audio and video are
+      // not gated here: the provider bounds their ENCODED size, which the media
+      // branch below checks with fitsMediaBase64.
       const verdict =
-        isImageAttachment(mime) || isPdfAttachment(mime) || isAudioAttachment(mime) || isVideoAttachment(mime)
-          ? classifyAttachment(mime, Number(stat.size))
-          : "fits"
+        isImageAttachment(mime) || isPdfAttachment(mime) ? classifyAttachment(mime, Number(stat.size)) : "fits"
       if (verdict === "reject") {
         const warning = oversizedAttachmentNotice({
           label: `"${path.basename(filepath)}" (${mime})`,
@@ -413,15 +422,16 @@ export const ReadTool = Tool.define(
             metadata: { preview: warning, truncated: false, loaded: loaded.map((item) => item.filepath) },
           }
         }
-        // The model may take audio while its adapter can only serialize some
-        // formats (the OpenAI-compatible chat adapter emits input_audio for
-        // wav/mp3 only). Refuse those up front instead of attaching bytes that
+        // The model may take the media kind while its adapter/API only takes
+        // some formats (the OpenAI-compatible chat adapter emits input_audio for
+        // wav/mp3/flac/m4a/ogg; the MiMo video API takes mp4/mov/avi/wmv).
+        // Refuse the rest up front instead of attaching bytes that
         // tool-attachment.ts would later replace with a placeholder.
-        const declared = model && kind === "audio" ? ModelCapability.modelDeclaration(model, "audio") : undefined
+        const declared = model ? ModelCapability.modelDeclaration(model, kind) : undefined
         if (declared?.support === "supported" && declared.mimeTypes !== "any" && !declared.mimeTypes.includes(mime)) {
           const warning = [
-            `Cannot attach audio "${path.basename(filepath)}" (${mime}) — the current provider only accepts ${declared.mimeTypes.join(", ")}, so the file was not read.`,
-            `Convert it first (e.g. ffmpeg -i "${filepath}" /tmp/example.wav) and read the converted file.`,
+            `Cannot attach ${kind} "${path.basename(filepath)}" (${mime}) — the current provider only accepts ${declared.mimeTypes.join(", ")}, so the file was not read.`,
+            `Convert it first (e.g. ffmpeg -i "${filepath}" /tmp/example.${kind === "audio" ? "wav" : "mp4"}) and read the converted file.`,
           ].join("\n")
           return {
             title,

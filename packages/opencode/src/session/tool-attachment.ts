@@ -26,6 +26,12 @@ const OPENAI_AUDIO_MIMES = new Set([
   "audio/x-m4a",
   "audio/ogg",
 ])
+// The formats the MiMo video API documents (MP4, MOV, AVI, WMV). The patched
+// openai-compatible adapter serializes ANY video/* as `video_url`
+// (patches/@ai-sdk%2Fopenai-compatible@2.0.41.patch), so this allowlist is
+// what keeps e.g. video/webm from being sent only to fail server-side.
+// Mirrors OPENAI_VIDEO_MIMES in src/provider/capability-registry.ts.
+const OPENAI_VIDEO_MIMES = new Set(["video/mp4", "video/quicktime", "video/x-msvideo", "video/x-ms-wmv"])
 const BEDROCK_TEXT_MIMES = new Set(["text/csv", "text/html", "text/plain", "text/markdown"])
 const OPENAI_CHAT_PACKAGES = new Set(["@ai-sdk/openai-compatible"])
 const ANTHROPIC_PACKAGES = new Set(["@ai-sdk/anthropic", "@ai-sdk/google-vertex/anthropic"])
@@ -67,9 +73,12 @@ function providerAcceptsSynthetic(model: Provider.Model, attachment: ToolAttachm
     return GOOGLE_PACKAGES.has(npm)
   }
   // The patched openai-compatible chat adapter serializes inline video as a
-  // `video_url` data URL (patches/@ai-sdk%2Fopenai-compatible@2.0.41.patch).
+  // `video_url` data URL (patches/@ai-sdk%2Fopenai-compatible@2.0.41.patch),
+  // narrowed here to the formats the MiMo video API accepts.
   if (mime.startsWith("video/")) {
-    return isInlineAttachment(attachment) && (GOOGLE_PACKAGES.has(npm) || OPENAI_CHAT_PACKAGES.has(npm))
+    if (!isInlineAttachment(attachment)) return false
+    if (OPENAI_CHAT_PACKAGES.has(npm)) return OPENAI_VIDEO_MIMES.has(mime)
+    return GOOGLE_PACKAGES.has(npm)
   }
   if (mime.startsWith("text/")) {
     if (!isInlineAttachment(attachment)) return false

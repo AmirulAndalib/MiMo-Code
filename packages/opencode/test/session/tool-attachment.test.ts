@@ -71,6 +71,15 @@ describe("session tool attachment routing", () => {
     expect(routeToolAttachment({ model, attachment: attachment("audio/x-flac"), allowNative: true })).toBe("synthetic")
     expect(routeToolAttachment({ model, attachment: attachment("audio/aac"), allowNative: true })).toBe("placeholder")
     expect(routeToolAttachment({ model, attachment: attachment("video/mp4"), allowNative: true })).toBe("synthetic")
+    expect(routeToolAttachment({ model, attachment: attachment("video/quicktime"), allowNative: true })).toBe(
+      "synthetic",
+    )
+    // The patch would serialize any video/* as video_url, but the MiMo video
+    // API only takes mp4/mov/avi/wmv, so the rest never leave as attachments.
+    expect(routeToolAttachment({ model, attachment: attachment("video/webm"), allowNative: true })).toBe("placeholder")
+    expect(routeToolAttachment({ model, attachment: attachment("video/x-matroska"), allowNative: true })).toBe(
+      "placeholder",
+    )
     expect(
       routeToolAttachment({
         model,

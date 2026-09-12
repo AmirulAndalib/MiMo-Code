@@ -62,8 +62,10 @@ export function normalizeToolResult(result: CallToolResult): NormalizedToolResul
   const fit = (label: string, mime: string, base64: string) => {
     const size = base64ByteSize(base64)
     // Audio/video travel as an inline data URL, and the provider bounds the
-    // encoded string rather than the decoded bytes (see MAX_MEDIA_BASE64_BYTES).
-    if ((isAudioAttachment(mime) || isVideoAttachment(mime)) && base64.length > MAX_MEDIA_BASE64_BYTES) {
+    // encoded string rather than the decoded bytes (see MAX_MEDIA_BASE64_BYTES),
+    // so they never enter classifyAttachment.
+    if (isAudioAttachment(mime) || isVideoAttachment(mime)) {
+      if (base64.length <= MAX_MEDIA_BASE64_BYTES) return { mime, base64 }
       text.push(oversizedMediaNotice({ label, size, hint: "It was dropped." }))
       return undefined
     }

@@ -67,6 +67,8 @@ export function sniffAttachmentMime(bytes: Uint8Array, fallback: string) {
 //             and recompress under the limit, reject only if that fails
 //   reject  — anything else over the limit (non-image, or an image so large
 //             that recompressing it is not worth attempting)
+// Audio and video never enter this gate: the provider bounds their ENCODED
+// size, so they are checked with fitsMediaBase64 / MAX_MEDIA_BASE64_BYTES only.
 
 // Decoded byte count of raw base64, O(1) — no decoding needed to classify.
 export function base64ByteSize(base64: string) {
