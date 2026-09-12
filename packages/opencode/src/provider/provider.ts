@@ -1128,6 +1128,19 @@ function cost(c: ModelsDev.Model["cost"]): Model["cost"] {
   return result
 }
 
+const OPENAI_COMPATIBLE_NPM = "@ai-sdk/openai-compatible"
+
+// MiMo models (and the `mimo-auto` smart alias) only speak the OpenAI-compatible Chat
+// Completions API. Whatever npm a catalog entry or mimocode.json declares for such an
+// id, the model is pinned to @ai-sdk/openai-compatible.
+export function isMimoOrSmartModel(id: string) {
+  return /(^|[/_-])mimo(?:-|$)/i.test(id) || id === "mimo-auto"
+}
+
+function resolveModelNpm(npm: string, ...ids: string[]) {
+  return ids.some(isMimoOrSmartModel) ? OPENAI_COMPATIBLE_NPM : npm
+}
+
 function fromModelsDevModel(provider: ModelsDev.Provider, model: ModelsDev.Model): Model {
   const base: Model = {
     id: ModelID.make(model.id),
@@ -1137,7 +1150,7 @@ function fromModelsDevModel(provider: ModelsDev.Provider, model: ModelsDev.Model
     api: {
       id: model.id,
       url: model.provider?.api ?? provider.api ?? "",
-      npm: model.provider?.npm ?? provider.npm ?? "@ai-sdk/openai-compatible",
+      npm: resolveModelNpm(model.provider?.npm ?? provider.npm ?? OPENAI_COMPATIBLE_NPM, model.id),
     },
     status: model.status ?? "active",
     headers: {},
@@ -1297,12 +1310,15 @@ const layer: Layer.Layer<
           for (const [modelID, model] of Object.entries(provider.models ?? {})) {
             const existingModel = parsed.models[model.id ?? modelID]
             const apiID = model.id ?? existingModel?.api.id ?? modelID
-            const apiNpm =
+            const apiNpm = resolveModelNpm(
               model.provider?.npm ??
-              provider.npm ??
-              existingModel?.api.npm ??
-              modelsDev[providerID]?.npm ??
-              "@ai-sdk/openai-compatible"
+                provider.npm ??
+                existingModel?.api.npm ??
+                modelsDev[providerID]?.npm ??
+                OPENAI_COMPATIBLE_NPM,
+              modelID,
+              apiID,
+            )
             const name = iife(() => {
               if (model.name) return model.name
               if (model.id && model.id !== modelID) return modelID
@@ -1343,7 +1359,7 @@ const layer: Layer.Layer<
                 interleaved:
                   model.interleaved ??
                   existingModel?.capabilities.interleaved ??
-                  (!existingModel && apiNpm === "@ai-sdk/openai-compatible" && apiID.includes("deepseek")
+                  (!existingModel && apiNpm === OPENAI_COMPATIBLE_NPM && apiID.includes("deepseek")
                     ? { field: "reasoning_content" }
                     : false),
               },
