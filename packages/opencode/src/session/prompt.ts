@@ -1,5 +1,4 @@
 import { HostModelTransport } from "../provider/host-transport"
-import type { NamedTool } from "@/tool/names"
 import path from "path"
 import os from "os"
 import z from "zod"
@@ -113,6 +112,7 @@ import { MCP } from "../mcp"
 import { normalizeToolResult } from "../mcp/tool-result"
 import { LSP } from "../lsp"
 import { Flag } from "../flag/flag"
+import { createToolCallDuplicateGuard, rejectToolCallDuplicate } from "./toolcall-duplicate"
 import { ulid } from "ulid"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import * as CrossSpawnSpawner from "@/effect/cross-spawn-spawner"
@@ -1749,12 +1749,15 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       // Share the step's gate with processor cleanup so cancellation reasons
       // survive an early stream stop, including a rejected permission request.
       const gate = input.processor.toolGate
-      const tools: Record<string, NamedTool> = {}
+      const tools: Record<string, AITool> = {}
       const activeTools = new Set<string>()
       const loadedMcpTools = new Set<string>()
       const execMcpTools: Record<string, AITool> = {}
       const mcpSearchEntries: McpToolSearchEntry[] = []
       const mcpCatalog = { current: createMcpToolSearchCatalog([]) }
+      // Same-step exact repeats. First occurrence runs; later identical calls
+      // are rejected without executing and without closing the batch gate.
+      const claimToolSignature = createToolCallDuplicateGuard()
       // exec's request-scoped MCP view. Holder object (same pattern as
       // mcpCatalog above): referenced by the context() closure below, filled
       // at the end of this pass once activeTools is settled. Travels through
@@ -1899,6 +1902,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           description: item.description,
           inputSchema: jsonSchema(schema),
           execute(args, options) {
+            if (!claimToolSignature(item.id, args)) return rejectToolCallDuplicate()
             // Invalid arguments never receive the read/search failure exemption.
             const gateTool =
               PARALLEL_READONLY_TOOLS.has(item.id) && !item.parameters.safeParse(args).success ? "invalid" : item.id
@@ -2015,7 +2019,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             )
           },
         })
-        tools[item.id].modelName = item.modelName
         if (item.id !== MCP_TOOL_SEARCH_ID && (!useGPTTools || GPT_TOP_LEVEL_TOOLS.has(item.id))) {
           activeTools.add(item.id)
         }
@@ -2059,8 +2062,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           args: Parameters<typeof execute>[0],
           opts: Parameters<typeof execute>[1],
           modelFacing: boolean,
-        ) =>
-          run.promise(
+        ) => {
+          if (modelFacing && !claimToolSignature(key, args)) return rejectToolCallDuplicate()
+          return run.promise(
             Effect.gen(function* () {
               const startTs = Date.now()
               const callID = opts?.toolCallId ?? "?"
@@ -2222,6 +2226,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               modelFacing ? gate.run(key, opts?.toolCallId ?? "?", body, { signal: opts.abortSignal }) : body,
             ),
           )
+        }
         item.execute = (args, opts) => executeMcp(args, opts, true)
         tools[key] = item
         if (searchable && input.model.capabilities.toolcall) {
