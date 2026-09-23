@@ -27,7 +27,7 @@ Model-facing `actor spawn`/`run` advertised `context: none|state|full`. `context
 - Shell parser rejects `--context` / `--context=` after the three positionals with a teachable flag error (system-only message).
 - Execute always calls `Actor.spawn` with `context: "none"`. No checkpoint-summary injection from the tool path.
 - System/runtime callers that already pass `forkContext` (checkpoint-writer, session peer) are unchanged.
-- Tool copy (`actor.txt`, `actor.shell.txt`, `actor.checkpoint.txt`) no longer teaches a model-facing context/fork parameter.
+- Tool copy (`actor.txt`, `actor.checkpoint.txt`) no longer teaches a model-facing context/fork parameter.
 
 ## [S3] Out of Scope
 

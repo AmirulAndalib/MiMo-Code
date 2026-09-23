@@ -228,22 +228,6 @@ const InfoSchema = Schema.Struct({
   layout: Schema.optional(ConfigLayout.Layout).annotate({ description: "@deprecated Always uses stretch layout." }),
   permission: Schema.optional(PermissionRef),
   tools: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)),
-  tool: Schema.optional(
-    Schema.Struct({
-      invocation_style: Schema.optional(Schema.Literals(["json", "shell"])).annotate({
-        description:
-          "Default invocation style for all tools. 'json' (default) exposes the original Zod schema; 'shell' exposes a single `script` parameter and uses the tool's shell.parse mapping.",
-      }),
-      invocation_style_by_tool: Schema.optional(
-        Schema.Record(Schema.String, Schema.Literals(["json", "shell"])),
-      ).annotate({
-        description:
-          "Per-tool override of invocation_style. Keys are tool IDs. A tool without a `shell` field falls back to JSON regardless of this setting.",
-      }),
-    }),
-  ).annotate({
-    description: "Tool invocation style configuration (JSON vs shell-style).",
-  }),
   enterprise: Schema.optional(
     Schema.Struct({
       url: Schema.optional(Schema.String).annotate({ description: "Enterprise URL" }),

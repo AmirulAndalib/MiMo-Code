@@ -159,7 +159,6 @@ import { EffectBridge } from "@/effect"
 import { Team } from "@/team"
 import { ActorRegistry } from "@/actor/registry"
 import { Metrics } from "@/metrics"
-import { resolveInvocationStyle, type ToolStyleConfig } from "../tool/invocation-style"
 import { ToolResultError } from "../tool/result-error"
 import { errorMessage } from "../util/error"
 import { RecoverableError } from "../tool/recoverable"
@@ -180,20 +179,15 @@ import { SessionPrefixSnapshot } from "./prefix-snapshot"
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
 
-// Recall-reminder hints, rendered in each tool's configured invocation style so
-// shell-mode sessions never see a JSON-shaped example (which primes models to
-// emit JSON and crash the shell parser). `memory` has no shell form, so it is
-// always JSON. `hasActor` false drops the actor line for an agent the tool is
-// masked out for. Exported for unit testing.
-export function recallHintLines(toolCfg: ToolStyleConfig | undefined, hasActor = true): string[] {
-  const taskHint =
-    resolveInvocationStyle(toolCfg, "task") === "shell" ? "- task list" : `- task({ operation: "list" })`
-  const actorHint =
-    resolveInvocationStyle(toolCfg, "actor") === "shell"
-      ? "- actor status <actor_id>"
-      : `- actor({ operation: "status", actor_id: "<id>" })`
-  // memory has no shell form (no shell.parse) → always JSON.
-  return [`- memory({ operation: "search", query: "<keyword>" })`, taskHint, ...(hasActor ? [actorHint] : [])]
+// Recall-reminder hints, using each tool's JSON invocation shape. `hasActor`
+// false drops the actor line for an agent the tool is masked out for. Exported
+// for unit testing.
+export function recallHintLines(hasActor = true): string[] {
+  return [
+    `- memory({ operation: "search", query: "<keyword>" })`,
+    `- task({ operation: "list" })`,
+    ...(hasActor ? [`- actor({ operation: "status", actor_id: "<id>" })`] : []),
+  ]
 }
 
 // Stable substring markers for user-side synthetic reminders that must be
@@ -4611,10 +4605,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               .pipe(Effect.catch(() => Effect.succeed(false)))
             if (hasRecallTarget) {
               const sessMemDir = path.join(Global.Path.data, "memory", "sessions", sessionID)
-              const hints = recallHintLines(
-                (yield* config.get()).tool,
-                hasActorTool(yield* agents.get(lastUser.agent)),
-              )
+              const hints = recallHintLines(hasActorTool(yield* agents.get(lastUser.agent)))
               yield* ensurePersistedUserSynthetic({
                 message: lastUserMsgForRecall,
                 marker: RECALL_REMINDER_MARKER,

@@ -1,11 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import ACTOR_DESCRIPTION from "../../src/tool/actor.txt"
 import ACTOR_CHECKPOINT from "../../src/tool/actor.checkpoint.txt"
-import ACTOR_SHELL from "../../src/tool/actor.shell.txt"
 import MEMORY_DESCRIPTION from "../../src/tool/memory.txt"
 import MEMORY_CHECKPOINT from "../../src/tool/memory.checkpoint.txt"
 import TASK_DESCRIPTION from "../../src/tool/task.txt"
-import TASK_SHELL from "../../src/tool/task.shell.txt"
 import { withCheckpointClause, withCheckpointDescription } from "../../src/tool/checkpoint-description"
 
 const original = process.env.MIMOCODE_DISABLE_CHECKPOINT
@@ -20,10 +18,8 @@ afterEach(() => set(original))
 describe("tool schema checkpoint copy is composed, not always-on", () => {
   test("base actor/memory/task descriptions do not mention checkpoint", () => {
     expect(ACTOR_DESCRIPTION).not.toMatch(/checkpoint/i)
-    expect(ACTOR_SHELL).not.toMatch(/checkpoint/i)
     expect(MEMORY_DESCRIPTION).not.toMatch(/checkpoint/i)
     expect(TASK_DESCRIPTION).not.toMatch(/checkpoint/i)
-    expect(TASK_SHELL).not.toMatch(/checkpoint/i)
   })
 
   test("checkpoint fragments teach the disabled lifecycle", () => {
@@ -64,8 +60,5 @@ describe("tool schema checkpoint copy is composed, not always-on", () => {
     expect(ACTOR_DESCRIPTION).not.toContain('context="state"')
     expect(ACTOR_DESCRIPTION).not.toMatch(/context inheritance/i)
     expect(ACTOR_DESCRIPTION).not.toContain("## Context")
-    expect(ACTOR_SHELL).not.toContain("--context")
-    expect(ACTOR_SHELL).not.toMatch(/context inheritance/i)
-    expect(ACTOR_SHELL).not.toMatch(/system-only/i)
   })
 })

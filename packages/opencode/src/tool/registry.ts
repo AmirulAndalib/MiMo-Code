@@ -63,9 +63,7 @@ import { SessionCheckpoint } from "@/session/checkpoint"
 import { TaskRegistry } from "@/task/registry"
 import { defaultLayer as SchedulerDefaultLayer } from "@/cron/scheduler"
 import { Auth } from "@/auth"
-import { shellWrap } from "./shell-wrap"
 import * as BashInteractive from "./bash-interactive"
-import { resolveInvocationStyle } from "./invocation-style"
 import { BuiltinWorkflow } from "@/workflow/builtin"
 import { ToolScriptTool, renderToolScriptDeclarations } from "./tool-script"
 import { GPT_TOP_LEVEL_TOOLS, TOOL_SCRIPT_EXCLUDED, toolScriptRegistry } from "./tool-script-ref"
@@ -92,13 +90,7 @@ export function renderWorkflowCatalog(): string {
   ].join("\n")
 }
 
-const fallbackWarned = new Set<string>()
 const reservedConflictWarned = new Set<string>()
-function warnShellFallbackOnce(id: string) {
-  if (fallbackWarned.has(id)) return
-  fallbackWarned.add(id)
-  log.warn(`tool '${id}' configured with invocation_style='shell' but has no shell field; falling back to JSON`)
-}
 
 type ActorDef = Tool.InferDef<typeof ActorTool>
 type ReadDef = Tool.InferDef<typeof ReadTool>
@@ -437,9 +429,6 @@ export const layer = Layer.effect(
         ? availableTools.filtered.filter((tool) => GPT_TOP_LEVEL_TOOLS.has(tool.id))
         : availableTools.filtered
 
-      const cfg = yield* config.get()
-      const resolveStyle = (toolId: string): "json" | "shell" => resolveInvocationStyle(cfg.tool, toolId)
-
       return yield* Effect.forEach(
         selected,
         Effect.fnUntraced(function* (tool: Tool.Def) {
@@ -449,17 +438,10 @@ export const layer = Layer.effect(
             parameters: tool.parameters,
           }
           yield* plugin.trigger("tool.definition", { toolID: tool.id }, output)
-          const style = resolveStyle(tool.id)
-          const useShell = style === "shell" && tool.shell !== undefined
-          if (style === "shell" && !tool.shell) {
-            warnShellFallbackOnce(tool.id)
-          }
-          const effective: Tool.Def = useShell ? shellWrap(tool) : tool
-          const description = useShell ? tool.shell!.description : output.description
           return {
             id: tool.id,
             description: [
-              description,
+              output.description,
               tool.id === ReadTool.id ? yield* describeReadMedia(input) : undefined,
               tool.id === ActorTool.id ? yield* describeTask(input.agent) : undefined,
               tool.id === WorkflowTool.id ? yield* describeWorkflow() : undefined,
@@ -467,9 +449,9 @@ export const layer = Layer.effect(
             ]
               .filter(Boolean)
               .join("\n"),
-            parameters: useShell ? effective.parameters : output.parameters,
-            execute: effective.execute,
-            formatValidationError: effective.formatValidationError,
+            parameters: output.parameters,
+            execute: tool.execute,
+            formatValidationError: tool.formatValidationError,
           }
         }),
         { concurrency: "unbounded" },

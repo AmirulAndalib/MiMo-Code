@@ -714,7 +714,7 @@ export const layer = Layer.effect(
                 const cancelled = Cause.hasInterruptsOnly(cause)
                 const error = Cause.pretty(cause)
                 // Recover the classification runAgentLoop attached. Squash is the
-                // established idiom here (see session/prompt.ts, tool/shell-wrap.ts).
+                // established idiom here (see session/prompt.ts).
                 // A failure raised anywhere else carries none, and the field stays
                 // absent rather than being guessed from `error`.
                 const squashed = Cause.squash(cause)

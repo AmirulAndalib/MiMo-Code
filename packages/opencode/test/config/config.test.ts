@@ -2626,35 +2626,6 @@ test("parseManagedPlist handles empty config", async () => {
   expect(config.$schema).toBe("https://opencode.ai/config.json")
 })
 
-describe("tool config inline struct", () => {
-  test("accepts invocation_style and invocation_style_by_tool", () => {
-    const config = Config.Info.parse({
-      $schema: "https://opencode.ai/config.json",
-      tool: { invocation_style: "shell", invocation_style_by_tool: { task: "shell", read: "json" } },
-    })
-    expect(config.tool?.invocation_style).toBe("shell")
-    expect(config.tool?.invocation_style_by_tool).toEqual({ task: "shell", read: "json" })
-  })
-
-  test("accepts empty tool object (all fields optional)", () => {
-    const config = Config.Info.parse({
-      $schema: "https://opencode.ai/config.json",
-      tool: {},
-    })
-    expect(config.tool?.invocation_style).toBeUndefined()
-    expect(config.tool?.invocation_style_by_tool).toBeUndefined()
-  })
-
-  test("rejects unknown invocation_style value", () => {
-    expect(() =>
-      Config.Info.parse({
-        $schema: "https://opencode.ai/config.json",
-        tool: { invocation_style: "verb" },
-      }),
-    ).toThrow()
-  })
-})
-
 test("ignores removed history kinds in existing configuration", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {

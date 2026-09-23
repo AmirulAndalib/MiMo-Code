@@ -9628,144 +9628,6 @@
         },
         "required": ["type", "properties"]
       },
-      "Event.tui.prompt.append": {
-        "type": "object",
-        "properties": {
-          "type": {
-            "type": "string",
-            "const": "tui.prompt.append"
-          },
-          "properties": {
-            "type": "object",
-            "properties": {
-              "text": {
-                "type": "string"
-              }
-            },
-            "required": ["text"]
-          }
-        },
-        "required": ["type", "properties"]
-      },
-      "Event.tui.command.execute": {
-        "type": "object",
-        "properties": {
-          "type": {
-            "type": "string",
-            "const": "tui.command.execute"
-          },
-          "properties": {
-            "type": "object",
-            "properties": {
-              "command": {
-                "anyOf": [
-                  {
-                    "type": "string",
-                    "enum": [
-                      "session.list",
-                      "session.new",
-                      "session.share",
-                      "session.interrupt",
-                      "session.compact",
-                      "session.page.up",
-                      "session.page.down",
-                      "session.line.up",
-                      "session.line.down",
-                      "session.half.page.up",
-                      "session.half.page.down",
-                      "session.first",
-                      "session.last",
-                      "prompt.clear",
-                      "prompt.submit",
-                      "agent.cycle"
-                    ]
-                  },
-                  {
-                    "type": "string"
-                  }
-                ]
-              }
-            },
-            "required": ["command"]
-          }
-        },
-        "required": ["type", "properties"]
-      },
-      "Event.tui.toast.show": {
-        "type": "object",
-        "properties": {
-          "type": {
-            "type": "string",
-            "const": "tui.toast.show"
-          },
-          "properties": {
-            "type": "object",
-            "properties": {
-              "title": {
-                "type": "string"
-              },
-              "message": {
-                "type": "string"
-              },
-              "variant": {
-                "type": "string",
-                "enum": ["info", "success", "warning", "error"]
-              },
-              "duration": {
-                "description": "Duration in milliseconds",
-                "default": 5000,
-                "type": "number"
-              }
-            },
-            "required": ["message", "variant"]
-          }
-        },
-        "required": ["type", "properties"]
-      },
-      "Event.tui.session.select": {
-        "type": "object",
-        "properties": {
-          "type": {
-            "type": "string",
-            "const": "tui.session.select"
-          },
-          "properties": {
-            "type": "object",
-            "properties": {
-              "sessionID": {
-                "description": "Session ID to navigate to",
-                "type": "string",
-                "pattern": "^ses.*"
-              }
-            },
-            "required": ["sessionID"]
-          }
-        },
-        "required": ["type", "properties"]
-      },
-      "Event.tui.instructions.loaded": {
-        "type": "object",
-        "properties": {
-          "type": {
-            "type": "string",
-            "const": "tui.instructions.loaded"
-          },
-          "properties": {
-            "type": "object",
-            "properties": {
-              "files": {
-                "description": "Display labels of loaded instruction files: worktree-relative path, ~-path, or absolute",
-                "type": "array",
-                "items": {
-                  "type": "string"
-                }
-              }
-            },
-            "required": ["files"]
-          }
-        },
-        "required": ["type", "properties"]
-      },
       "Event.actor.registered": {
         "type": "object",
         "properties": {
@@ -10116,6 +9978,144 @@
               }
             },
             "required": ["sessionID", "task", "kind"]
+          }
+        },
+        "required": ["type", "properties"]
+      },
+      "Event.tui.prompt.append": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "tui.prompt.append"
+          },
+          "properties": {
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": ["text"]
+          }
+        },
+        "required": ["type", "properties"]
+      },
+      "Event.tui.command.execute": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "tui.command.execute"
+          },
+          "properties": {
+            "type": "object",
+            "properties": {
+              "command": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "session.list",
+                      "session.new",
+                      "session.share",
+                      "session.interrupt",
+                      "session.compact",
+                      "session.page.up",
+                      "session.page.down",
+                      "session.line.up",
+                      "session.line.down",
+                      "session.half.page.up",
+                      "session.half.page.down",
+                      "session.first",
+                      "session.last",
+                      "prompt.clear",
+                      "prompt.submit",
+                      "agent.cycle"
+                    ]
+                  },
+                  {
+                    "type": "string"
+                  }
+                ]
+              }
+            },
+            "required": ["command"]
+          }
+        },
+        "required": ["type", "properties"]
+      },
+      "Event.tui.toast.show": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "tui.toast.show"
+          },
+          "properties": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "variant": {
+                "type": "string",
+                "enum": ["info", "success", "warning", "error"]
+              },
+              "duration": {
+                "description": "Duration in milliseconds",
+                "default": 5000,
+                "type": "number"
+              }
+            },
+            "required": ["message", "variant"]
+          }
+        },
+        "required": ["type", "properties"]
+      },
+      "Event.tui.session.select": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "tui.session.select"
+          },
+          "properties": {
+            "type": "object",
+            "properties": {
+              "sessionID": {
+                "description": "Session ID to navigate to",
+                "type": "string",
+                "pattern": "^ses.*"
+              }
+            },
+            "required": ["sessionID"]
+          }
+        },
+        "required": ["type", "properties"]
+      },
+      "Event.tui.instructions.loaded": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "tui.instructions.loaded"
+          },
+          "properties": {
+            "type": "object",
+            "properties": {
+              "files": {
+                "description": "Display labels of loaded instruction files: worktree-relative path, ~-path, or absolute",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": ["files"]
           }
         },
         "required": ["type", "properties"]
@@ -11853,25 +11853,20 @@
         },
         "required": ["type", "properties"]
       },
-      "Event.session.compacted": {
+      "Event.vcs.branch.updated": {
         "type": "object",
         "properties": {
           "type": {
             "type": "string",
-            "const": "session.compacted"
+            "const": "vcs.branch.updated"
           },
           "properties": {
             "type": "object",
             "properties": {
-              "sessionID": {
-                "type": "string",
-                "pattern": "^ses.*"
-              },
-              "agentID": {
+              "branch": {
                 "type": "string"
               }
-            },
-            "required": ["sessionID"]
+            }
           }
         },
         "required": ["type", "properties"]
@@ -11943,77 +11938,6 @@
               }
             },
             "required": ["name", "sessionID", "arguments", "messageID"]
-          }
-        },
-        "required": ["type", "properties"]
-      },
-      "Event.session.goal": {
-        "type": "object",
-        "properties": {
-          "type": {
-            "type": "string",
-            "const": "session.goal"
-          },
-          "properties": {
-            "type": "object",
-            "properties": {
-              "sessionID": {
-                "type": "string",
-                "pattern": "^ses.*"
-              },
-              "goal": {
-                "type": "object",
-                "properties": {
-                  "condition": {
-                    "type": "string"
-                  }
-                },
-                "required": ["condition"]
-              },
-              "lastVerdict": {
-                "type": "object",
-                "properties": {
-                  "ok": {
-                    "type": "boolean"
-                  },
-                  "impossible": {
-                    "type": "boolean"
-                  },
-                  "reason": {
-                    "type": "string"
-                  },
-                  "attempt": {
-                    "type": "number"
-                  },
-                  "messageID": {
-                    "type": "string"
-                  },
-                  "error": {
-                    "type": "boolean"
-                  }
-                },
-                "required": ["ok", "reason", "attempt"]
-              }
-            },
-            "required": ["sessionID"]
-          }
-        },
-        "required": ["type", "properties"]
-      },
-      "Event.vcs.branch.updated": {
-        "type": "object",
-        "properties": {
-          "type": {
-            "type": "string",
-            "const": "vcs.branch.updated"
-          },
-          "properties": {
-            "type": "object",
-            "properties": {
-              "branch": {
-                "type": "string"
-              }
-            }
           }
         },
         "required": ["type", "properties"]
@@ -12095,6 +12019,82 @@
               }
             },
             "required": ["sessionID", "todos"]
+          }
+        },
+        "required": ["type", "properties"]
+      },
+      "Event.session.goal": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "session.goal"
+          },
+          "properties": {
+            "type": "object",
+            "properties": {
+              "sessionID": {
+                "type": "string",
+                "pattern": "^ses.*"
+              },
+              "goal": {
+                "type": "object",
+                "properties": {
+                  "condition": {
+                    "type": "string"
+                  }
+                },
+                "required": ["condition"]
+              },
+              "lastVerdict": {
+                "type": "object",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  },
+                  "impossible": {
+                    "type": "boolean"
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "attempt": {
+                    "type": "number"
+                  },
+                  "messageID": {
+                    "type": "string"
+                  },
+                  "error": {
+                    "type": "boolean"
+                  }
+                },
+                "required": ["ok", "reason", "attempt"]
+              }
+            },
+            "required": ["sessionID"]
+          }
+        },
+        "required": ["type", "properties"]
+      },
+      "Event.session.compacted": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "session.compacted"
+          },
+          "properties": {
+            "type": "object",
+            "properties": {
+              "sessionID": {
+                "type": "string",
+                "pattern": "^ses.*"
+              },
+              "agentID": {
+                "type": "string"
+              }
+            },
+            "required": ["sessionID"]
           }
         },
         "required": ["type", "properties"]
@@ -14502,21 +14502,6 @@
                 "$ref": "#/components/schemas/Event.global.disposed"
               },
               {
-                "$ref": "#/components/schemas/Event.tui.prompt.append"
-              },
-              {
-                "$ref": "#/components/schemas/Event.tui.command.execute"
-              },
-              {
-                "$ref": "#/components/schemas/Event.tui.toast.show"
-              },
-              {
-                "$ref": "#/components/schemas/Event.tui.session.select"
-              },
-              {
-                "$ref": "#/components/schemas/Event.tui.instructions.loaded"
-              },
-              {
                 "$ref": "#/components/schemas/Event.actor.registered"
               },
               {
@@ -14539,6 +14524,21 @@
               },
               {
                 "$ref": "#/components/schemas/Event.task.updated"
+              },
+              {
+                "$ref": "#/components/schemas/Event.tui.prompt.append"
+              },
+              {
+                "$ref": "#/components/schemas/Event.tui.command.execute"
+              },
+              {
+                "$ref": "#/components/schemas/Event.tui.toast.show"
+              },
+              {
+                "$ref": "#/components/schemas/Event.tui.session.select"
+              },
+              {
+                "$ref": "#/components/schemas/Event.tui.instructions.loaded"
               },
               {
                 "$ref": "#/components/schemas/Event.metrics.model_call"
@@ -14655,7 +14655,7 @@
                 "$ref": "#/components/schemas/Event.session.idle"
               },
               {
-                "$ref": "#/components/schemas/Event.session.compacted"
+                "$ref": "#/components/schemas/Event.vcs.branch.updated"
               },
               {
                 "$ref": "#/components/schemas/Event.mcp.tools.changed"
@@ -14667,12 +14667,6 @@
                 "$ref": "#/components/schemas/Event.command.executed"
               },
               {
-                "$ref": "#/components/schemas/Event.session.goal"
-              },
-              {
-                "$ref": "#/components/schemas/Event.vcs.branch.updated"
-              },
-              {
                 "$ref": "#/components/schemas/Event.worktree.ready"
               },
               {
@@ -14680,6 +14674,12 @@
               },
               {
                 "$ref": "#/components/schemas/Event.todo.updated"
+              },
+              {
+                "$ref": "#/components/schemas/Event.session.goal"
+              },
+              {
+                "$ref": "#/components/schemas/Event.session.compacted"
               },
               {
                 "$ref": "#/components/schemas/Event.pty.created"
@@ -16472,28 +16472,6 @@
               "type": "boolean"
             }
           },
-          "tool": {
-            "description": "Tool invocation style configuration (JSON vs shell-style).",
-            "type": "object",
-            "properties": {
-              "invocation_style": {
-                "description": "Default invocation style for all tools. 'json' (default) exposes the original Zod schema; 'shell' exposes a single `script` parameter and uses the tool's shell.parse mapping.",
-                "type": "string",
-                "enum": ["json", "shell"]
-              },
-              "invocation_style_by_tool": {
-                "description": "Per-tool override of invocation_style. Keys are tool IDs. A tool without a `shell` field falls back to JSON regardless of this setting.",
-                "type": "object",
-                "propertyNames": {
-                  "type": "string"
-                },
-                "additionalProperties": {
-                  "type": "string",
-                  "enum": ["json", "shell"]
-                }
-              }
-            }
-          },
           "enterprise": {
             "type": "object",
             "properties": {
@@ -18049,21 +18027,6 @@
             "$ref": "#/components/schemas/Event.global.disposed"
           },
           {
-            "$ref": "#/components/schemas/Event.tui.prompt.append"
-          },
-          {
-            "$ref": "#/components/schemas/Event.tui.command.execute"
-          },
-          {
-            "$ref": "#/components/schemas/Event.tui.toast.show"
-          },
-          {
-            "$ref": "#/components/schemas/Event.tui.session.select"
-          },
-          {
-            "$ref": "#/components/schemas/Event.tui.instructions.loaded"
-          },
-          {
             "$ref": "#/components/schemas/Event.actor.registered"
           },
           {
@@ -18086,6 +18049,21 @@
           },
           {
             "$ref": "#/components/schemas/Event.task.updated"
+          },
+          {
+            "$ref": "#/components/schemas/Event.tui.prompt.append"
+          },
+          {
+            "$ref": "#/components/schemas/Event.tui.command.execute"
+          },
+          {
+            "$ref": "#/components/schemas/Event.tui.toast.show"
+          },
+          {
+            "$ref": "#/components/schemas/Event.tui.session.select"
+          },
+          {
+            "$ref": "#/components/schemas/Event.tui.instructions.loaded"
           },
           {
             "$ref": "#/components/schemas/Event.metrics.model_call"
@@ -18202,7 +18180,7 @@
             "$ref": "#/components/schemas/Event.session.idle"
           },
           {
-            "$ref": "#/components/schemas/Event.session.compacted"
+            "$ref": "#/components/schemas/Event.vcs.branch.updated"
           },
           {
             "$ref": "#/components/schemas/Event.mcp.tools.changed"
@@ -18214,12 +18192,6 @@
             "$ref": "#/components/schemas/Event.command.executed"
           },
           {
-            "$ref": "#/components/schemas/Event.session.goal"
-          },
-          {
-            "$ref": "#/components/schemas/Event.vcs.branch.updated"
-          },
-          {
             "$ref": "#/components/schemas/Event.worktree.ready"
           },
           {
@@ -18227,6 +18199,12 @@
           },
           {
             "$ref": "#/components/schemas/Event.todo.updated"
+          },
+          {
+            "$ref": "#/components/schemas/Event.session.goal"
+          },
+          {
+            "$ref": "#/components/schemas/Event.session.compacted"
           },
           {
             "$ref": "#/components/schemas/Event.pty.created"
