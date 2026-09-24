@@ -18,6 +18,7 @@ import { Database, NotFoundError, and, desc, eq, inArray, lt, or } from "@/stora
 import { MessageTable, PartTable, SessionTable } from "./session.sql"
 import { ProviderError } from "@/provider"
 import { errorMessage } from "@/util/error"
+import { HostErrorRegistry } from "@/error/host-registry"
 import { isMedia } from "@/util/media"
 import type { Provider } from "@/provider"
 import { ModelID, ProviderID } from "@/provider/schema"
@@ -41,20 +42,41 @@ interface FetchDecompressionError extends Error {
 }
 
 function causeMetadata(error: unknown): Record<string, string> | undefined {
+  if (error === null || typeof error !== "object") return undefined
+  const source = error as { cause?: unknown; errors?: unknown }
+  if (source.cause === undefined && !Array.isArray(source.errors)) return undefined
   const causeChain = ProviderError.summarizeCause(error)
-  return causeChain.length > 1 ? { causeChain: JSON.stringify(causeChain) } : undefined
+  const history = ProviderError.summarizeCause(error, { includeRetryHistory: true })
+  const retryHistory = JSON.stringify(history) !== JSON.stringify(causeChain) ? JSON.stringify(history) : undefined
+  const metadata = {
+    ...(causeChain.length > 0 ? { causeChain: JSON.stringify(causeChain) } : {}),
+    ...(retryHistory ? { retryHistory } : {}),
+  }
+  return Object.keys(metadata).length > 0 ? metadata : undefined
 }
 
 export const SYNTHETIC_ATTACHMENT_PROMPT = "Attached file(s) from tool result:"
 export { isMedia }
 
-export const OutputLengthError = NamedError.create("MessageOutputLengthError", z.object({}))
-export const AbortedError = NamedError.create("MessageAbortedError", z.object({ message: z.string() }))
+export const OutputLengthError = NamedError.create(
+  "MessageOutputLengthError",
+  z.object({
+    ...HostErrorRegistry.hostFieldShape,
+  }),
+)
+export const AbortedError = NamedError.create(
+  "MessageAbortedError",
+  z.object({
+    message: z.string(),
+    ...HostErrorRegistry.hostFieldShape,
+  }),
+)
 export const StructuredOutputError = NamedError.create(
   "StructuredOutputError",
   z.object({
     message: z.string(),
     retries: z.number(),
+    ...HostErrorRegistry.hostFieldShape,
   }),
 )
 export const AuthError = NamedError.create(
@@ -62,6 +84,7 @@ export const AuthError = NamedError.create(
   z.object({
     providerID: z.string(),
     message: z.string(),
+    ...HostErrorRegistry.hostFieldShape,
   }),
 )
 export const APIError = NamedError.create(
@@ -72,7 +95,7 @@ export const APIError = NamedError.create(
     isRetryable: z.boolean(),
     responseHeaders: z.record(z.string(), z.string()).optional(),
     responseBody: z.string().optional(),
-    metadata: z.record(z.string(), z.string()).optional(),
+    ...HostErrorRegistry.hostFieldShape,
   }),
 )
 export type APIError = z.infer<typeof APIError.Schema>
@@ -91,12 +114,28 @@ export function isAuthError(error: unknown): boolean {
 }
 export const ContextOverflowError = NamedError.create(
   "ContextOverflowError",
-  z.object({ message: z.string(), responseBody: z.string().optional() }),
+  z.object({
+    message: z.string(),
+    responseBody: z.string().optional(),
+    ...HostErrorRegistry.hostFieldShape,
+  }),
 )
-export const InvalidOutputError = NamedError.create("InvalidOutputError", z.object({ message: z.string() }))
-export const TextToolCallError = NamedError.create("TextToolCallError", z.object({ message: z.string() }))
-export const ContentFilterError = NamedError.create("ContentFilterError", z.object({ message: z.string() }))
-export const ModelError = NamedError.create("ModelError", z.object({ message: z.string() }))
+export const InvalidOutputError = NamedError.create(
+  "InvalidOutputError",
+  z.object({
+    message: z.string(),
+    ...HostErrorRegistry.hostFieldShape,
+  }),
+)
+export const TextToolCallError = NamedError.create("TextToolCallError", z.object({ message: z.string(), ...HostErrorRegistry.hostFieldShape }))
+export const ContentFilterError = NamedError.create(
+  "ContentFilterError",
+  z.object({
+    message: z.string(),
+    ...HostErrorRegistry.hostFieldShape,
+  }),
+)
+export const ModelError = NamedError.create("ModelError", z.object({ message: z.string(), ...HostErrorRegistry.hostFieldShape }))
 
 export const OutputFormatText = z
   .object({
@@ -1325,20 +1364,50 @@ function fromParsedStreamError(
   ).toObject()
 }
 
-export function fromError(
- e: unknown,
+type ErrorContext = { providerID: ProviderID; aborted?: boolean; allow404Retry?: boolean }
+
+export function fromError(e: unknown, ctx: ErrorContext): NonNullable<Assistant["error"]> {
+  return normalizeError(e, ctx, false)
+}
+
+export function fromLiveError(e: unknown, ctx: ErrorContext): NonNullable<Assistant["error"]> {
+  return normalizeError(e, ctx, true)
+}
+
+function normalizeError(e: unknown, ctx: ErrorContext, requireBinding: boolean): NonNullable<Assistant["error"]> {
+  HostErrorRegistry.inheritHostError(e, ctx)
+  const error = fromErrorCore(e, ctx)
+  const metadata = causeMetadata(e)
+  if (metadata) error.data.metadata = { ...error.data.metadata, ...metadata }
+  if (HostErrorRegistry.isSafetyTerminal(e) && !HostErrorRegistry.isSafetyTerminal(error)) {
+    error.data.metadata = { ...error.data.metadata, causeChain: JSON.stringify(ProviderError.summarizeCause(e)) }
+  }
+  return HostErrorRegistry.copyHostError(error, e, ctx, { requireBinding })
+}
+
+function fromErrorCore(
+  e: unknown,
   ctx: { providerID: ProviderID; aborted?: boolean; allow404Retry?: boolean },
+  original: unknown = e,
 ): NonNullable<Assistant["error"]> {
+  if (!ctx.aborted && !ProviderError.isAbortError(e)) {
+    const candidate = e instanceof NamedError ? e.toObject() : e
+    const hostClass = HostErrorRegistry.hostRetryClass(candidate)
+    const parsed = Assistant.shape.error.safeParse(hostClass && APIError.isInstance(candidate)
+      ? { ...candidate, data: { ...candidate.data, hostRetryClass: hostClass } }
+      : candidate)
+    if (parsed.success && parsed.data) return parsed.data
+  }
   switch (true) {
     case e instanceof DOMException && e.name === "AbortError":
-      return new AbortedError({ message: e.message }, { cause: e }).toObject()
+      return new AbortedError({ message: e.message }, { cause: original }).toObject()
     case ProviderError.isAbortError(e):
-      return new AbortedError({ message: errorMessage(e) }, { cause: e }).toObject()
+      return new AbortedError({ message: errorMessage(e) }, { cause: original }).toObject()
     // Session-level abort (user stop / cancel): any residual stream error — including
     // undici UND_ERR_ABORTED which is otherwise transport-retryable — is user abort.
     // Without this, stop is reclassified as network and auto-resume reopens the turn.
     case ctx.aborted === true:
-      return new AbortedError({ message: errorMessage(e) || "Aborted" }, { cause: e }).toObject()
+      return new AbortedError({ message: errorMessage(e) || "Aborted" }, { cause: original }).toObject()
     // The AI SDK wraps the real failure in AI_RetryError after exhausting its
     // own maxRetries. Unwrap to the underlying error (.lastError) so the
     // APICallError branch below can extract statusCode/isRetryable/responseBody.
@@ -1349,20 +1418,18 @@ export function fromError(
     case RetryError.isInstance(e): {
       const errors = Array.isArray(e.errors) ? e.errors : []
       const inner = e.lastError ?? errors[errors.length - 1]
-      if (inner !== undefined && inner !== e) return fromError(inner, ctx)
-      return new NamedError.Unknown({ message: e.message }, { cause: e }).toObject()
+      if (inner !== undefined && inner !== e) return fromErrorCore(inner, ctx, original)
+      return new NamedError.Unknown({ message: e.message }, { cause: original }).toObject()
     }
-    case OutputLengthError.isInstance(e):
-      return e
     case LoadAPIKeyError.isInstance(e):
       return new AuthError(
         {
           providerID: ctx.providerID,
           message: e.message,
         },
-        { cause: e },
+        { cause: original },
       ).toObject()
-    case e instanceof Error && ProviderError.isRetryableNetworkError(e): {
+    case e instanceof Error && !APICallError.isInstance(e) && !HostErrorRegistry.isTerminalError(e) && ProviderError.isRetryableNetworkError(e): {
       const code = ProviderError.networkErrorCode(e)
       const message =
         code === "ECONNRESET"
@@ -1373,19 +1440,20 @@ export function fromError(
       return new APIError(
         {
           message,
+          statusCode: ProviderError.summarizeCause(e)[0]?.statusCode,
           isRetryable: true,
           metadata: {
             ...(code ? { code } : {}),
             message: e.message,
-            ...causeMetadata(e),
+            ...causeMetadata(original),
           },
         },
-        { cause: e },
+        { cause: original },
       ).toObject()
     }
     case e instanceof Error && (e as FetchDecompressionError).code === "ZlibError":
       if (ctx.aborted) {
-        return new AbortedError({ message: e.message }, { cause: e }).toObject()
+        return new AbortedError({ message: e.message }, { cause: original }).toObject()
       }
       return new APIError(
         {
@@ -1394,10 +1462,10 @@ export function fromError(
           metadata: {
             code: (e as FetchDecompressionError).code,
             message: e.message,
-            ...causeMetadata(e),
+            ...causeMetadata(original),
           },
         },
-        { cause: e },
+        { cause: original },
       ).toObject()
     case APICallError.isInstance(e):
       const parsed = ProviderError.parseAPICallError({
@@ -1411,7 +1479,7 @@ export function fromError(
             message: parsed.message,
             responseBody: parsed.responseBody,
           },
-          { cause: e },
+          { cause: original },
         ).toObject()
       }
 
@@ -1423,11 +1491,11 @@ export function fromError(
           responseHeaders: parsed.responseHeaders,
           responseBody: parsed.responseBody,
           metadata: (() => {
-            const metadata = { ...parsed.metadata, ...causeMetadata(e) }
+            const metadata = { ...parsed.metadata, ...causeMetadata(original) }
             return Object.keys(metadata).length > 0 ? metadata : undefined
           })(),
         },
-        { cause: e },
+        { cause: original },
       ).toObject()
     // A TypeError (e.g. "j.map is not a function" from non-array content)
     // is a programming defect, not a transient API failure. Surface it as a
@@ -1435,13 +1503,14 @@ export function fromError(
     case e instanceof TypeError:
     case e instanceof Error: {
       const parsed = ProviderError.parseStreamError(e)
-      if (parsed) return fromParsedStreamError(parsed, e)
+      if (parsed) return fromParsedStreamError(parsed, original)
       const message = e instanceof TypeError ? `TypeError: ${errorMessage(e)}` : errorMessage(e)
       // Preserve HTTP status on plain Errors (mock SDK / undici shapes carry
       // `.status`). Dropping it collapses a 400 into UnknownError, which
       // SessionRetry then treats as uncatalogued and retries forever.
       const rawStatus =
-        (e as { statusCode?: unknown }).statusCode ?? (e as { status?: unknown }).status
+        (e as { statusCode?: unknown }).statusCode ?? (e as { status?: unknown }).status ??
+        (e as { response?: { status?: unknown } }).response?.status
       const statusCode =
         typeof rawStatus === "number" && Number.isFinite(rawStatus)
           ? rawStatus
@@ -1454,16 +1523,24 @@ export function fromError(
             message,
             statusCode,
             isRetryable: statusCode >= 500 && statusCode !== 501 && statusCode !== 505,
-            metadata: causeMetadata(e),
+            metadata: causeMetadata(original),
           },
-          { cause: e },
+          { cause: original },
         ).toObject()
       }
-      return new NamedError.Unknown({ message }, { cause: e }).toObject()
+      return new NamedError.Unknown({ message }, { cause: original }).toObject()
     }
     default: {
       const parsed = ProviderError.parseStreamError(e)
-      if (parsed) return fromParsedStreamError(parsed, e)
+      if (parsed) return fromParsedStreamError(parsed, original)
+      const response = HostErrorRegistry.boundAPIResponse(original, ctx)
+      const stream = response && ProviderError.parseStreamError(response.responseBody)
+      if (stream) return fromParsedStreamError(stream, original)
+      if (response) return new APIError({
+        message: errorMessage(e) || response.responseBody || "Provider API error",
+        isRetryable: false,
+        ...response,
+      }, { cause: original }).toObject()
       // 字符串直接用原文:JSON.stringify("Internal Server Error") 会多包一层引号,
       // 让 SessionRetry/desktop isOpaqueError 精确匹配失效,错误卡把带引号原文吐给用户。
       // 对象仍 stringify 保诊断;undefined/null 走 String()。
@@ -1471,7 +1548,7 @@ export function fromError(
         typeof e === "string"
           ? e
           : (JSON.stringify(e) ?? String(e))
-      return new NamedError.Unknown({ message }, { cause: e }).toObject()
+      return new NamedError.Unknown({ message }, { cause: original }).toObject()
     }
   }
 }

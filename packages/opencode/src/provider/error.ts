@@ -1,4 +1,4 @@
-import { APICallError } from "ai"
+import { APICallError, RetryError } from "ai"
 import { STATUS_CODES } from "http"
 import { iife } from "@/util/iife"
 import type { ProviderID } from "./schema"
@@ -47,6 +47,7 @@ const NON_NETWORK_ERRNO = new Set([
 const TRANSPORT_MESSAGE_PATTERNS = [
   /^fetch failed$/i,
   /^SSE read timed out$/i,
+  /\brequest timed out\b/i,
   /socket hang up/i,
   /response body (?:terminated|closed)/i,
   /other side closed/i,
@@ -92,7 +93,7 @@ export function isAbortError(error: unknown): boolean {
   return (error as { name?: unknown }).name === "AbortError" || code === "ABORT_ERR"
 }
 
-export function summarizeCause(input: unknown): CauseSummary[] {
+export function summarizeCause(input: unknown, options: { includeRetryHistory?: boolean } = {}): CauseSummary[] {
   const seen = new Set<object>()
   const queue: Array<{ value: unknown; depth: number; source: CauseSummary["source"] }> = [
     { value: input, depth: 0, source: "root" },
@@ -102,25 +103,48 @@ export function summarizeCause(input: unknown): CauseSummary[] {
     const node = queue.shift()!
     if (typeof node.value !== "object" || node.value === null || seen.has(node.value)) continue
     seen.add(node.value)
+    if (!options.includeRetryHistory && RetryError.isInstance(node.value)) {
+      const inner = node.value.lastError ?? (Array.isArray(node.value.errors) ? node.value.errors.at(-1) : undefined)
+      if (inner !== undefined && inner !== node.value) {
+        if (node.depth < 8) {
+          queue.unshift({ value: inner, depth: node.depth + 1, source: node.source })
+          if (node.value.cause !== undefined && node.value.cause !== inner)
+            queue.push({ value: node.value.cause, depth: node.depth + 1, source: "cause" })
+        }
+        continue
+      }
+    }
     const object = node.value as {
       name?: unknown
       message?: unknown
       code?: unknown
       status?: unknown
       statusCode?: unknown
+      response?: { status?: unknown }
       cause?: unknown
       errors?: unknown
+      data?: { message?: unknown; statusCode?: unknown; metadata?: { code?: unknown; causeChain?: unknown } }
     }
-    const status = object.statusCode ?? object.status
+    const status = object.data?.statusCode ?? object.statusCode ?? object.status ?? object.response?.status
     const statusCode = typeof status === "string" ? Number.parseInt(status, 10) : status
+    const message = object.data?.message ?? object.message
+    const code = object.data?.metadata?.code ?? object.code
     result.push({
       depth: node.depth,
       name: typeof object.name === "string" ? object.name : undefined,
-      message: typeof object.message === "string" ? object.message : undefined,
-      code: typeof object.code === "string" ? object.code : undefined,
+      message: typeof message === "string" ? message : undefined,
+      code: typeof code === "string" ? code : undefined,
       statusCode: typeof statusCode === "number" && !Number.isNaN(statusCode) ? statusCode : undefined,
       source: node.source,
     })
+    if (node.depth === 0 && typeof object.data?.metadata?.causeChain === "string") {
+      try {
+        const persisted: unknown = JSON.parse(object.data.metadata.causeChain)
+        if (Array.isArray(persisted)) {
+          for (const cause of persisted.slice(0, 16)) queue.push({ value: cause, depth: 1, source: "cause" })
+        }
+      } catch {}
+    }
     if (object.cause !== undefined && node.depth < 8)
       queue.push({ value: object.cause, depth: node.depth + 1, source: "cause" })
     if (Array.isArray(object.errors) && node.depth < 8) {
@@ -140,6 +164,7 @@ export function isRetryableNetworkError(input: unknown): boolean {
   if (chain.some((cause) => (cause.name === "AbortError" && cause.code !== "UND_ERR_ABORTED") || cause.code === "ABORT_ERR")) return false
 
   return chain.some((cause) => {
+    if (cause.statusCode === 408 || cause.statusCode === 504) return true
     const code = cause.code
     if (code && isTransportErrnoCode(code)) return true
     const message = cause.message
@@ -307,11 +332,20 @@ export type ParsedStreamError =
     }
 
 export function parseStreamError(input: unknown): ParsedStreamError | undefined {
-  const body = json(input)
+  const raw = json(input)
+  const body = raw?.type === "error" ? raw : json(raw?.data)
   if (!body) return
 
   const responseBody = JSON.stringify(body)
   if (body.type !== "error") return
+
+  if ([body.error?.code, body.error?.type].some((value) =>
+    value === "context_length_exceeded" || value === "context_window_exceeded",
+  )) return {
+    type: "context_overflow",
+    message: "Input exceeds context window of this model",
+    responseBody,
+  }
 
   switch (body?.error?.code || body?.error?.type) {
     case "overloaded_error":
@@ -322,13 +356,6 @@ export function parseStreamError(input: unknown): ParsedStreamError | undefined 
         type: "api_error",
         message: typeof body?.error?.message === "string" ? body.error.message : "OpenAI server error",
         isRetryable: true,
-        responseBody,
-      }
-    case "context_length_exceeded":
-    case "context_window_exceeded":
-      return {
-        type: "context_overflow",
-        message: "Input exceeds context window of this model",
         responseBody,
       }
     case "insufficient_quota":
